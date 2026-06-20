@@ -9,5 +9,6 @@ let tk = TestKit()
 print("Verse checks\n============")
 runModelChecks(tk)
 runEngineChecks(tk)
+runRecordingChecks(tk)
 
 tk.finish()

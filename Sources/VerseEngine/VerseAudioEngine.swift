@@ -19,6 +19,14 @@ public final class VerseAudioEngine {
     }
     private(set) var trackNodes: [UUID: TrackNodes] = [:]
 
+    // Recording / metering / monitoring / audition state (used by the +Recording extension).
+    let recorder = TakeRecorder()
+    public let masterMeter = LevelMeter()
+    var meters: [UUID: LevelMeter] = [:]
+    var masterMeterInstalled = false
+    var monitorMixer: AVAudioMixerNode?
+    var auditionPlayer: AVAudioPlayerNode?
+
     public init() {}
 
     // MARK: - Lifecycle
@@ -37,6 +45,7 @@ public final class VerseAudioEngine {
         avEngine.prepare()
         try avEngine.start()
         isRunning = true
+        installMeterTaps()   // node formats are valid once running
     }
 
     public func stop() {

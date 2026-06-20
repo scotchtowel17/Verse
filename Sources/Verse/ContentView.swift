@@ -10,7 +10,10 @@ struct ContentView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             header
+            masterMeterRow
             instrumentRow
+            transportRow
+            if !store.takes.isEmpty { takesList }
             Spacer(minLength: 0)
             keyboardHint
             PianoKeyboardView(
@@ -70,6 +73,60 @@ struct ContentView: View {
             Button { store.panic() } label: { Label("Stop sound", systemImage: "stop.circle") }
                 .help("Silence all notes (⌘.)")
         }
+    }
+
+    private var masterMeterRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "speaker.wave.2.fill").foregroundStyle(.secondary)
+            MeterBar(level: store.masterLevel)
+            Text("Main").font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var transportRow: some View {
+        HStack(spacing: 12) {
+            Button {
+                store.toggleRecording()
+            } label: {
+                Label(store.isRecording ? "Stop" : "Record",
+                      systemImage: store.isRecording ? "stop.fill" : "record.circle")
+                    .foregroundStyle(store.isRecording ? .red : .primary)
+            }
+            .keyboardShortcut("r", modifiers: [.command])
+
+            // Input meter (only meaningful while recording)
+            HStack(spacing: 6) {
+                Image(systemName: "mic.fill").foregroundStyle(store.isRecording ? .red : .secondary)
+                MeterBar(level: store.inputLevel).frame(width: 160)
+            }
+
+            Toggle("Hear input", isOn: Binding(
+                get: { store.monitoring }, set: { store.setMonitoring($0) }))
+                .toggleStyle(.switch)
+                .help("Monitor the microphone. Use headphones to avoid feedback.")
+
+            Spacer()
+            if let err = store.recordError {
+                Label(err, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange).lineLimit(1)
+            }
+        }
+    }
+
+    private var takesList: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Recorded takes").font(.caption).foregroundStyle(.secondary)
+            ForEach(store.takes) { take in
+                HStack {
+                    Button { store.play(take) } label: { Image(systemName: "play.circle") }
+                        .buttonStyle(.borderless)
+                    Text(take.label).font(.callout)
+                    Spacer()
+                }
+            }
+        }
+        .padding(8)
+        .background(.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
     }
 
     private var keyboardHint: some View {

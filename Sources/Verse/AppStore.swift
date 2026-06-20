@@ -18,6 +18,30 @@ final class AppStore {
 
     @ObservationIgnored let engine = VerseAudioEngine()
     @ObservationIgnored private var started = false
+    @ObservationIgnored private var meterTimer: Timer?
+
+    // Recording / metering UI state
+    var isRecording = false
+    var monitoring = false
+    var masterLevel: Float = 0
+    var inputLevel: Float = 0
+    var recordError: String?
+    var takes: [Take] = []
+
+    /// Working media directory for captured takes (M3 relocates this into the .verse bundle).
+    @ObservationIgnored lazy var workingMediaDir: URL = {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Verse-working-\(UUID().uuidString)/Media", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    struct Take: Identifiable, Hashable {
+        let id = UUID()
+        let url: URL
+        let seconds: Double
+        var label: String { String(format: "Take · %.1fs", seconds) }
+    }
 
     init() {
         let p = Project.newUntitled()
@@ -35,6 +59,51 @@ final class AppStore {
         engine.configure(with: project)
         do { try engine.start(); started = true }
         catch { engineError = "Couldn’t start audio: \(error.localizedDescription)" }
+        startMeterTimer()
+    }
+
+    private func startMeterTimer() {
+        meterTimer?.invalidate()
+        meterTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.masterLevel = self.engine.masterMeter.displayLevel
+                self.inputLevel = self.isRecording ? self.engine.recordingMeter.displayLevel : 0
+                self.engine.decayMeters()
+            }
+        }
+    }
+
+    // MARK: - Recording
+
+    func toggleRecording() { isRecording ? stopRecording() : startRecording() }
+
+    func startRecording() {
+        recordError = nil
+        let url = workingMediaDir.appendingPathComponent("take-\(Int(Date().timeIntervalSince1970)).caf")
+        do {
+            try engine.startRecording(to: url)
+            isRecording = true
+        } catch {
+            recordError = error.localizedDescription
+        }
+    }
+
+    func stopRecording() {
+        let result = engine.stopRecording()
+        isRecording = false
+        if let url = result.url, result.seconds > 0 {
+            takes.insert(Take(url: url, seconds: result.seconds), at: 0)
+        }
+    }
+
+    func setMonitoring(_ on: Bool) {
+        monitoring = on
+        engine.setMonitoring(on)
+    }
+
+    func play(_ take: Take) {
+        try? engine.playFile(url: take.url)
     }
 
     func newProject() {
