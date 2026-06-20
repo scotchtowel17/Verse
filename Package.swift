@@ -55,10 +55,25 @@ let package = Package(
             swiftSettings: swift5
         ),
 
+        // ── Analysis: Music Understanding (canImport-gated) + manual tap-tempo/key fallback.
+        .target(
+            name: "VerseAnalysis",
+            dependencies: ["VerseModel"],
+            swiftSettings: swift5
+        ),
+
+        // ── Plugins: Audio Unit discovery (insertion lives in VerseEngine). Leaf module.
+        .target(
+            name: "VersePlugins",
+            dependencies: ["VerseModel", "VerseEngine"],
+            swiftSettings: swift5
+        ),
+
         // ── App: @main SwiftUI app + views. Depends on everything; grows per milestone.
         .executableTarget(
             name: "Verse",
-            dependencies: ["VerseModel", "VerseEngine", "VersePersistence", "VerseCommands", "VerseAI"],
+            dependencies: ["VerseModel", "VerseEngine", "VersePersistence", "VerseCommands",
+                           "VerseAI", "VerseAnalysis", "VersePlugins"],
             swiftSettings: swift5
         ),
 
@@ -66,7 +81,8 @@ let package = Package(
         //    Invoked by `swift run VerseCheck`. Grows per milestone.
         .executableTarget(
             name: "VerseCheck",
-            dependencies: ["VerseModel", "VerseEngine", "VersePersistence", "VerseCommands", "VerseAI"],
+            dependencies: ["VerseModel", "VerseEngine", "VersePersistence", "VerseCommands",
+                           "VerseAI", "VerseAnalysis", "VersePlugins"],
             swiftSettings: swift5
         ),
     ]

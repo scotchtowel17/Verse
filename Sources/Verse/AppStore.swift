@@ -8,6 +8,8 @@ import VerseEngine
 import VersePersistence
 import VerseCommands
 import VerseAI
+import VerseAnalysis
+import VersePlugins
 
 /// Top-level observable application state. Owns the project model, the audio engine, and the
 /// crash-recovery workspace. Runs on the main actor; the engine's realtime work happens on
@@ -46,6 +48,14 @@ final class AppStore {
     var copilotPrompt = ""
     var copilotReply = ""
     var copilotMessage: String?
+
+    // Analysis + AU hosting state (M6)
+    var showTools = false
+    var analysisResult: AnalysisResult?
+    var analysisBusy = false
+    @ObservationIgnored var tapState = TapTempo()
+    @ObservationIgnored lazy var installedEffects: [DiscoveredAU] = AudioUnitDiscovery.effects()
+    var musicUnderstandingAvailable: Bool { Analysis.isMusicUnderstandingAvailable }
 
     @ObservationIgnored let engine = VerseAudioEngine()
     @ObservationIgnored let recovery = RecoveryManager()
@@ -423,6 +433,57 @@ final class AppStore {
         project = next
         syncEngineToProject()
         statusMessage = "Redid the change."
+    }
+
+    // MARK: - Analysis + AU hosting (M6)
+
+    func analyzeLastTake() {
+        guard let take = takes.first else {
+            analysisResult = nil
+            statusMessage = "Record a take first, then analyze it."
+            return
+        }
+        analysisBusy = true
+        let url = take.url
+        Task { [weak self] in
+            let r = await Analysis.analyze(url: url)
+            await MainActor.run {
+                guard let self else { return }
+                self.analysisResult = r
+                if let bpm = r.tempoBPM { self.project.tempoBPM = (bpm * 10).rounded() / 10 }
+                if let k = r.key { self.project.key = k }
+                self.analysisBusy = false
+            }
+        }
+    }
+
+    func tapTempo() {
+        if let bpm = tapState.tap(at: ProcessInfo.processInfo.systemUptime) {
+            project.tempoBPM = (bpm * 10).rounded() / 10
+        }
+    }
+    func resetTapTempo() { tapState.reset() }
+
+    func setKey(tonic: Tonic, mode: Mode) {
+        project.key = KeySignature(tonic: tonic, mode: mode)
+        recovery.autosave(project)
+    }
+
+    func hostEffect(_ au: DiscoveredAU) {
+        let tid = activeTrackID
+        statusMessage = "Loading \(au.name)…"
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.engine.insertHostedEffect(au.componentDescription, trackID: tid)
+                await MainActor.run {
+                    self.trackEffects[tid] = .none   // built-in picker now shows None; a hosted unit is in place
+                    self.statusMessage = "Inserted “\(au.name)” on \(self.project.track(id: tid)?.name ?? "track")."
+                }
+            } catch {
+                await MainActor.run { self.statusMessage = "Couldn’t load \(au.name): \(error.localizedDescription)" }
+            }
+        }
     }
 
     /// Rebuild the engine graph + mixer from the current project (after a patch/undo/redo).

@@ -45,6 +45,9 @@ struct ContentView: View {
         .sheet(isPresented: Binding(get: { store.showCopilot }, set: { store.showCopilot = $0 })) {
             CopilotPanel()
         }
+        .sheet(isPresented: Binding(get: { store.showTools }, set: { store.showTools = $0 })) {
+            ToolsPanel()
+        }
     }
 
     private var header: some View {
@@ -55,6 +58,8 @@ struct ContentView: View {
                 Text(status).font(.caption).foregroundStyle(.tertiary).lineLimit(1)
             }
             Spacer()
+            Button { store.showTools = true } label: { Label("Tune & Tools", systemImage: "slider.horizontal.3") }
+                .help("Analyze a take, tap tempo, pick key, host Audio Units")
             Button { store.showCopilot = true } label: { Label("Ask Claude", systemImage: "sparkles") }
                 .help("Songwriting copilot — uses your existing Claude, no API key")
             if let err = store.engineError {
