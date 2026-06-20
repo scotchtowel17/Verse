@@ -8,5 +8,6 @@ let tk = TestKit()
 
 print("Verse checks\n============")
 runModelChecks(tk)
+runEngineChecks(tk)
 
 tk.finish()

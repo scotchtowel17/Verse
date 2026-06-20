@@ -39,7 +39,8 @@ Allowlist: `MIT`, `Apache-2.0`, `BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `0BSD`, `
 - Caveat: NOT public domain (CC0). Sample provenance is "as good as the information provided
   by the original sources" (unchallenged since 2000). Apple's native SoundFont synth
   mis-renders some modulator-heavy presets — Verse bundles a curated, auditioned subset.
-- SHA-256: `PENDING` (recorded by scripts/fetch-artifacts.sh on download)
+- File: `GeneralUser-GS.sf2` (32 MB), fetched from `mrbumpy409/GeneralUser-GS@main`.
+- SHA-256: `9575028c7a1f589f5770fccc8cff2734566af40cd26ed836944e9a5152688cfe`
 
 ### Basic Pitch CoreML model (hum→MIDI)
 - Source: https://github.com/spotify/basic-pitch (official TF model; re-convert with coremltools),

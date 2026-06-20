@@ -1,0 +1,9 @@
+[
+  { "name": "Grand Piano",    "program": 0,  "bankMSB": 121, "bankLSB": 0, "category": "Keys" },
+  { "name": "Electric Piano", "program": 4,  "bankMSB": 121, "bankLSB": 0, "category": "Keys" },
+  { "name": "Clean Guitar",   "program": 27, "bankMSB": 121, "bankLSB": 0, "category": "Guitar" },
+  { "name": "Finger Bass",    "program": 33, "bankMSB": 121, "bankLSB": 0, "category": "Bass" },
+  { "name": "Warm Pad",       "program": 89, "bankMSB": 121, "bankLSB": 0, "category": "Pad" },
+  { "name": "Strings",        "program": 48, "bankMSB": 121, "bankLSB": 0, "category": "Strings" },
+  { "name": "Drum Kit",       "program": 0,  "bankMSB": 120, "bankLSB": 0, "category": "Drums" }
+]

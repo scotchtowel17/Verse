@@ -24,10 +24,20 @@ let package = Package(
         // ── Model: data model + schema versioning/migration. Imports no UI, no Engine.
         .target(name: "VerseModel", swiftSettings: swift5),
 
+        // ── Engine: AVAudioEngine graph, sampler, recording, metering. Imports no UI.
+        //    Resources/ holds the curated preset manifest and (optionally) the bundled SF2;
+        //    the SF2 is fetched by scripts/fetch-artifacts.sh and is gitignored.
+        .target(
+            name: "VerseEngine",
+            dependencies: ["VerseModel"],
+            resources: [.copy("Resources")],
+            swiftSettings: swift5
+        ),
+
         // ── App: @main SwiftUI app + views. Depends on everything; grows per milestone.
         .executableTarget(
             name: "Verse",
-            dependencies: ["VerseModel"],
+            dependencies: ["VerseModel", "VerseEngine"],
             swiftSettings: swift5
         ),
 
@@ -35,7 +45,7 @@ let package = Package(
         //    Invoked by `swift run VerseCheck`. Grows per milestone.
         .executableTarget(
             name: "VerseCheck",
-            dependencies: ["VerseModel"],
+            dependencies: ["VerseModel", "VerseEngine"],
             swiftSettings: swift5
         ),
     ]

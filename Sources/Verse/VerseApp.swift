@@ -1,8 +1,7 @@
 import SwiftUI
 import VerseModel
 
-/// @main entry point. The window grows feature-by-feature across milestones; at M0 it
-/// proves the SwiftUI app launches, links the model, and shows an empty untitled project.
+/// @main entry point. The window grows feature-by-feature across milestones.
 @main
 struct VerseApp: App {
     @State private var store = AppStore()
@@ -11,7 +10,8 @@ struct VerseApp: App {
         WindowGroup {
             ContentView()
                 .environment(store)
-                .frame(minWidth: 720, minHeight: 480)
+                .frame(minWidth: 760, minHeight: 520)
+                .onAppear { store.startEngineIfNeeded() }
         }
         .windowResizability(.contentMinSize)
         .commands {
@@ -19,18 +19,10 @@ struct VerseApp: App {
                 Button("New Song") { store.newProject() }
                     .keyboardShortcut("n", modifiers: [.command])
             }
+            CommandMenu("Play") {
+                Button("All Notes Off (panic)") { store.panic() }
+                    .keyboardShortcut(".", modifiers: [.command])
+            }
         }
     }
-}
-
-/// Top-level observable application state. At M0 it just owns the in-memory project;
-/// the engine, persistence, and command stack attach to it in later milestones.
-@MainActor
-@Observable
-final class AppStore {
-    var project: Project
-
-    init() { self.project = .newUntitled() }
-
-    func newProject() { project = .newUntitled() }
 }
