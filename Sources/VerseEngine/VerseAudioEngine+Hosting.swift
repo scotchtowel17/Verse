@@ -16,19 +16,23 @@ public extension VerseAudioEngine {
         }
     }
 
-    /// Instantiate an installed Audio Unit and insert it on a track. Async because AUv3 must be
-    /// instantiated asynchronously.
-    func insertHostedEffect(_ desc: AudioComponentDescription, trackID: UUID) async throws {
-        guard let nodes = trackNodes[trackID], let src = nodes.sampler ?? nodes.player else {
-            throw HostingError.noTrack
-        }
-        let unit: AVAudioUnit = try await withCheckedThrowingContinuation { cont in
+    /// Instantiate an installed Audio Unit asynchronously (may run on any thread/executor).
+    /// This does NOT touch the engine graph — call `insertHostedUnit` on the main thread to wire
+    /// it in, so graph mutation never races with main-thread engine access.
+    static func instantiateUnit(_ desc: AudioComponentDescription) async throws -> AVAudioUnit {
+        try await withCheckedThrowingContinuation { cont in
             AVAudioUnit.instantiate(with: desc, options: []) { unit, error in
                 if let unit { cont.resume(returning: unit) }
                 else { cont.resume(throwing: error ?? HostingError.instantiationFailed) }
             }
         }
+    }
 
+    /// Insert an already-instantiated unit on a track. Call on the main thread (graph mutation).
+    func insertHostedUnit(_ unit: AVAudioUnit, trackID: UUID) throws {
+        guard let nodes = trackNodes[trackID], let src = nodes.sampler ?? nodes.player else {
+            throw HostingError.noTrack
+        }
         // Tear down any existing insert, then wire source → hosted unit → mixer.
         var n = nodes
         if let old = n.effect {

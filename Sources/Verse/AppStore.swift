@@ -476,10 +476,16 @@ final class AppStore {
         Task { [weak self] in
             guard let self else { return }
             do {
-                try await self.engine.insertHostedEffect(au.componentDescription, trackID: tid)
+                // Instantiate off-main; wire into the graph ON main so it can't race.
+                let unit = try await VerseAudioEngine.instantiateUnit(au.componentDescription)
                 await MainActor.run {
-                    self.trackEffects[tid] = VerseAudioEngine.BuiltInEffect.none   // hosted unit is in place
-                    self.statusMessage = "Inserted “\(au.name)” on \(self.project.track(id: tid)?.name ?? "track")."
+                    do {
+                        try self.engine.insertHostedUnit(unit, trackID: tid)
+                        self.trackEffects[tid] = VerseAudioEngine.BuiltInEffect.none
+                        self.statusMessage = "Inserted “\(au.name)” on \(self.project.track(id: tid)?.name ?? "track")."
+                    } catch {
+                        self.statusMessage = "Couldn’t insert \(au.name): \(error.localizedDescription)"
+                    }
                 }
             } catch {
                 await MainActor.run { self.statusMessage = "Couldn’t load \(au.name): \(error.localizedDescription)" }

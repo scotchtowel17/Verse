@@ -65,8 +65,10 @@ func runPluginChecks(_ tk: TestKit) {
         let engine = VerseAudioEngine(); engine.configure(with: project)
 
         runBlocking {
-            do { try await engine.insertHostedEffect(pick.componentDescription, trackID: trackID) }
-            catch { print("   ↳ host insert error: \(error)") }
+            do {
+                let unit = try await VerseAudioEngine.instantiateUnit(pick.componentDescription)
+                try engine.insertHostedUnit(unit, trackID: trackID)
+            } catch { print("   ↳ host insert error: \(error)") }
         }
         tk.expect(engine.hasInsert(trackID: trackID), "hosted AU inserted on the track (\(pick.name))")
 
