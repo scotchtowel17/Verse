@@ -77,34 +77,40 @@ enum MonophonicPitchTracker {
 
         var framePitches: [Int] = []     // MIDI note per frame, -1 = unvoiced
         var frameEnergies: [Float] = []
-        var i = 0
-        while i + frame <= samples.count {
-            let slice = Array(samples[i..<i+frame])
-            var rms: Float = 0
-            vDSP_rmsqv(slice, 1, &rms, vDSP_Length(frame))
-            frameEnergies.append(rms)
-            if rms < 0.01 { framePitches.append(-1); i += hop; continue }   // silence/unvoiced
+        // One unsafe buffer over the whole signal; per-frame work uses pointer offsets only —
+        // no allocation inside the frame or lag loops (important for this DSP hot path).
+        samples.withUnsafeBufferPointer { buf in
+            guard let base = buf.baseAddress else { return }
+            var i = 0
+            while i + frame <= samples.count {
+                let framePtr = base + i
+                var rms: Float = 0
+                vDSP_rmsqv(framePtr, 1, &rms, vDSP_Length(frame))
+                frameEnergies.append(rms)
+                if rms < 0.01 { framePitches.append(-1); i += hop; continue }   // silence/unvoiced
 
-            // Autocorrelation over the lag range; pick the strongest periodic lag.
-            var bestLag = 0
-            var bestCorr: Float = 0
-            var zeroLag: Float = 0
-            vDSP_dotpr(slice, 1, slice, 1, &zeroLag, vDSP_Length(frame))
-            if zeroLag <= 0 { framePitches.append(-1); i += hop; continue }
-            for lag in minLag...maxLag {
-                var corr: Float = 0
-                vDSP_dotpr(slice, 1, Array(slice[lag...]), 1, &corr, vDSP_Length(frame - lag))
-                let norm = corr / zeroLag
-                if norm > bestCorr { bestCorr = norm; bestLag = lag }
+                var zeroLag: Float = 0
+                vDSP_dotpr(framePtr, 1, framePtr, 1, &zeroLag, vDSP_Length(frame))
+                if zeroLag <= 0 { framePitches.append(-1); i += hop; continue }
+
+                // Autocorrelation over the lag range; pick the strongest periodic lag.
+                var bestLag = 0
+                var bestCorr: Float = 0
+                for lag in minLag...maxLag {
+                    var corr: Float = 0
+                    vDSP_dotpr(framePtr, 1, framePtr + lag, 1, &corr, vDSP_Length(frame - lag))
+                    let norm = corr / zeroLag
+                    if norm > bestCorr { bestCorr = norm; bestLag = lag }
+                }
+                if bestCorr < 0.5 || bestLag == 0 {
+                    framePitches.append(-1)
+                } else {
+                    let f0 = sampleRate / Double(bestLag)
+                    let midi = Int((69.0 + 12.0 * log2(f0 / 440.0)).rounded())
+                    framePitches.append((0...127).contains(midi) ? midi : -1)
+                }
+                i += hop
             }
-            if bestCorr < 0.5 || bestLag == 0 {
-                framePitches.append(-1)
-            } else {
-                let f0 = sampleRate / Double(bestLag)
-                let midi = Int((69.0 + 12.0 * log2(f0 / 440.0)).rounded())
-                framePitches.append((0...127).contains(midi) ? midi : -1)
-            }
-            i += hop
         }
 
         // Median-smooth pitches to remove octave/jitter glitches.

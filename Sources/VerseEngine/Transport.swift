@@ -14,7 +14,6 @@ public final class Transport {
     public private(set) var state: State = .stopped
 
     private let engine: VerseAudioEngine
-    private let midiQueue = DispatchQueue(label: "com.verse.transport.midi")
     private var midiWork: [DispatchWorkItem] = []
     private var autoStop: DispatchWorkItem?
     private var loopTimer: Timer?
@@ -62,10 +61,17 @@ public final class Transport {
                     guard onSec >= 0 else { continue }
                     let offSec = onSec + note.lengthBeats * spb
                     let tid = track.id
-                    let on = DispatchWorkItem { self.engine.noteOn(note.pitch, velocity: note.velocity, trackID: tid) }
-                    let off = DispatchWorkItem { self.engine.noteOff(note.pitch, trackID: tid) }
-                    midiQueue.asyncAfter(deadline: midiAnchor + onSec, execute: on)
-                    midiQueue.asyncAfter(deadline: midiAnchor + offSec, execute: off)
+                    // Schedule on MAIN so all engine/trackNodes access stays single-threaded
+                    // (no race with main-thread setEffect/removeTrack/addTrack). Note events are
+                    // cheap startNote/stopNote calls.
+                    let on = DispatchWorkItem {
+                        MainActor.assumeIsolated { self.engine.noteOn(note.pitch, velocity: note.velocity, trackID: tid) }
+                    }
+                    let off = DispatchWorkItem {
+                        MainActor.assumeIsolated { self.engine.noteOff(note.pitch, trackID: tid) }
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: midiAnchor + onSec, execute: on)
+                    DispatchQueue.main.asyncAfter(deadline: midiAnchor + offSec, execute: off)
                     midiWork.append(on); midiWork.append(off)
                     endSeconds = max(endSeconds, offSec)
                 }

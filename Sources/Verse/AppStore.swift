@@ -171,14 +171,16 @@ final class AppStore {
     func openPackage(_ url: URL) {
         do {
             let loaded = try ProjectPackage.read(url)
-            _ = try? ProjectPackage.extractMedia(from: url, to: workingMediaDir)
+            let failedMedia = (try? ProjectPackage.extractMedia(from: url, to: workingMediaDir)) ?? []
             project = loaded
             currentPackageURL = url
             activeTrackID = project.tracks.first(where: { $0.kind == .instrument })?.id
                 ?? project.tracks.first?.id ?? UUID()
             engine.reconfigure(with: project)
             rebuildTakesFromModel()
-            statusMessage = "Opened “\(documentName)”."
+            statusMessage = failedMedia.isEmpty
+                ? "Opened “\(documentName)”."
+                : "Opened “\(documentName)” — \(failedMedia.count) audio file(s) couldn’t be loaded."
         } catch {
             statusMessage = "Couldn’t open: \(error.localizedDescription)"
         }
@@ -202,8 +204,11 @@ final class AppStore {
 
     private func writePackage(to url: URL) {
         do {
-            try ProjectPackage.write(project, to: url, mediaSourceDir: workingMediaDir)
-            statusMessage = "Saved “\(url.deletingPathExtension().lastPathComponent)”."
+            let skipped = try ProjectPackage.write(project, to: url, mediaSourceDir: workingMediaDir)
+            let name = url.deletingPathExtension().lastPathComponent
+            statusMessage = skipped.isEmpty
+                ? "Saved “\(name)”."
+                : "Saved “\(name)” — but \(skipped.count) audio file(s) couldn’t be included."
         } catch {
             statusMessage = "Couldn’t save: \(error.localizedDescription)"
         }

@@ -92,7 +92,7 @@ func crashWriter(dir: String) -> Never {
     let rec = RecoveryManager(baseDir: base)
     rec.beginSession()
     let takeURL = rec.newTakeURL()
-    try? writeSineCAF(to: takeURL, seconds: 0.5)
+    _ = try? writeSineCAF(to: takeURL, seconds: 0.5)
     rec.noteRecordingStarted(takeFilename: takeURL.lastPathComponent)
     var edited = Project.newUntitled()
     edited.title = "CRASH EDIT"

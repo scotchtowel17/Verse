@@ -30,8 +30,10 @@ public enum ProjectPackage {
     }
 
     /// Atomically write `project` to a `.verse` package, copying referenced media from
-    /// `mediaSourceDir` into the package's `Media/`.
-    public static func write(_ project: Project, to url: URL, mediaSourceDir: URL?) throws {
+    /// `mediaSourceDir` into the package's `Media/`. Returns the names of any referenced media
+    /// that could NOT be read (so the caller can warn the user rather than silently lose audio).
+    @discardableResult
+    public static func write(_ project: Project, to url: URL, mediaSourceDir: URL?) throws -> [String] {
         var proj = project
         proj.modifiedAt = Date()
         let json = try proj.jsonData()
@@ -42,10 +44,11 @@ public enum ProjectPackage {
         jsonWrapper.preferredFilename = projectFile
         root.addFileWrapper(jsonWrapper)
 
-        // Media/: copy every file referenced by a clip.
+        // Media/: copy every file referenced by a clip; record any that can't be read.
         let referenced = Set(project.tracks.flatMap { $0.clips.compactMap { $0.mediaFile } })
         let mediaWrapper = FileWrapper(directoryWithFileWrappers: [:])
         mediaWrapper.preferredFilename = mediaDirName
+        var skipped: [String] = []
         if let src = mediaSourceDir {
             for name in referenced.sorted() {
                 let fileURL = src.appendingPathComponent(name)
@@ -53,6 +56,8 @@ public enum ProjectPackage {
                     let w = FileWrapper(regularFileWithContents: data)
                     w.preferredFilename = name
                     mediaWrapper.addFileWrapper(w)
+                } else {
+                    skipped.append(name)
                 }
             }
         }
@@ -67,6 +72,7 @@ public enum ProjectPackage {
 
         let original = FileManager.default.fileExists(atPath: url.path) ? url : nil
         try root.write(to: url, options: [.atomic], originalContentsURL: original)
+        return skipped
     }
 
     /// Read and migrate the project model from a `.verse` package.
@@ -84,18 +90,21 @@ public enum ProjectPackage {
         packageURL.appendingPathComponent(mediaDirName, isDirectory: true)
     }
 
-    /// Copy a package's media into a working directory and return that directory.
+    /// Copy a package's media into a working directory. Returns the names of any items that
+    /// failed to copy (so the caller can warn rather than silently present an unplayable take).
     @discardableResult
-    public static func extractMedia(from packageURL: URL, to workingMediaDir: URL) throws -> URL {
+    public static func extractMedia(from packageURL: URL, to workingMediaDir: URL) throws -> [String] {
         try FileManager.default.createDirectory(at: workingMediaDir, withIntermediateDirectories: true)
         let media = mediaURL(in: packageURL)
+        var failed: [String] = []
         if let items = try? FileManager.default.contentsOfDirectory(at: media, includingPropertiesForKeys: nil) {
             for item in items {
                 let dst = workingMediaDir.appendingPathComponent(item.lastPathComponent)
                 try? FileManager.default.removeItem(at: dst)
-                try? FileManager.default.copyItem(at: item, to: dst)
+                do { try FileManager.default.copyItem(at: item, to: dst) }
+                catch { failed.append(item.lastPathComponent) }
             }
         }
-        return workingMediaDir
+        return failed
     }
 }
