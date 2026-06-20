@@ -2,17 +2,16 @@ import SwiftUI
 import VerseModel
 import VerseEngine
 
-/// M1 workspace: pick an instrument, then play it with the on-screen piano or the computer
-/// keyboard. Grows into the full multitrack workspace in later milestones.
+/// The Verse workspace: transport, multitrack mixer, recorded takes, and a playable keyboard
+/// for the selected instrument track.
 struct ContentView: View {
     @Environment(AppStore.self) private var store
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             header
-            masterMeterRow
-            instrumentRow
-            transportRow
+            TransportBar()
+            TrackListView()
             if !store.takes.isEmpty { takesList }
             Spacer(minLength: 0)
             keyboardHint
@@ -23,7 +22,6 @@ struct ContentView: View {
                 noteOn: { store.noteOn($0) },
                 noteOff: { store.noteOff($0) }
             )
-            // Invisible first-responder view that turns computer keystrokes into notes.
             KeyboardInput(
                 noteOn: { semi in store.noteOn(store.baseOctaveC + semi) },
                 noteOff: { semi in store.noteOff(store.baseOctaveC + semi) },
@@ -34,7 +32,7 @@ struct ContentView: View {
             )
             .frame(height: 0)
         }
-        .padding(20)
+        .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .alert("Recover unsaved work?",
                isPresented: Binding(get: { store.pendingRecovery != nil },
@@ -48,78 +46,18 @@ struct ContentView: View {
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text("Verse").font(.system(size: 28, weight: .bold, design: .rounded))
+            Text("Verse").font(.system(size: 26, weight: .bold, design: .rounded))
             Text("“\(store.documentName)”").foregroundStyle(.secondary)
             if let status = store.statusMessage {
-                Text(status).font(.caption).foregroundStyle(.tertiary)
+                Text(status).font(.caption).foregroundStyle(.tertiary).lineLimit(1)
             }
             Spacer()
             if let err = store.engineError {
                 Label(err, systemImage: "exclamationmark.triangle.fill")
                     .font(.callout).foregroundStyle(.orange)
             } else {
-                Label(store.sf2Bundled ? "GeneralUser GS" : "Built-in voice",
-                      systemImage: "pianokeys")
-                    .font(.callout).foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private var instrumentRow: some View {
-        HStack(spacing: 10) {
-            Text("Sound:").foregroundStyle(.secondary)
-            Picker("Sound", selection: Binding(
-                get: { store.currentPresetName },
-                set: { name in
-                    if let p = store.presets.first(where: { $0.name == name }) { store.selectPreset(p) }
-                })) {
-                ForEach(store.presets, id: \.name) { p in
-                    Text(p.name).tag(p.name)
-                }
-            }
-            .labelsHidden()
-            .frame(maxWidth: 240)
-
-            Spacer()
-            Button { store.panic() } label: { Label("Stop sound", systemImage: "stop.circle") }
-                .help("Silence all notes (⌘.)")
-        }
-    }
-
-    private var masterMeterRow: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "speaker.wave.2.fill").foregroundStyle(.secondary)
-            MeterBar(level: store.masterLevel)
-            Text("Main").font(.caption).foregroundStyle(.secondary)
-        }
-    }
-
-    private var transportRow: some View {
-        HStack(spacing: 12) {
-            Button {
-                store.toggleRecording()
-            } label: {
-                Label(store.isRecording ? "Stop" : "Record",
-                      systemImage: store.isRecording ? "stop.fill" : "record.circle")
-                    .foregroundStyle(store.isRecording ? .red : .primary)
-            }
-            .keyboardShortcut("r", modifiers: [.command])
-
-            // Input meter (only meaningful while recording)
-            HStack(spacing: 6) {
-                Image(systemName: "mic.fill").foregroundStyle(store.isRecording ? .red : .secondary)
-                MeterBar(level: store.inputLevel).frame(width: 160)
-            }
-
-            Toggle("Hear input", isOn: Binding(
-                get: { store.monitoring }, set: { store.setMonitoring($0) }))
-                .toggleStyle(.switch)
-                .help("Monitor the microphone. Use headphones to avoid feedback.")
-
-            Spacer()
-            if let err = store.recordError {
-                Label(err, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(.orange).lineLimit(1)
+                Label(store.sf2Bundled ? "GeneralUser GS" : "Built-in voice", systemImage: "waveform.circle")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
     }
@@ -132,6 +70,7 @@ struct ContentView: View {
                     Button { store.play(take) } label: { Image(systemName: "play.circle") }
                         .buttonStyle(.borderless)
                     Text(take.label).font(.callout)
+                    if let err = store.recordError { Text(err).font(.caption).foregroundStyle(.orange) }
                     Spacer()
                 }
             }
@@ -141,8 +80,12 @@ struct ContentView: View {
     }
 
     private var keyboardHint: some View {
-        Text("Play with the keys **A–K** (white) and **W E T Y U** (black). Press **Z/X** to change octave. Or click the piano below.")
-            .font(.footnote)
-            .foregroundStyle(.secondary)
+        HStack {
+            Text("Playing **\(store.currentPresetName)** — keys **A–K** / **W E T Y U**, **Z/X** octave, or click below.")
+                .font(.footnote).foregroundStyle(.secondary)
+            Spacer()
+            Button { store.panic() } label: { Label("Stop sound", systemImage: "stop.circle") }
+                .controlSize(.small).help("Silence all notes (⌘.)")
+        }
     }
 }

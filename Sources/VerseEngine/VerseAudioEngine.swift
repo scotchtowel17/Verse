@@ -4,8 +4,10 @@ import VerseModel
 
 /// The audio engine — the single source of truth for sound (Build Contract §4, §11).
 ///
-/// Wraps an `AVAudioEngine` node graph: each instrument track is an `AVAudioUnitSampler`
-/// feeding a per-track `AVAudioMixerNode`, all summing into `mainMixerNode → outputNode`.
+/// Wraps an `AVAudioEngine` node graph. Each track owns an `AVAudioMixerNode` (per-track
+/// volume/pan) summing into `mainMixerNode → outputNode`:
+///   • instrument tracks: `AVAudioUnitSampler → [effect] → trackMixer`
+///   • audio tracks:      `AVAudioPlayerNode  → [effect] → trackMixer`
 /// No custom realtime DSP and no Swift↔C++ interop. Control methods run on the main thread;
 /// the realtime render thread is owned by Apple's nodes (we never write a render callback).
 public final class VerseAudioEngine {
@@ -14,10 +16,13 @@ public final class VerseAudioEngine {
     public internal(set) var isRunning = false
 
     struct TrackNodes {
-        let sampler: AVAudioUnitSampler
+        var sampler: AVAudioUnitSampler?     // instrument tracks
+        var player: AVAudioPlayerNode?       // audio tracks
+        var effect: AVAudioUnit?             // optional inserted effect (built-in or hosted)
         let mixer: AVAudioMixerNode
+        var source: AVAudioNode { sampler ?? player ?? mixer }
     }
-    private(set) var trackNodes: [UUID: TrackNodes] = [:]
+    var trackNodes: [UUID: TrackNodes] = [:]
 
     // Recording / metering / monitoring / audition state (used by the +Recording extension).
     let recorder = TakeRecorder()
@@ -31,10 +36,13 @@ public final class VerseAudioEngine {
 
     // MARK: - Lifecycle
 
-    /// Build the graph for a project (instrument tracks) without starting playback.
+    /// Build the graph for a project (instrument + audio tracks) without starting playback.
     public func configure(with project: Project) {
-        for track in project.tracks where track.kind == .instrument {
-            addInstrumentTrack(id: track.id, instrument: track.instrument)
+        for track in project.tracks {
+            switch track.kind {
+            case .instrument: addInstrumentTrack(id: track.id, instrument: track.instrument)
+            case .audio:      addAudioTrack(id: track.id)
+            }
             applyMix(track)
         }
         setMasterVolume(project.masterVolume)
@@ -63,14 +71,30 @@ public final class VerseAudioEngine {
         let mixer = AVAudioMixerNode()
         avEngine.attach(sampler)
         avEngine.attach(mixer)
-        // Connect with nil format so the engine adopts the source node's native format,
-        // then route the per-track submix into the main mixer (Build Contract §4.3).
         avEngine.connect(sampler, to: mixer, format: nil)
         avEngine.connect(mixer, to: avEngine.mainMixerNode, format: nil)
-        trackNodes[id] = TrackNodes(sampler: sampler, mixer: mixer)
+        trackNodes[id] = TrackNodes(sampler: sampler, player: nil, effect: nil, mixer: mixer)
         loadInstrument(id: id, instrument: instrument ?? .grandPiano)
+        if isRunning { installMeterTaps() }
         return true
     }
+
+    @discardableResult
+    public func addAudioTrack(id: UUID) -> Bool {
+        guard trackNodes[id] == nil else { return false }
+        let player = AVAudioPlayerNode()
+        let mixer = AVAudioMixerNode()
+        avEngine.attach(player)
+        avEngine.attach(mixer)
+        avEngine.connect(player, to: mixer, format: nil)
+        avEngine.connect(mixer, to: avEngine.mainMixerNode, format: nil)
+        trackNodes[id] = TrackNodes(sampler: nil, player: player, effect: nil, mixer: mixer)
+        if isRunning { installMeterTaps() }
+        return true
+    }
+
+    public func playerNode(for trackID: UUID) -> AVAudioPlayerNode? { trackNodes[trackID]?.player }
+    public var allTrackIDs: [UUID] { Array(trackNodes.keys) }
 
     /// Tear down all track nodes (e.g. before loading a different project).
     public func reset() {
@@ -88,29 +112,31 @@ public final class VerseAudioEngine {
 
     public func removeTrack(id: UUID) {
         guard let nodes = trackNodes[id] else { return }
-        avEngine.disconnectNodeOutput(nodes.sampler)
+        nodes.player?.stop()
+        if let s = nodes.sampler { avEngine.disconnectNodeOutput(s); avEngine.detach(s) }
+        if let p = nodes.player { avEngine.disconnectNodeOutput(p); avEngine.detach(p) }
+        if let e = nodes.effect { avEngine.disconnectNodeOutput(e); avEngine.detach(e) }
         avEngine.disconnectNodeOutput(nodes.mixer)
-        avEngine.detach(nodes.sampler)
         avEngine.detach(nodes.mixer)
         trackNodes[id] = nil
+        meters[id] = nil
     }
 
     /// Load a sound-bank instrument (GeneralUser GS SF2). Falls back silently to the sampler's
     /// built-in default voice if the SF2 isn't bundled or a preset triplet doesn't exist —
     /// so the "hear sound" path never blocks (Build Contract §9).
     public func loadInstrument(id: UUID, instrument: Instrument) {
-        guard let nodes = trackNodes[id] else { return }
+        guard let sampler = trackNodes[id]?.sampler else { return }
         guard instrument.sf2 == SoundBank.generalUserGS, let url = SoundBank.generalUserGSURL else {
             return // default voice
         }
         do {
-            try nodes.sampler.loadSoundBankInstrument(
+            try sampler.loadSoundBankInstrument(
                 at: url,
                 program: UInt8(clamping: instrument.program),
                 bankMSB: UInt8(clamping: instrument.bankMSB),
                 bankLSB: UInt8(clamping: instrument.bankLSB))
         } catch {
-            // Not realtime: console log only. Common cause is -10851 (preset triplet absent).
             print("[VerseEngine] SF2 load failed for program \(instrument.program): \(error). Using default voice.")
         }
     }
@@ -118,18 +144,19 @@ public final class VerseAudioEngine {
     // MARK: - Notes
 
     public func noteOn(_ pitch: Int, velocity: Int = 90, trackID: UUID) {
-        trackNodes[trackID]?.sampler.startNote(UInt8(clamping: pitch),
-                                               withVelocity: UInt8(clamping: max(1, velocity)),
-                                               onChannel: 0)
+        trackNodes[trackID]?.sampler?.startNote(UInt8(clamping: pitch),
+                                                withVelocity: UInt8(clamping: max(1, velocity)),
+                                                onChannel: 0)
     }
 
     public func noteOff(_ pitch: Int, trackID: UUID) {
-        trackNodes[trackID]?.sampler.stopNote(UInt8(clamping: pitch), onChannel: 0)
+        trackNodes[trackID]?.sampler?.stopNote(UInt8(clamping: pitch), onChannel: 0)
     }
 
     public func allNotesOff() {
         for (_, nodes) in trackNodes {
-            for pitch in 0...127 { nodes.sampler.stopNote(UInt8(pitch), onChannel: 0) }
+            guard let sampler = nodes.sampler else { continue }
+            for pitch in 0...127 { sampler.stopNote(UInt8(pitch), onChannel: 0) }
         }
     }
 
@@ -137,7 +164,8 @@ public final class VerseAudioEngine {
 
     public func applyMix(_ track: Track) {
         guard let nodes = trackNodes[track.id] else { return }
-        nodes.mixer.outputVolume = Float(track.mute ? 0 : track.volume)
+        let solos = false // solo handled at the AppStore level via effective mute
+        nodes.mixer.outputVolume = Float((track.mute && !solos) ? 0 : track.volume)
         nodes.mixer.pan = Float(max(-1, min(1, track.pan)))
     }
 
@@ -153,5 +181,6 @@ public final class VerseAudioEngine {
         avEngine.mainMixerNode.outputVolume = Float(max(0, min(1, volume)))
     }
 
-    public func samplerExists(for trackID: UUID) -> Bool { trackNodes[trackID] != nil }
+    public func samplerExists(for trackID: UUID) -> Bool { trackNodes[trackID]?.sampler != nil }
+    public func trackExists(_ trackID: UUID) -> Bool { trackNodes[trackID] != nil }
 }

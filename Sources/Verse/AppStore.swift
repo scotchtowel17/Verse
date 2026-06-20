@@ -32,8 +32,16 @@ final class AppStore {
     var pendingRecovery: RecoveryManager.RecoveryInfo?
     var statusMessage: String?
 
+    // Transport / multitrack state
+    var isPlaying = false
+    var metronomeOn = false
+    var loopOn = false
+    var trackLevels: [UUID: Float] = [:]
+    var trackEffects: [UUID: VerseAudioEngine.BuiltInEffect] = [:]
+
     @ObservationIgnored let engine = VerseAudioEngine()
     @ObservationIgnored let recovery = RecoveryManager()
+    @ObservationIgnored lazy var transport = Transport(engine: engine)
     @ObservationIgnored private var started = false
     @ObservationIgnored private var meterTimer: Timer?
     @ObservationIgnored private var autosaveTimer: Timer?
@@ -69,6 +77,7 @@ final class AppStore {
         engine.configure(with: project)
         do { try engine.start(); started = true }
         catch { engineError = "Couldn’t start audio: \(error.localizedDescription)" }
+        transport.onStop = { [weak self] in MainActor.assumeIsolated { self?.isPlaying = false } }
         startTimers()
         observeTermination()
     }
@@ -80,6 +89,7 @@ final class AppStore {
                 guard let self else { return }
                 self.masterLevel = self.engine.masterMeter.displayLevel
                 self.inputLevel = self.isRecording ? self.engine.recordingMeter.displayLevel : 0
+                for id in self.engine.allTrackIDs { self.trackLevels[id] = self.engine.meter(for: id)?.displayLevel ?? 0 }
                 self.engine.decayMeters()
             }
         }
@@ -196,13 +206,14 @@ final class AppStore {
 
     // MARK: - Instrument selection
 
-    func selectPreset(_ preset: SoundBank.Preset) {
-        guard let idx = project.trackIndex(id: activeTrackID) else { return }
+    func selectPreset(_ preset: SoundBank.Preset, for id: UUID? = nil) {
+        let tid = id ?? activeTrackID
+        guard let idx = project.trackIndex(id: tid) else { return }
         let inst = Instrument(sf2: SoundBank.generalUserGS,
                               program: preset.program, bankMSB: preset.bankMSB, bankLSB: preset.bankLSB)
         project.tracks[idx].instrument = inst
         project.tracks[idx].name = preset.name
-        engine.loadInstrument(id: activeTrackID, instrument: inst)
+        engine.loadInstrument(id: tid, instrument: inst)
         recovery.autosave(project)
     }
     var currentPresetName: String { activeTrack?.name ?? "Instrument" }
@@ -242,7 +253,9 @@ final class AppStore {
 
     private func recordingsTrackIndex() -> Int {
         if let i = project.tracks.firstIndex(where: { $0.kind == .audio && $0.name == "Recordings" }) { return i }
-        project.tracks.append(Track(kind: .audio, name: "Recordings"))
+        let t = Track(kind: .audio, name: "Recordings")
+        project.tracks.append(t)
+        engine.addAudioTrack(id: t.id)
         return project.tracks.count - 1
     }
 
@@ -271,4 +284,90 @@ final class AppStore {
             }
         }
     }
+
+    // MARK: - Transport (M4)
+
+    func togglePlay() { isPlaying ? stopPlayback() : startPlayback() }
+
+    func startPlayback() {
+        transport.metronomeEnabled = metronomeOn
+        let end = arrangementBeats
+        let loop: ClosedRange<Double>? = loopOn ? 0...max(4, end) : nil
+        transport.play(project: project, mediaDir: workingMediaDir, from: 0, loop: loop)
+        isPlaying = true
+    }
+
+    func stopPlayback() { transport.stop(); isPlaying = false }
+
+    var arrangementBeats: Double {
+        project.tracks.flatMap { $0.clips }.map { $0.startBeat + $0.lengthBeats }.max() ?? 8
+    }
+
+    func setMetronome(_ on: Bool) { metronomeOn = on; transport.metronomeEnabled = on }
+    func setTempo(_ bpm: Double) { project.tempoBPM = max(20, min(300, bpm)); recovery.autosave(project) }
+
+    // MARK: - Track management (M4)
+
+    func addInstrumentTrack() {
+        let n = project.tracks.filter { $0.kind == .instrument }.count + 1
+        let t = Track(kind: .instrument, name: "Instrument \(n)", instrument: .grandPiano)
+        project.tracks.append(t)
+        engine.addInstrumentTrack(id: t.id, instrument: t.instrument)
+        engine.applyMix(t)
+        activeTrackID = t.id
+        recovery.autosave(project)
+    }
+
+    func addAudioTrack() {
+        let n = project.tracks.filter { $0.kind == .audio }.count + 1
+        let t = Track(kind: .audio, name: "Audio \(n)")
+        project.tracks.append(t)
+        engine.addAudioTrack(id: t.id)
+        engine.applyMix(t)
+        recovery.autosave(project)
+    }
+
+    func deleteTrack(_ id: UUID) {
+        guard project.tracks.count > 1 else { return }
+        engine.removeTrack(id: id)
+        project.tracks.removeAll { $0.id == id }
+        if activeTrackID == id {
+            activeTrackID = project.tracks.first(where: { $0.kind == .instrument })?.id ?? project.tracks.first!.id
+        }
+        recovery.autosave(project)
+    }
+
+    func selectTrack(_ id: UUID) {
+        if project.track(id: id)?.kind == .instrument { activeTrackID = id }
+    }
+
+    // MARK: - Mix with solo logic (M4)
+
+    func setVolume(_ v: Double, _ id: UUID) { mutate(id) { $0.volume = v }; applyEffectiveMix() }
+    func setPan(_ p: Double, _ id: UUID) { mutate(id) { $0.pan = p }; applyEffectiveMix() }
+    func toggleMute(_ id: UUID) { mutate(id) { $0.mute.toggle() }; applyEffectiveMix() }
+    func toggleSolo(_ id: UUID) { mutate(id) { $0.solo.toggle() }; applyEffectiveMix() }
+
+    private func mutate(_ id: UUID, _ f: (inout Track) -> Void) {
+        if let i = project.trackIndex(id: id) { f(&project.tracks[i]) }
+    }
+
+    /// Apply volume/pan to the engine, honoring solo (any solo mutes the non-soloed).
+    func applyEffectiveMix() {
+        let anySolo = project.anySolo
+        for t in project.tracks {
+            let effMute = t.mute || (anySolo && !t.solo)
+            engine.setTrackVolume(t.volume, trackID: t.id, muted: effMute)
+            engine.setTrackPan(t.pan, trackID: t.id)
+        }
+    }
+
+    // MARK: - Effects (M4)
+
+    func setEffect(_ kind: VerseAudioEngine.BuiltInEffect, _ id: UUID) {
+        engine.setEffect(kind, trackID: id)
+        trackEffects[id] = kind
+    }
+    func effect(for id: UUID) -> VerseAudioEngine.BuiltInEffect { trackEffects[id] ?? .none }
+    func trackLevel(_ id: UUID) -> Float { trackLevels[id] ?? 0 }
 }
