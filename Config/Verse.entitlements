@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Microphone / audio input. Required for AVAudioEngine input-node recording. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <!-- App Sandbox is intentionally left OFF for local development with ad-hoc signing,
+         so the app can read/write .verse bundles anywhere without a provisioning profile.
+         For App Store distribution (out of scope) you would enable the sandbox plus
+         com.apple.security.files.user-selected.read-write. -->
+</dict>
+</plist>

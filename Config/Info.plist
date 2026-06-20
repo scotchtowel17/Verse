@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Verse</string>
+    <key>CFBundleDisplayName</key>
+    <string>Verse</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.verse.app</string>
+    <key>CFBundleExecutable</key>
+    <string>Verse</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <!-- Required for AVAudioEngine input-node recording; without this string the OS denies
+         microphone access and the recorder silently fails (Build Contract §13). -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Verse records audio takes (vocals or instruments) from your selected input. Audio stays on your Mac.</string>
+    <!-- Declares the .verse document type so Finder treats the package as a single file. -->
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Verse Song</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSTypeIsPackage</key>
+            <true/>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.verse.song</string>
+            </array>
+        </dict>
+    </array>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.verse.song</string>
+            <key>UTTypeDescription</key>
+            <string>Verse Song</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>com.apple.package</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>verse</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>

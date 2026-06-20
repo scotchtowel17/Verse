@@ -1,0 +1,12 @@
+.build/
+build/
+*.xcodeproj
+*.xcworkspace
+.DS_Store
+.swiftpm/
+Package.resolved.bak
+# Bundled artifacts are fetched by scripts/fetch-artifacts.sh and checksummed; do not commit
+# the large binaries themselves.
+Sources/VerseEngine/Resources/*.sf2
+Sources/VerseAudioToMIDI/Resources/*.mlpackage
+Sources/VerseAudioToMIDI/Resources/*.mlmodelc

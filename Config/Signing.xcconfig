@@ -1,0 +1,19 @@
+// Verse signing configuration (Build Contract §B).
+//
+// This machine has Command Line Tools (no full Xcode) and no paid Apple Developer account,
+// so the build uses LOCAL AD-HOC signing (codesign -s -) via scripts/make-app.sh. That is
+// sufficient to build and run Verse on your own Mac with microphone access. A Team ID and
+// notarization are NOT required and are out of scope (per the project's hard constraints).
+//
+// If you later install full Xcode and want automatic signing with your Apple ID, fill in
+// DEVELOPMENT_TEAM below and open the package in Xcode; CODE_SIGN_STYLE = Automatic will
+// then pick up your logged-in Apple ID. Until then these values document intent only.
+
+// ====== USER (optional) — only needed if you switch to Xcode automatic signing ======
+DEVELOPMENT_TEAM =
+PRODUCT_BUNDLE_IDENTIFIER = com.verse.app
+CODE_SIGN_IDENTITY = -            // "-" = ad-hoc; "Apple Development" once a Team ID is set
+CODE_SIGN_STYLE = Automatic
+MARKETING_VERSION = 0.1.0
+CURRENT_PROJECT_VERSION = 1
+// ====== END USER SECTION ======

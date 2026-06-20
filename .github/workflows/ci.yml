@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: macos-26          # Apple-Silicon macOS runner with Xcode 26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 26
+        run: sudo xcode-select -s /Applications/Xcode_26.app || true
+
+      - name: Resolve SPM dependencies
+        run: swift package resolve
+
+      - name: LICENSE GATE
+        run: bash scripts/license-gate.sh   # fails on any GPL/AGPL/LGPL SPDX
+
+      - name: Build (SwiftPM)
+        run: swift build -c debug
+
+      - name: Test (verse-patch fixtures + model + determinism)
+        run: swift run -c debug VerseCheck   # portable harness (no XCTest dependency)
+
+      - name: Assemble ad-hoc-signed Verse.app
+        run: bash scripts/make-app.sh debug
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Verse-app
+          path: build/Verse.app
+
+  # Distribution (notarization) is intentionally out of scope for this build.
+  # When desired, add a `release` job gated on `secrets.AC_APPLE_ID != ''` that
+  # codesigns with a Developer ID identity and runs `notarytool submit … --wait`.
