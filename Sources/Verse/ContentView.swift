@@ -36,12 +36,23 @@ struct ContentView: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .alert("Recover unsaved work?",
+               isPresented: Binding(get: { store.pendingRecovery != nil },
+                                    set: { if !$0 { store.dismissRecovery() } })) {
+            Button("Recover") { store.applyRecovery() }
+            Button("Discard", role: .destructive) { store.dismissRecovery() }
+        } message: {
+            Text("Verse found work from a session that didn’t close normally — your last edits and any in-progress recording can be restored.")
+        }
     }
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             Text("Verse").font(.system(size: 28, weight: .bold, design: .rounded))
-            Text("“\(store.project.title)”").foregroundStyle(.secondary)
+            Text("“\(store.documentName)”").foregroundStyle(.secondary)
+            if let status = store.statusMessage {
+                Text(status).font(.caption).foregroundStyle(.tertiary)
+            }
             Spacer()
             if let err = store.engineError {
                 Label(err, systemImage: "exclamationmark.triangle.fill")

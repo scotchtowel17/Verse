@@ -72,6 +72,20 @@ public final class VerseAudioEngine {
         return true
     }
 
+    /// Tear down all track nodes (e.g. before loading a different project).
+    public func reset() {
+        allNotesOff()
+        for id in Array(trackNodes.keys) { removeTrack(id: id) }
+        meters.removeAll()
+    }
+
+    /// Rebuild the graph for a different project, preserving the running engine.
+    public func reconfigure(with project: Project) {
+        reset()
+        configure(with: project)
+        if isRunning { installMeterTaps() }
+    }
+
     public func removeTrack(id: UUID) {
         guard let nodes = trackNodes[id] else { return }
         avEngine.disconnectNodeOutput(nodes.sampler)

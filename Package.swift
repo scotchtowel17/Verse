@@ -34,10 +34,17 @@ let package = Package(
             swiftSettings: swift5
         ),
 
+        // ── Persistence: .verse package IO, atomic save, journal + crash recovery. No UI.
+        .target(
+            name: "VersePersistence",
+            dependencies: ["VerseModel"],
+            swiftSettings: swift5
+        ),
+
         // ── App: @main SwiftUI app + views. Depends on everything; grows per milestone.
         .executableTarget(
             name: "Verse",
-            dependencies: ["VerseModel", "VerseEngine"],
+            dependencies: ["VerseModel", "VerseEngine", "VersePersistence"],
             swiftSettings: swift5
         ),
 
@@ -45,7 +52,7 @@ let package = Package(
         //    Invoked by `swift run VerseCheck`. Grows per milestone.
         .executableTarget(
             name: "VerseCheck",
-            dependencies: ["VerseModel", "VerseEngine"],
+            dependencies: ["VerseModel", "VerseEngine", "VersePersistence"],
             swiftSettings: swift5
         ),
     ]

@@ -18,6 +18,14 @@ struct VerseApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("New Song") { store.newProject() }
                     .keyboardShortcut("n", modifiers: [.command])
+                Button("Open…") { store.open() }
+                    .keyboardShortcut("o", modifiers: [.command])
+            }
+            CommandGroup(replacing: .saveItem) {
+                Button("Save") { store.save() }
+                    .keyboardShortcut("s", modifiers: [.command])
+                Button("Save As…") { store.saveAs() }
+                    .keyboardShortcut("s", modifiers: [.command, .shift])
             }
             CommandMenu("Play") {
                 Button("All Notes Off (panic)") { store.panic() }

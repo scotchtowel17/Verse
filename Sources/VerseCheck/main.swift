@@ -1,14 +1,19 @@
 import Foundation
 
-// Verse verification harness. Runs all spec-required checks and exits non-zero on failure.
-// Add new `runXChecks(tk)` calls here as modules land (AI fixtures, engine determinism,
-// persistence/crash-recovery) so one `swift run VerseCheck` covers the whole spec.
+// Verse verification harness. Normally runs all spec-required checks and exits non-zero on
+// failure. Two special subcommands drive the SIGKILL crash-injection test
+// (scripts/crash-recovery-test.sh): `crash-writer <dir>` sets up unclean state and blocks to
+// be killed; `crash-recover <dir>` verifies recovery afterward.
+
+let argv = CommandLine.arguments
+if argv.count >= 3, argv[1] == "crash-writer" { crashWriter(dir: argv[2]) }   // never returns
+if argv.count >= 3, argv[1] == "crash-recover" { crashRecover(dir: argv[2]) } // exits
 
 let tk = TestKit()
-
 print("Verse checks\n============")
 runModelChecks(tk)
 runEngineChecks(tk)
 runRecordingChecks(tk)
+runPersistenceChecks(tk)
 
 tk.finish()
