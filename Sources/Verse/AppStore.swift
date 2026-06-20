@@ -10,6 +10,7 @@ import VerseCommands
 import VerseAI
 import VerseAnalysis
 import VersePlugins
+import VerseAudioToMIDI
 
 /// Top-level observable application state. Owns the project model, the audio engine, and the
 /// crash-recovery workspace. Runs on the main actor; the engine's realtime work happens on
@@ -477,13 +478,40 @@ final class AppStore {
             do {
                 try await self.engine.insertHostedEffect(au.componentDescription, trackID: tid)
                 await MainActor.run {
-                    self.trackEffects[tid] = .none   // built-in picker now shows None; a hosted unit is in place
+                    self.trackEffects[tid] = VerseAudioEngine.BuiltInEffect.none   // hosted unit is in place
                     self.statusMessage = "Inserted “\(au.name)” on \(self.project.track(id: tid)?.name ?? "track")."
                 }
             } catch {
                 await MainActor.run { self.statusMessage = "Couldn’t load \(au.name): \(error.localizedDescription)" }
             }
         }
+    }
+
+    // MARK: - Hum → MIDI (M7)
+
+    var humToMIDIAvailable: Bool { HumToMIDI.isAvailable }
+    var basicPitchAvailable: Bool { HumToMIDI.basicPitchAvailable }
+
+    func humToMIDIFromLastTake() {
+        guard let take = takes.first else {
+            statusMessage = "Record a hum or melody first, then convert it."
+            return
+        }
+        let bpm = project.tempoBPM ?? 120
+        let result = HumToMIDI.convert(url: take.url, bpm: bpm)
+        guard !result.notes.isEmpty else { statusMessage = "Couldn’t find clear notes in that take."; return }
+
+        history.record(project)
+        let end = result.notes.map { $0.startBeat + $0.lengthBeats }.max() ?? 4
+        let clip = Clip(kind: .midi, name: "Hum melody", startBeat: 0,
+                        lengthBeats: max(4, end), midiNotes: result.notes)
+        let track = Track(kind: .instrument, name: "Hum melody", instrument: .grandPiano, clips: [clip])
+        project.tracks.append(track)
+        engine.addInstrumentTrack(id: track.id, instrument: track.instrument)
+        engine.applyMix(track)
+        activeTrackID = track.id
+        recovery.autosave(project)
+        statusMessage = result.message + (result.mode == .basicPitch ? " (Basic Pitch)" : "")
     }
 
     /// Rebuild the engine graph + mixer from the current project (after a patch/undo/redo).

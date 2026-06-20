@@ -1,0 +1,8 @@
+{
+  "model": "Basic Pitch (Spotify) — ICASSP 2022",
+  "license": "Apache-2.0",
+  "bundledModelFile": "BasicPitch.mlpackage (optional; fetched by scripts/fetch-artifacts.sh --with-model)",
+  "input": "audio waveform [1, 43844, 1] @ 22050 Hz mono, feature 'input_2'",
+  "outputs": { "note": "Identity_1 [1,172,88]", "onset": "Identity_2 [1,172,88]", "contour": "Identity [1,172,264]" },
+  "note": "When this artifact is absent, hum-to-MIDI uses the deterministic monophonic fallback."
+}

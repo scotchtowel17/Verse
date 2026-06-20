@@ -49,6 +49,31 @@ so they can be feature-flagged off without breaking the build.
 The CI license gate (`scripts/license-gate.sh`) fails on any GPL/AGPL/LGPL SPDX. All bundled
 content is permissive: see [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).
 
-## Status
+## Features (MVP, M0→M7)
 
-Built milestone by milestone (M0→M7). See `scripts/` and the milestone history in `git log`.
+- Multitrack `AVAudioEngine` graph: instrument + audio tracks, volume/pan/mute/solo, master bus.
+- Bundled GeneralUser GS instruments via `AVAudioUnitSampler` (curated presets; default-voice fallback).
+- On-screen piano + computer-keyboard (musical typing) + transport (play/stop/loop/metronome/tempo).
+- Journaled recording to `.verse` packages, atomic saves, autosave, **SIGKILL crash recovery**.
+- Built-in Apple effects (reverb/echo/crunch/EQ) and hosting of **installed Audio Units**.
+- **Claude copilot** via clipboard `verse-patch` round-trip — no API key, no billing; full undo.
+- Tempo/key analysis (Music Understanding when available; tap-tempo + key picker fallback).
+- **Hum → MIDI**: monophonic melody transcription always; Basic Pitch CoreML when the model is bundled.
+
+## Verify
+
+```bash
+swift run VerseCheck                  # 91 assertions (model, audio, recording, persistence,
+                                      #   verse-patch fixtures, analysis, AU hosting, hum→MIDI)
+bash scripts/crash-recovery-test.sh   # real kill -9 mid-recording → recovers
+bash scripts/license-gate.sh          # fails on any GPL/AGPL/LGPL
+```
+
+## Optional artifacts
+
+```bash
+scripts/fetch-artifacts.sh                 # GeneralUser GS SF2 (already fetched) + checksum
+scripts/fetch-artifacts.sh --with-model    # Basic Pitch CoreML model → enables polyphonic hum→MIDI
+```
+
+Built milestone by milestone (M0→M7); see the history in `git log`.

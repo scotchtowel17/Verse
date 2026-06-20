@@ -19,5 +19,6 @@ runMultitrackChecks(tk)
 runPatchChecks(tk)
 runAnalysisChecks(tk)
 runPluginChecks(tk)
+runHumToMIDIChecks(tk)
 
 tk.finish()

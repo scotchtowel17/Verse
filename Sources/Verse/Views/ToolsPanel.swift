@@ -68,6 +68,18 @@ struct ToolsPanel: View {
                 }.padding(6)
             }
 
+            // Hum → MIDI
+            GroupBox("Hum to MIDI") {
+                HStack {
+                    Button { store.humToMIDIFromLastTake() } label: {
+                        Label("Turn last take into MIDI notes", systemImage: "music.note.list")
+                    }
+                    Spacer()
+                    Text(store.basicPitchAvailable ? "Basic Pitch" : "Melody (monophonic)")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.padding(6)
+            }
+
             // AU hosting
             GroupBox("Insert an installed effect on “\(store.currentPresetName)”") {
                 VStack(alignment: .leading, spacing: 6) {

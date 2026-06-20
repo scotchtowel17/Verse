@@ -69,11 +69,19 @@ let package = Package(
             swiftSettings: swift5
         ),
 
+        // ── AudioToMIDI: Basic Pitch CoreML (gated on artifact) + monophonic fallback. Leaf.
+        .target(
+            name: "VerseAudioToMIDI",
+            dependencies: ["VerseModel"],
+            resources: [.copy("Resources")],
+            swiftSettings: swift5
+        ),
+
         // ── App: @main SwiftUI app + views. Depends on everything; grows per milestone.
         .executableTarget(
             name: "Verse",
             dependencies: ["VerseModel", "VerseEngine", "VersePersistence", "VerseCommands",
-                           "VerseAI", "VerseAnalysis", "VersePlugins"],
+                           "VerseAI", "VerseAnalysis", "VersePlugins", "VerseAudioToMIDI"],
             swiftSettings: swift5
         ),
 
@@ -82,7 +90,7 @@ let package = Package(
         .executableTarget(
             name: "VerseCheck",
             dependencies: ["VerseModel", "VerseEngine", "VersePersistence", "VerseCommands",
-                           "VerseAI", "VerseAnalysis", "VersePlugins"],
+                           "VerseAI", "VerseAnalysis", "VersePlugins", "VerseAudioToMIDI"],
             swiftSettings: swift5
         ),
     ]
