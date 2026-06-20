@@ -16,5 +16,6 @@ runEngineChecks(tk)
 runRecordingChecks(tk)
 runPersistenceChecks(tk)
 runMultitrackChecks(tk)
+runPatchChecks(tk)
 
 tk.finish()

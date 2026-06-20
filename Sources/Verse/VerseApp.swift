@@ -27,9 +27,19 @@ struct VerseApp: App {
                 Button("Save As…") { store.saveAs() }
                     .keyboardShortcut("s", modifiers: [.command, .shift])
             }
+            CommandGroup(replacing: .undoRedo) {
+                Button("Undo") { store.undo() }
+                    .keyboardShortcut("z", modifiers: [.command])
+                    .disabled(!store.canUndo)
+                Button("Redo") { store.redo() }
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
+                    .disabled(!store.canRedo)
+            }
             CommandMenu("Play") {
                 Button("All Notes Off (panic)") { store.panic() }
                     .keyboardShortcut(".", modifiers: [.command])
+                Button("Ask Claude…") { store.showCopilot = true }
+                    .keyboardShortcut("j", modifiers: [.command])
             }
         }
     }

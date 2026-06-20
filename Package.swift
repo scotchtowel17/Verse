@@ -41,10 +41,24 @@ let package = Package(
             swiftSettings: swift5
         ),
 
+        // ── Commands: command pattern + undo/redo. No UI.
+        .target(
+            name: "VerseCommands",
+            dependencies: ["VerseModel"],
+            swiftSettings: swift5
+        ),
+
+        // ── AI: verse-patch request builder, lenient parser, validator, applier. Model+Commands only.
+        .target(
+            name: "VerseAI",
+            dependencies: ["VerseModel", "VerseCommands"],
+            swiftSettings: swift5
+        ),
+
         // ── App: @main SwiftUI app + views. Depends on everything; grows per milestone.
         .executableTarget(
             name: "Verse",
-            dependencies: ["VerseModel", "VerseEngine", "VersePersistence"],
+            dependencies: ["VerseModel", "VerseEngine", "VersePersistence", "VerseCommands", "VerseAI"],
             swiftSettings: swift5
         ),
 
@@ -52,7 +66,7 @@ let package = Package(
         //    Invoked by `swift run VerseCheck`. Grows per milestone.
         .executableTarget(
             name: "VerseCheck",
-            dependencies: ["VerseModel", "VerseEngine", "VersePersistence"],
+            dependencies: ["VerseModel", "VerseEngine", "VersePersistence", "VerseCommands", "VerseAI"],
             swiftSettings: swift5
         ),
     ]

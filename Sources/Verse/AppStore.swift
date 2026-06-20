@@ -6,6 +6,8 @@ import UniformTypeIdentifiers
 import VerseModel
 import VerseEngine
 import VersePersistence
+import VerseCommands
+import VerseAI
 
 /// Top-level observable application state. Owns the project model, the audio engine, and the
 /// crash-recovery workspace. Runs on the main actor; the engine's realtime work happens on
@@ -39,8 +41,15 @@ final class AppStore {
     var trackLevels: [UUID: Float] = [:]
     var trackEffects: [UUID: VerseAudioEngine.BuiltInEffect] = [:]
 
+    // Claude copilot state
+    var showCopilot = false
+    var copilotPrompt = ""
+    var copilotReply = ""
+    var copilotMessage: String?
+
     @ObservationIgnored let engine = VerseAudioEngine()
     @ObservationIgnored let recovery = RecoveryManager()
+    @ObservationIgnored let history = UndoStack<Project>()
     @ObservationIgnored lazy var transport = Transport(engine: engine)
     @ObservationIgnored private var started = false
     @ObservationIgnored private var meterTimer: Timer?
@@ -370,4 +379,60 @@ final class AppStore {
     }
     func effect(for id: UUID) -> VerseAudioEngine.BuiltInEffect { trackEffects[id] ?? .none }
     func trackLevel(_ id: UUID) -> Float { trackLevels[id] ?? 0 }
+
+    // MARK: - Claude copilot (M5)
+
+    func copyRequestToClipboard() {
+        let req = Copilot.buildRequest(project: project, userPrompt: copilotPrompt)
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(req, forType: .string)
+        copilotMessage = "Request copied. Paste it into Claude, then paste Claude’s reply below."
+    }
+
+    func pasteReplyFromClipboard() {
+        copilotReply = NSPasteboard.general.string(forType: .string) ?? ""
+    }
+
+    func applyCopilotReply() {
+        var working = project
+        let outcome = Copilot.apply(reply: copilotReply, to: &working)
+        copilotMessage = outcome.userMessage
+        guard outcome.status == .applied else { return }
+        history.record(project)            // one undo group for the whole patch
+        project = working
+        syncEngineToProject()
+        recovery.autosave(project)
+        copilotReply = ""
+    }
+
+    // MARK: - Undo / redo (M5)
+
+    var canUndo: Bool { history.canUndo }
+    var canRedo: Bool { history.canRedo }
+
+    func undo() {
+        guard let prev = history.undo(current: project) else { return }
+        project = prev
+        syncEngineToProject()
+        statusMessage = "Undid the last change."
+    }
+
+    func redo() {
+        guard let next = history.redo(current: project) else { return }
+        project = next
+        syncEngineToProject()
+        statusMessage = "Redid the change."
+    }
+
+    /// Rebuild the engine graph + mixer from the current project (after a patch/undo/redo).
+    private func syncEngineToProject() {
+        engine.reconfigure(with: project)
+        applyEffectiveMix()
+        rebuildTakesFromModel()
+        if project.track(id: activeTrackID) == nil {
+            activeTrackID = project.tracks.first(where: { $0.kind == .instrument })?.id
+                ?? project.tracks.first?.id ?? activeTrackID
+        }
+    }
 }

@@ -42,6 +42,9 @@ struct ContentView: View {
         } message: {
             Text("Verse found work from a session that didn’t close normally — your last edits and any in-progress recording can be restored.")
         }
+        .sheet(isPresented: Binding(get: { store.showCopilot }, set: { store.showCopilot = $0 })) {
+            CopilotPanel()
+        }
     }
 
     private var header: some View {
@@ -52,6 +55,8 @@ struct ContentView: View {
                 Text(status).font(.caption).foregroundStyle(.tertiary).lineLimit(1)
             }
             Spacer()
+            Button { store.showCopilot = true } label: { Label("Ask Claude", systemImage: "sparkles") }
+                .help("Songwriting copilot — uses your existing Claude, no API key")
             if let err = store.engineError {
                 Label(err, systemImage: "exclamationmark.triangle.fill")
                     .font(.callout).foregroundStyle(.orange)
