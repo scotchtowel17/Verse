@@ -1,7 +1,8 @@
 import SwiftUI
-import VerseModel
+import VerseAppCore
 
 /// @main entry point. The window grows feature-by-feature across milestones.
+/// AppStore, views, and domain logic live in VerseAppCore so VerseCheck can test them.
 @main
 struct VerseApp: App {
     @State private var store = AppStore()

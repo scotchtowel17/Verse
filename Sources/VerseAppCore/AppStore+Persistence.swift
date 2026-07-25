@@ -29,7 +29,7 @@ extension AppStore {
 
     // MARK: New / Open / Save
 
-    func newProject() {
+    public func newProject() {
         engine.allNotesOff()
         let p = Project.newUntitled()
         project = p
@@ -40,7 +40,7 @@ extension AppStore {
         history.clear()
     }
 
-    func open() {
+    public func open() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [Self.verseType]
         panel.canChooseDirectories = true
@@ -69,11 +69,11 @@ extension AppStore {
         }
     }
 
-    func save() {
+    public func save() {
         if let url = currentPackageURL { writePackage(to: url) } else { saveAs() }
     }
 
-    func saveAs() {
+    public func saveAs() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [Self.verseType]
         panel.nameFieldStringValue = "\(project.title).verse"

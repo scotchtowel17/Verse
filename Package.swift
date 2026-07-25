@@ -77,11 +77,19 @@ let package = Package(
             swiftSettings: swift5
         ),
 
-        // ── App: @main SwiftUI app + views. Depends on everything; grows per milestone.
-        .executableTarget(
-            name: "Verse",
+        // ── App core: AppStore + SwiftUI views. Library so VerseCheck can import and test it.
+        //    The Verse executable is a thin @main shim that imports this module.
+        .target(
+            name: "VerseAppCore",
             dependencies: ["VerseModel", "VerseEngine", "VersePersistence", "VerseCommands",
                            "VerseAI", "VerseAnalysis", "VersePlugins", "VerseAudioToMIDI"],
+            swiftSettings: swift5
+        ),
+
+        // ── App: thin @main entry point only. Logic lives in VerseAppCore.
+        .executableTarget(
+            name: "Verse",
+            dependencies: ["VerseAppCore"],
             swiftSettings: swift5
         ),
 
@@ -90,7 +98,8 @@ let package = Package(
         .executableTarget(
             name: "VerseCheck",
             dependencies: ["VerseModel", "VerseEngine", "VersePersistence", "VerseCommands",
-                           "VerseAI", "VerseAnalysis", "VersePlugins", "VerseAudioToMIDI"],
+                           "VerseAI", "VerseAnalysis", "VersePlugins", "VerseAudioToMIDI",
+                           "VerseAppCore"],
             swiftSettings: swift5
         ),
     ]
