@@ -573,7 +573,7 @@ Consider a cursor change over the resize zone so the two behaviours are discover
 4. Draw the transport playhead over the grid during playback if it is cheap. If it is not,
    say so and defer rather than half-building it.
 
-## Step P6 — Snap off, for free manual positioning — PENDING
+## Step P6 — Snap off, for free manual positioning — DONE
 
 Owner request: keep the grid snap for note start and length, but allow turning it OFF so a
 note can be dragged to an exact manual position and length.

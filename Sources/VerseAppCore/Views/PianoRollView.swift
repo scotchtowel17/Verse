@@ -9,8 +9,11 @@ struct PianoRollView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
 
-    /// Snap grid in beats: 1 (1/4), 0.5 (1/8), 0.25 (1/16).
+    /// Snap grid in beats: 0 (Off), 1 (1/4), 0.5 (1/8), 0.25 (1/16). Default 1/16.
     @State private var snapBeats: Double = 0.25
+    /// Last non-zero grid choice; used as new-note length when snap is Off so clicks
+    /// do not produce a 1/32 sliver.
+    @State private var lastGridSnapBeats: Double = 0.25
     @State private var selectedNoteID: UUID?
     @FocusState private var isFocused: Bool
 
@@ -134,14 +137,18 @@ struct PianoRollView: View {
             Text("Snap").font(.callout).foregroundStyle(.secondary)
             // labelsHidden avoids the duplicate “Snap Snap …” toolbar reading.
             Picker("Snap", selection: $snapBeats) {
+                Text("Off").tag(0.0)
                 Text("1/4").tag(1.0)
                 Text("1/8").tag(0.5)
                 Text("1/16").tag(0.25)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 200)
-            .help("Grid snap for note start and length")
+            .frame(width: 260)
+            .help("Grid snap for note start and length. Off allows free placement.")
+            .onChange(of: snapBeats) { _, newValue in
+                if newValue > 0 { lastGridSnapBeats = newValue }
+            }
             Spacer()
             if selectedNoteID != nil {
                 Text("Delete removes selection")
@@ -365,7 +372,7 @@ struct PianoRollView: View {
                 let rawPitch = origin.pitch + pitchDelta
                 let rawStart = origin.startBeat + beatDelta
                 let newPitch = min(127, max(0, rawPitch))
-                let newStart = max(0, snap(rawStart))
+                let newStart = max(0, PianoRollLayout.snap(rawStart, to: snapBeats))
                 store.pianoRollMoveNote(id: note.id, toPitch: newPitch, toStartBeat: newStart)
                 // Keep audition on the live pitch while dragging.
                 store.pianoRollAuditionStart(newPitch)
@@ -406,7 +413,8 @@ struct PianoRollView: View {
                 guard let origin = resizeOrigin, origin.noteID == note.id else { return }
                 let deltaBeats = Double(value.translation.width / beatWidth)
                 let raw = origin.lengthBeats + deltaBeats
-                let snapped = max(Project.minimumNoteLengthBeats, snap(raw))
+                let snapped = max(Project.minimumNoteLengthBeats,
+                                  PianoRollLayout.snap(raw, to: snapBeats))
                 // Keep strictly positive so the model never rejects mid-drag.
                 store.pianoRollResizeNote(id: note.id, toLengthBeats: max(snapped, Project.minimumNoteLengthBeats))
             }
@@ -424,8 +432,9 @@ struct PianoRollView: View {
 
     private func addNote(at location: CGPoint, beatWidth: CGFloat, rowHeight: CGFloat) {
         let pitch = pitchAt(y: location.y, rowHeight: rowHeight)
-        let start = max(0, snap(Double(location.x / beatWidth)))
-        let length = max(snapBeats, Project.minimumNoteLengthBeats)
+        let start = max(0, PianoRollLayout.snap(Double(location.x / beatWidth), to: snapBeats))
+        let length = PianoRollLayout.newNoteLengthBeats(snapBeats: snapBeats,
+                                                        lastGridBeats: lastGridSnapBeats)
         if let id = store.pianoRollAddNote(pitch: pitch, startBeat: start, lengthBeats: length) {
             selectedNoteID = id
             store.pianoRollAuditionStart(pitch)
@@ -453,11 +462,6 @@ struct PianoRollView: View {
         let idx = Int((y / rowHeight).rounded(.down))
         let pitch = pitchHigh - idx
         return min(pitchHigh, max(pitchLow, pitch))
-    }
-
-    private func snap(_ beats: Double) -> Double {
-        guard snapBeats > 0 else { return beats }
-        return (beats / snapBeats).rounded() * snapBeats
     }
 
     private func formatBeat(_ v: Double) -> String {
@@ -515,6 +519,22 @@ public enum PianoRollLayout {
     public static func resizeHandleWidth(noteWidth: CGFloat) -> CGFloat {
         guard noteWidth > 0 else { return 0 }
         return min(resizeHandleMaxWidth, noteWidth * resizeHandleFraction)
+    }
+
+    /// Round `beats` to the snap grid. `snapBeats == 0` means Off: return the value unchanged.
+    public static func snap(_ beats: Double, to snapBeats: Double) -> Double {
+        guard snapBeats > 0 else { return beats }
+        return (beats / snapBeats).rounded() * snapBeats
+    }
+
+    /// Length used when the user clicks to add a note.
+    ///
+    /// With snap on, length is one grid unit. With snap Off, use the last non-zero grid so
+    /// a click does not collapse to the 1/32 minimum and produce an invisible sliver.
+    /// Always floored at `Project.minimumNoteLengthBeats`.
+    public static func newNoteLengthBeats(snapBeats: Double, lastGridBeats: Double) -> Double {
+        let grid = snapBeats > 0 ? snapBeats : lastGridBeats
+        return max(grid, Project.minimumNoteLengthBeats)
     }
 
     /// Inclusive pitch window: always covers every note, at least ~3 octaves, clamped to 0…127.
