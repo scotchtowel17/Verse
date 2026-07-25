@@ -23,7 +23,7 @@ extension AppStore {
 
     /// Parse + validate + render. On success, present the mandatory preview sheet.
     /// Does not mutate the project. Claude’s summary is never the approval text.
-    func applyCopilotReply() {
+    public func applyCopilotReply() {
         switch Copilot.preview(reply: copilotReply, project: project) {
         case .failure(let outcome):
             copilotMessage = outcome.userMessage
@@ -37,7 +37,7 @@ extension AppStore {
     }
 
     /// User confirmed the rendered ops. Re-checks fingerprint, then applies as one undo group.
-    func commitCopilotPreview() {
+    public func commitCopilotPreview() {
         guard let prep = pendingCopilotPreview else {
             showCopilotPreview = false
             return

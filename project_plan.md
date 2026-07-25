@@ -176,7 +176,7 @@ so an always-enabled item is a safe no-op when the stack is empty. A working Cmd
 generic label beats a permanently dead menu item. Say clearly in your report which path you
 took and why.
 
-## Step 9 — Make AppStore testable, then test the undo contract — PENDING
+## Step 9 — Make AppStore testable, then test the undo contract — DONE
 
 Step 8 was a bug that made undo permanently dead and survived every test, because `AppStore`
 lives in the `Verse` executable target and no test target can import an executable. Close that

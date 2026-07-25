@@ -20,9 +20,9 @@ import VerseAudioToMIDI
 /// `AppStore+Transport`, `AppStore+Persistence`, and `AppStore+Copilot`.
 @MainActor
 @Observable
-final class AppStore {
-    var project: Project
-    var activeTrackID: UUID
+public final class AppStore {
+    public var project: Project
+    public var activeTrackID: UUID
     var heldNotes: Set<Int> = []
     var engineError: String?
     var baseOctaveC: Int = 60
@@ -48,15 +48,15 @@ final class AppStore {
     var trackEffects: [UUID: VerseAudioEngine.BuiltInEffect] = [:]
 
     // Claude copilot state
-    var showCopilot = false
+    public var showCopilot = false
     var copilotPrompt = ""
-    var copilotReply = ""
+    public var copilotReply = ""
     var copilotMessage: String?
     /// Mandatory preview sheet is up: transport/record must stay disabled (SwiftUI sheets do
     /// not disable CommandGroup / keyboard shortcuts on their own).
-    var showCopilotPreview = false
+    public var showCopilotPreview = false
     /// Validated preview waiting for Apply / Cancel. Built only from TypedOp values.
-    var pendingCopilotPreview: Copilot.Preview?
+    public var pendingCopilotPreview: Copilot.Preview?
 
     // Analysis + AU hosting state (M6)
     var showTools = false
@@ -67,7 +67,7 @@ final class AppStore {
     var musicUnderstandingAvailable: Bool { Analysis.isMusicUnderstandingAvailable }
 
     @ObservationIgnored let engine = VerseAudioEngine()
-    @ObservationIgnored let recovery = RecoveryManager()
+    @ObservationIgnored let recovery: RecoveryManager
     @ObservationIgnored let history = UndoStack<Project>()
     @ObservationIgnored lazy var transport = Transport(engine: engine)
     @ObservationIgnored private var started = false
@@ -84,7 +84,11 @@ final class AppStore {
         var label: String { String(format: "Take · %.1fs", seconds) }
     }
 
-    init() {
+    /// - Parameter recoveryBaseDir: Optional workspace root for crash recovery. Tests pass a
+    ///   temporary directory so nothing is written under Application Support. When omitted,
+    ///   behavior matches the production default (`RecoveryManager()` Application Support path).
+    public init(recoveryBaseDir: URL? = nil) {
+        self.recovery = RecoveryManager(baseDir: recoveryBaseDir)
         let p = Project.newUntitled()
         self.project = p
         self.activeTrackID = p.tracks.first?.id ?? UUID()
@@ -100,7 +104,7 @@ final class AppStore {
 
     // MARK: - Engine lifecycle
 
-    func startEngineIfNeeded() {
+    public func startEngineIfNeeded() {
         guard !started else { return }
         engine.configure(with: project)
         do { try engine.start(); started = true }
@@ -144,11 +148,11 @@ final class AppStore {
         guard heldNotes.remove(pitch) != nil else { return }
         engine.noteOff(pitch, trackID: activeTrackID)
     }
-    func panic() { engine.allNotesOff(); heldNotes.removeAll() }
+    public func panic() { engine.allNotesOff(); heldNotes.removeAll() }
 
     // MARK: - Instrument selection
 
-    func selectPreset(_ preset: SoundBank.Preset, for id: UUID? = nil) {
+    public func selectPreset(_ preset: SoundBank.Preset, for id: UUID? = nil) {
         let tid = id ?? activeTrackID
         guard let idx = project.trackIndex(id: tid) else { return }
         history.record(project, name: "Select Preset")
@@ -236,19 +240,19 @@ final class AppStore {
 
     // MARK: - Undo / redo (M5)
 
-    var canUndo: Bool { history.canUndo }
-    var canRedo: Bool { history.canRedo }
-    var undoName: String? { history.undoName }
-    var redoName: String? { history.redoName }
+    public var canUndo: Bool { history.canUndo }
+    public var canRedo: Bool { history.canRedo }
+    public var undoName: String? { history.undoName }
+    public var redoName: String? { history.redoName }
 
-    func undo() {
+    public func undo() {
         guard let prev = history.undo(current: project) else { return }
         project = prev
         syncEngineToProject()
         statusMessage = "Undid the last change."
     }
 
-    func redo() {
+    public func redo() {
         guard let next = history.redo(current: project) else { return }
         project = next
         syncEngineToProject()
@@ -288,7 +292,7 @@ final class AppStore {
     }
     func resetTapTempo() { tapState.reset() }
 
-    func setKey(tonic: Tonic, mode: Mode) {
+    public func setKey(tonic: Tonic, mode: Mode) {
         history.record(project, name: "Set Key")
         project.key = KeySignature(tonic: tonic, mode: mode)
         recovery.autosave(project)

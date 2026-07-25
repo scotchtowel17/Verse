@@ -29,7 +29,7 @@ extension AppStore {
     }
 
     func setMetronome(_ on: Bool) { metronomeOn = on; transport.metronomeEnabled = on }
-    func setTempo(_ bpm: Double) {
+    public func setTempo(_ bpm: Double) {
         history.record(project, name: "Set Tempo")
         project.tempoBPM = max(20, min(300, bpm))
         recovery.autosave(project)
@@ -37,7 +37,7 @@ extension AppStore {
 
     // MARK: Track management (M4)
 
-    func addInstrumentTrack() {
+    public func addInstrumentTrack() {
         history.record(project, name: "Add Track")
         let n = project.tracks.filter { $0.kind == .instrument }.count + 1
         let t = Track(kind: .instrument, name: "Instrument \(n)", instrument: .grandPiano)
@@ -48,7 +48,7 @@ extension AppStore {
         recovery.autosave(project)
     }
 
-    func addAudioTrack() {
+    public func addAudioTrack() {
         history.record(project, name: "Add Track")
         let n = project.tracks.filter { $0.kind == .audio }.count + 1
         let t = Track(kind: .audio, name: "Audio \(n)")
@@ -58,7 +58,7 @@ extension AppStore {
         recovery.autosave(project)
     }
 
-    func deleteTrack(_ id: UUID) {
+    public func deleteTrack(_ id: UUID) {
         guard project.tracks.count > 1 else { return }
         history.record(project, name: "Delete Track")
         engine.removeTrack(id: id)
@@ -77,8 +77,8 @@ extension AppStore {
 
     // Continuous slider drags must NOT record undo: each drag fires ~100 calls and would
     // flush the 100-entry stack, destroying the AI-patch undo point.
-    func setVolume(_ v: Double, _ id: UUID) { mutate(id) { $0.volume = v }; applyEffectiveMix() }
-    func setPan(_ p: Double, _ id: UUID) { mutate(id) { $0.pan = p }; applyEffectiveMix() }
+    public func setVolume(_ v: Double, _ id: UUID) { mutate(id) { $0.volume = v }; applyEffectiveMix() }
+    public func setPan(_ p: Double, _ id: UUID) { mutate(id) { $0.pan = p }; applyEffectiveMix() }
     func toggleMute(_ id: UUID) { mutate(id) { $0.mute.toggle() }; applyEffectiveMix() }
     func toggleSolo(_ id: UUID) { mutate(id) { $0.solo.toggle() }; applyEffectiveMix() }
 

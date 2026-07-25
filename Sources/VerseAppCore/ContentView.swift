@@ -4,10 +4,11 @@ import VerseEngine
 
 /// The Verse workspace: transport, multitrack mixer, recorded takes, and a playable keyboard
 /// for the selected instrument track.
-struct ContentView: View {
+public struct ContentView: View {
+    public init() {}
     @Environment(AppStore.self) private var store
 
-    var body: some View {
+    public var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
             TransportBar()
