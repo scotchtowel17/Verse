@@ -31,6 +31,10 @@ public final class VerseAudioEngine {
     var masterMeterInstalled = false
     var monitorMixer: AVAudioMixerNode?
     var auditionPlayer: AVAudioPlayerNode?
+    /// Format used when the audition player was last connected. Reconnect when a new file
+    /// has a different `processingFormat` (sample-rate / channel change), or `scheduleFile`
+    /// raises an uncatchable AVAudioEngine exception.
+    var auditionFormat: AVAudioFormat?
 
     public init() {}
 
@@ -101,6 +105,12 @@ public final class VerseAudioEngine {
         allNotesOff()
         for id in Array(trackNodes.keys) { removeTrack(id: id) }
         meters.removeAll()
+        // Master mixer is not detached, but the tap must still come off before a later
+        // installMeterTaps re-install (and so reconfigure never leaves a stale tap claim).
+        if masterMeterInstalled {
+            avEngine.mainMixerNode.removeTap(onBus: 0)
+            masterMeterInstalled = false
+        }
     }
 
     /// Rebuild the graph for a different project, preserving the running engine.
@@ -113,13 +123,17 @@ public final class VerseAudioEngine {
     public func removeTrack(id: UUID) {
         guard let nodes = trackNodes[id] else { return }
         nodes.player?.stop()
+        // removeTap before detach. Leaving a tap on a detached node crashes on reconfigure.
+        if meters[id] != nil {
+            nodes.mixer.removeTap(onBus: 0)
+            meters[id] = nil
+        }
         if let s = nodes.sampler { avEngine.disconnectNodeOutput(s); avEngine.detach(s) }
         if let p = nodes.player { avEngine.disconnectNodeOutput(p); avEngine.detach(p) }
         if let e = nodes.effect { avEngine.disconnectNodeOutput(e); avEngine.detach(e) }
         avEngine.disconnectNodeOutput(nodes.mixer)
         avEngine.detach(nodes.mixer)
         trackNodes[id] = nil
-        meters[id] = nil
     }
 
     /// Load a sound-bank instrument (GeneralUser GS SF2). Falls back silently to the sampler's
@@ -164,8 +178,8 @@ public final class VerseAudioEngine {
 
     public func applyMix(_ track: Track) {
         guard let nodes = trackNodes[track.id] else { return }
-        let solos = false // solo handled at the AppStore level via effective mute
-        nodes.mixer.outputVolume = Float((track.mute && !solos) ? 0 : track.volume)
+        // Solo is applied as effective mute in AppStore.applyEffectiveMix, not here.
+        nodes.mixer.outputVolume = Float(track.mute ? 0 : track.volume)
         nodes.mixer.pan = Float(max(-1, min(1, track.pan)))
     }
 

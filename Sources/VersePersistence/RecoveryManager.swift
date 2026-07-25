@@ -23,9 +23,18 @@ public final class RecoveryManager {
     private let sessionLockURL: URL
 
     public init(baseDir: URL? = nil) {
-        let base = baseDir ?? FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("Verse", isDirectory: true)
+        // Prefer Application Support. If the system returns no URL (should not happen, but
+        // `.first!` would trap before any UI exists), fall back to the temporary directory.
+        let base: URL
+        if let baseDir {
+            base = baseDir
+        } else if let appSupport = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            base = appSupport.appendingPathComponent("Verse", isDirectory: true)
+        } else {
+            base = FileManager.default.temporaryDirectory
+                .appendingPathComponent("Verse", isDirectory: true)
+        }
         let ws = base.appendingPathComponent("Workspace", isDirectory: true)
         self.workspaceDir = ws
         self.mediaDir = ws.appendingPathComponent("Media", isDirectory: true)

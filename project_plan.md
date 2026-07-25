@@ -268,3 +268,34 @@ takes belonging to other saved projects.
 
 Constraint for both steps: `swift build` clean, `swift run VerseCheck` green, app still bundles
 and launches.
+
+## Step G4 — Crash-shape hardening — DONE
+
+Four small independent fixes from the same review. Two are unreproduced crash shapes; fix them
+because each is a few lines, but do not claim they were observed.
+
+1. **Audition format mismatch (possible hard crash).** `VerseAudioEngine.playFile` connects
+   `auditionPlayer` using the FIRST file's `processingFormat` and reuses that connection for
+   every later file. `scheduleFile` with a mismatched format raises an AVAudioEngine exception
+   that Swift cannot catch. Triggered by changing audio interface or sample rate mid-session and
+   then auditioning an older take. Fix: track the format the audition player is connected with,
+   and when a new file's `processingFormat` differs, disconnect and reconnect at the new format
+   before scheduling.
+2. **Tap removed before detach (possible crash).** `installMeterTaps` installs a tap on each
+   track mixer, but `removeTrack` detaches the mixer without ever calling `removeTap(onBus: 0)`.
+   Only the input node is ever untapped. This path runs on every reconfigure. Fix: call
+   `removeTap(onBus: 0)` on the track mixer (and on the master mixer in `reset()`, resetting
+   `masterMeterInstalled`) before detaching.
+3. **Launch-time force unwrap.** `RecoveryManager.init` does `.first!` on the Application
+   Support URL list. Replace with a graceful fallback (for example the temporary directory)
+   rather than trapping before any UI exists.
+4. **Duplicate track UUIDs load as a permanently silent track.** `configure` calls
+   `addInstrumentTrack`/`addAudioTrack`, which return `false` when the id already exists, and
+   nobody checks the result. A corrupted or hand-edited `.verse` yields a track that is visible
+   but silent forever with no error. Fix: on load, detect duplicate track ids and either
+   re-key them or surface a clear message. Do not fail the open silently.
+5. Also remove the dead `let solos = false` in `VerseAudioEngine.applyMix`, which reads as if
+   solo were handled there when it is handled in `AppStore.applyEffectiveMix`.
+6. Tests where practical: audition across two different formats does not throw; `removeTrack`
+   after `installMeterTaps` leaves no tap installed; `RecoveryManager` still works with an
+   injected base dir; a project with duplicate track ids opens with a clear outcome.
