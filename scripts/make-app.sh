@@ -58,6 +58,26 @@ ensure_sf2() {
 
 ensure_sf2
 
+# MuseScore General SF2: optional higher-quality bank. Bundle only if already present.
+# Never auto-fetch (~206 MB); CI runs this script every push and already fetches GeneralUser.
+# Opt-in: scripts/fetch-artifacts.sh --with-musescore
+MS_DST="$ROOT/Sources/VerseEngine/Resources/MuseScore_General.sf2"
+MS_EXPECTED_SHA="ee51d2c4b1525e70f19a45909c4fd7a2e26d91d115fa89dbf5a6bc413d8b9bf3"
+
+echo "== Optional MuseScore General SF2 =="
+if [ -f "$MS_DST" ]; then
+  ms_got="$(sha256_of "$MS_DST")"
+  if [ "$ms_got" = "$MS_EXPECTED_SHA" ]; then
+    echo "  present and verified ($(du -h "$MS_DST" | awk '{print $1}'))"
+  else
+    echo "  WARNING: existing MuseScore SF2 checksum mismatch (got $ms_got)."
+    echo "  Removing unverified file; not re-fetching (opt-in only)."
+    rm -f "$MS_DST"
+  fi
+else
+  echo "  not present (opt-in via scripts/fetch-artifacts.sh --with-musescore); not fetching"
+fi
+
 echo "== Building Verse ($CONFIG) with SwiftPM =="
 ( cd "$ROOT" && swift build -c "$CONFIG" )
 

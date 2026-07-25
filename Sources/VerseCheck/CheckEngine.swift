@@ -95,6 +95,62 @@ func runEngineChecks(_ tk: TestKit) {
         print("   ↳ loaded drum kits: \(loaded.joined(separator: ", "))")
     }
 
+    // MARK: - Step I2: MuseScore General preferred bank (absence-safe)
+
+    tk.suite("Engine I2: preferred bank name and resolution without requiring MuseScore") {
+        tk.expectEqual(SoundBank.preferredBankName, SoundBank.museScoreGeneral,
+                       "new instruments prefer MuseScore General by name")
+        tk.expectEqual(Instrument.grandPiano.sf2, SoundBank.museScoreGeneral,
+                       "grandPiano stores MuseScore General logical name")
+        tk.expectEqual(Instrument().sf2, SoundBank.museScoreGeneral,
+                       "Instrument() default is MuseScore General")
+
+        // Resolution never throws and never assumes either file is present.
+        let namedMS = Instrument(sf2: SoundBank.museScoreGeneral, program: 0, bankMSB: 121, bankLSB: 0)
+        let namedGU = Instrument(sf2: SoundBank.generalUserGS, program: 0, bankMSB: 121, bankLSB: 0)
+        let resolvedMS = SoundBank.resolveURL(for: namedMS)
+        let resolvedGU = SoundBank.resolveURL(for: namedGU)
+
+        // Prefer named bank when present; otherwise fall back to the other bank.
+        if let msURL = SoundBank.museScoreGeneralURL {
+            tk.expectEqual(resolvedMS?.path, msURL.path, "MuseScore-named instrument uses MuseScore file when present")
+        } else if let guURL = SoundBank.generalUserGSURL {
+            tk.expectEqual(resolvedMS?.path, guURL.path, "MuseScore-named instrument falls back to GeneralUser when MuseScore absent")
+        } else {
+            tk.expect(resolvedMS == nil, "no SF2: resolve returns nil (built-in voice)")
+        }
+
+        if let guURL = SoundBank.generalUserGSURL {
+            tk.expectEqual(resolvedGU?.path, guURL.path, "GeneralUser-named instrument uses GeneralUser when present")
+        } else if let msURL = SoundBank.museScoreGeneralURL {
+            tk.expectEqual(resolvedGU?.path, msURL.path, "GeneralUser-named instrument falls back to MuseScore when GU absent")
+        } else {
+            tk.expect(resolvedGU == nil, "no SF2: resolve returns nil (built-in voice)")
+        }
+
+        // Badge never claims MuseScore when the file is absent.
+        let badge = SoundBank.activeBankDisplayName
+        if SoundBank.museScoreGeneralURL != nil {
+            tk.expectEqual(badge, "MuseScore General", "badge names MuseScore when that file is bundled")
+        } else if SoundBank.generalUserGSURL != nil {
+            tk.expectEqual(badge, "GeneralUser GS", "badge names GeneralUser when only that bank is bundled")
+        } else {
+            tk.expectEqual(badge, "Built-in voice", "badge is honest when no SF2 is bundled")
+        }
+        tk.expect(SoundBank.isAvailable == (SoundBank.anyAvailableURL != nil),
+                  "isAvailable matches anyAvailableURL")
+        print("   ↳ MuseScore bundled=\(SoundBank.museScoreGeneralURL != nil), GU bundled=\(SoundBank.generalUserGSURL != nil), badge=\(badge)")
+    }
+
+    tk.suite("Engine I2: existing GeneralUser bank name is preserved on instruments") {
+        // Saved projects keep whatever bank name they stored (no silent character change).
+        let legacy = Instrument(sf2: SoundBank.generalUserGS, program: 24, bankMSB: 121, bankLSB: 0)
+        tk.expectEqual(legacy.sf2, SoundBank.generalUserGS, "explicit GeneralUser name is not rewritten")
+        // resolveURL may map to either file; the stored name on the model stays GeneralUserGS.
+        _ = SoundBank.resolveURL(for: legacy)
+        tk.expectEqual(legacy.sf2, SoundBank.generalUserGS, "resolve does not mutate stored bank name")
+    }
+
     // MARK: - Step G4: Crash-shape hardening
 
     tk.suite("Engine G4: audition across two formats does not throw") {

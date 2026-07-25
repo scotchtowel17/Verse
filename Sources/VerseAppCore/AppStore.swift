@@ -153,6 +153,8 @@ public final class AppStore {
 
     var activeTrack: Track? { project.track(id: activeTrackID) }
     var sf2Bundled: Bool { SoundBank.isAvailable }
+    /// Header badge: bank the app can actually produce (never claims an absent bank).
+    var activeBankDisplayName: String { SoundBank.activeBankDisplayName }
     var presets: [SoundBank.Preset] { SoundBank.presets }
     var documentName: String { currentPackageURL?.deletingPathExtension().lastPathComponent ?? project.title }
 
@@ -564,7 +566,7 @@ public final class AppStore {
         let tid = id ?? activeTrackID
         guard let idx = project.trackIndex(id: tid) else { return }
         history.record(project, name: "Select Preset")
-        let inst = Instrument(sf2: SoundBank.generalUserGS,
+        let inst = Instrument(sf2: SoundBank.preferredBankName,
                               program: preset.program, bankMSB: preset.bankMSB, bankLSB: preset.bankLSB)
         project.tracks[idx].instrument = inst
         // Only auto-name still-default track names. User- or Claude-chosen names stay put.

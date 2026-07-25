@@ -87,7 +87,7 @@ enum JSONCoerce {
     static func instrument(_ v: Any?) -> Instrument? {
         guard let d = v as? [String: Any] else { return nil }
         return Instrument(
-            sf2: string(d["sf2"]) ?? "GeneralUserGS",
+            sf2: string(d["sf2"]) ?? "MuseScoreGeneral",
             program: int(d["program"]) ?? 0,
             bankMSB: int(d["bankMSB"]) ?? 121,
             bankLSB: int(d["bankLSB"]) ?? 0)

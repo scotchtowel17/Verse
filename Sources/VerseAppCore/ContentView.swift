@@ -89,7 +89,7 @@ public struct ContentView: View {
                 Label(err, systemImage: "exclamationmark.triangle.fill")
                     .font(.callout).foregroundStyle(.orange)
             } else {
-                Label(store.sf2Bundled ? "GeneralUser GS" : "Built-in voice", systemImage: "waveform.circle")
+                Label(store.activeBankDisplayName, systemImage: "waveform.circle")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

@@ -2,29 +2,93 @@ import Foundation
 import AVFoundation
 import VerseModel
 
-/// Locates the bundled GeneralUser GS SoundFont and the curated preset manifest.
+/// Locates bundled SoundFonts and the curated preset manifest.
 ///
-/// The SF2 (~30 MB) is fetched by `scripts/fetch-artifacts.sh` / `scripts/make-app.sh` into
-/// the module's Resources and checksummed in THIRD-PARTY-LICENSES.md. It is intentionally
-/// *optional*: if absent, `AVAudioUnitSampler` falls back to its built-in default voice so
+/// Two logical banks:
+/// - `GeneralUserGS` (~31 MB), fetched by `scripts/fetch-artifacts.sh` / `scripts/make-app.sh`
+/// - `MuseScoreGeneral` (~206 MB), opt-in only (`fetch-artifacts.sh --with-musescore`);
+///   make-app bundles it when already present and never auto-fetches it
+///
+/// Both are checksummed in THIRD-PARTY-LICENSES.md and gitignored. Absence is normal:
+/// resolution falls back to the other bank, then to the sampler's built-in voice so
 /// "hear sound" never blocks (Build Contract §9).
 public enum SoundBank {
 
     /// Logical bank name used in the model's `Instrument.sf2`.
     public static let generalUserGS = "GeneralUserGS"
+    /// Preferred higher-quality bank (MIT). New instruments store this name.
+    public static let museScoreGeneral = "MuseScoreGeneral"
+
+    /// Bank name written onto new instruments. Resolution still falls back if the file is absent.
+    public static var preferredBankName: String { museScoreGeneral }
 
     /// URL of the bundled GeneralUser GS SF2, or nil if it wasn't fetched/bundled.
     public static var generalUserGSURL: URL? {
         // Try a few resource names so either GeneralUserGS.sf2 or GeneralUser-GS.sf2 resolves.
         for name in ["GeneralUserGS", "GeneralUser-GS", "GeneralUser GS v2.0.3"] {
-            if let url = Bundle.module.url(forResource: name, withExtension: "sf2") { return url }
-            if let url = Bundle.module.url(forResource: name, withExtension: "sf2",
-                                           subdirectory: "Resources") { return url }
+            if let url = sf2URL(named: name) { return url }
         }
         return nil
     }
 
-    public static var isAvailable: Bool { generalUserGSURL != nil }
+    /// URL of the bundled MuseScore General SF2, or nil if it wasn't fetched/bundled.
+    public static var museScoreGeneralURL: URL? {
+        for name in ["MuseScore_General", "MuseScoreGeneral"] {
+            if let url = sf2URL(named: name) { return url }
+        }
+        return nil
+    }
+
+    /// True when any SF2 is bundled (either bank).
+    public static var isAvailable: Bool {
+        museScoreGeneralURL != nil || generalUserGSURL != nil
+    }
+
+    /// Plain-language name of the bank the app can actually produce, for the header badge.
+    /// Prefers MuseScore General when present, else GeneralUser GS, else the built-in voice.
+    public static var activeBankDisplayName: String {
+        if museScoreGeneralURL != nil { return "MuseScore General" }
+        if generalUserGSURL != nil { return "GeneralUser GS" }
+        return "Built-in voice"
+    }
+
+    /// URL for a logical bank name, or nil when that file is not bundled.
+    public static func url(forBankNamed name: String) -> URL? {
+        switch name {
+        case museScoreGeneral: return museScoreGeneralURL
+        case generalUserGS: return generalUserGSURL
+        default: return nil
+        }
+    }
+
+    /// Resolve the SF2 to load for an instrument: the bank named on the instrument if that
+    /// file is present, else the other bundled bank, else nil (built-in sampler voice).
+    public static func resolveURL(for instrument: Instrument) -> URL? {
+        if let preferred = url(forBankNamed: instrument.sf2) {
+            return preferred
+        }
+        // Named bank absent: try the other known bank.
+        switch instrument.sf2 {
+        case museScoreGeneral:
+            return generalUserGSURL
+        case generalUserGS:
+            return museScoreGeneralURL
+        default:
+            return museScoreGeneralURL ?? generalUserGSURL
+        }
+    }
+
+    /// Any available SF2 URL (preferred bank first). Used by metronome and similar utilities.
+    public static var anyAvailableURL: URL? {
+        museScoreGeneralURL ?? generalUserGSURL
+    }
+
+    private static func sf2URL(named name: String) -> URL? {
+        if let url = Bundle.module.url(forResource: name, withExtension: "sf2") { return url }
+        if let url = Bundle.module.url(forResource: name, withExtension: "sf2",
+                                       subdirectory: "Resources") { return url }
+        return nil
+    }
 
     // MARK: - Curated preset manifest
 

@@ -39,14 +39,15 @@ public struct TimeSignature: Codable, Sendable, Hashable {
 // MARK: - Instruments & inserts
 
 public struct Instrument: Codable, Sendable, Hashable {
-    public var sf2: String          // logical sound-bank name, e.g. "GeneralUserGS"
+    public var sf2: String          // logical sound-bank name, e.g. "MuseScoreGeneral" or "GeneralUserGS"
     public var program: Int         // GM program 0–127
     public var bankMSB: Int
     public var bankLSB: Int
-    public init(sf2: String = "GeneralUserGS", program: Int = 0, bankMSB: Int = 121, bankLSB: Int = 0) {
+    /// New instruments default to MuseScore General. Existing projects keep the bank name they stored.
+    public init(sf2: String = "MuseScoreGeneral", program: Int = 0, bankMSB: Int = 121, bankLSB: Int = 0) {
         self.sf2 = sf2; self.program = program; self.bankMSB = bankMSB; self.bankLSB = bankLSB
     }
-    public static let grandPiano = Instrument(sf2: "GeneralUserGS", program: 0, bankMSB: 121, bankLSB: 0)
+    public static let grandPiano = Instrument(sf2: "MuseScoreGeneral", program: 0, bankMSB: 121, bankLSB: 0)
 }
 
 /// A reference to a hosted Audio Unit insert (Build Contract §10). FourCC stored as strings.

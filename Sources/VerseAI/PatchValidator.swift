@@ -204,7 +204,7 @@ public enum PatchValidator {
                 guard let program = JSONCoerce.int(op["program"]), (0...127).contains(program) else {
                     errors.append(PatchError(opIndex: i, "setInstrument “program” must be 0–127.")); continue
                 }
-                let inst = Instrument(sf2: JSONCoerce.string(op["sf2"]) ?? "GeneralUserGS",
+                let inst = Instrument(sf2: JSONCoerce.string(op["sf2"]) ?? "MuseScoreGeneral",
                                       program: program,
                                       bankMSB: JSONCoerce.int(op["bankMSB"]) ?? 121,
                                       bankLSB: JSONCoerce.int(op["bankLSB"]) ?? 0)
