@@ -47,7 +47,7 @@ the wrong track or clip if the project changes between "Copy request" and "Apply
    rejects with the missing message; a tempo or title change alone does NOT invalidate a
    fingerprint; adding or deleting a clip DOES.
 
-## Step 3 — A2 undo hygiene — PENDING
+## Step 3 — A2 undo hygiene — DONE
 
 1. `UndoStack` stores a label alongside each state. Expose `undoName` / `redoName`.
    `record(_ state:name:)`. Keep the 100-entry limit.

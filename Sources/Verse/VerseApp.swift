@@ -28,10 +28,10 @@ struct VerseApp: App {
                     .keyboardShortcut("s", modifiers: [.command, .shift])
             }
             CommandGroup(replacing: .undoRedo) {
-                Button("Undo") { store.undo() }
+                Button(store.undoName.map { "Undo \($0)" } ?? "Undo") { store.undo() }
                     .keyboardShortcut("z", modifiers: [.command])
                     .disabled(!store.canUndo)
-                Button("Redo") { store.redo() }
+                Button(store.redoName.map { "Redo \($0)" } ?? "Redo") { store.redo() }
                     .keyboardShortcut("z", modifiers: [.command, .shift])
                     .disabled(!store.canRedo)
             }

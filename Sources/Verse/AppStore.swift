@@ -137,6 +137,7 @@ final class AppStore {
             addRecordingClip(filename: takeURL.lastPathComponent, seconds: durationOf(takeURL))
         }
         rebuildTakesFromModel()
+        history.clear()
         statusMessage = "Recovered your unsaved work."
         pendingRecovery = nil
     }
@@ -156,6 +157,7 @@ final class AppStore {
         currentPackageURL = nil
         takes.removeAll()
         engine.reconfigure(with: project)
+        history.clear()
     }
 
     func open() {
@@ -178,6 +180,7 @@ final class AppStore {
                 ?? project.tracks.first?.id ?? UUID()
             engine.reconfigure(with: project)
             rebuildTakesFromModel()
+            history.clear()
             statusMessage = failedMedia.isEmpty
                 ? "Opened “\(documentName)”."
                 : "Opened “\(documentName)” — \(failedMedia.count) audio file(s) couldn’t be loaded."
@@ -234,6 +237,7 @@ final class AppStore {
     func selectPreset(_ preset: SoundBank.Preset, for id: UUID? = nil) {
         let tid = id ?? activeTrackID
         guard let idx = project.trackIndex(id: tid) else { return }
+        history.record(project, name: "Select Preset")
         let inst = Instrument(sf2: SoundBank.generalUserGS,
                               program: preset.program, bankMSB: preset.bankMSB, bankLSB: preset.bankLSB)
         project.tracks[idx].instrument = inst
@@ -264,6 +268,7 @@ final class AppStore {
         recovery.noteRecordingStopped()
         isRecording = false
         if let url = result.url, result.seconds > 0 {
+            history.record(project, name: "Record Take")
             takes.insert(Take(url: url, seconds: result.seconds), at: 0)
             addRecordingClip(filename: url.lastPathComponent, seconds: result.seconds)
             recovery.autosave(project)
@@ -329,11 +334,16 @@ final class AppStore {
     }
 
     func setMetronome(_ on: Bool) { metronomeOn = on; transport.metronomeEnabled = on }
-    func setTempo(_ bpm: Double) { project.tempoBPM = max(20, min(300, bpm)); recovery.autosave(project) }
+    func setTempo(_ bpm: Double) {
+        history.record(project, name: "Set Tempo")
+        project.tempoBPM = max(20, min(300, bpm))
+        recovery.autosave(project)
+    }
 
     // MARK: - Track management (M4)
 
     func addInstrumentTrack() {
+        history.record(project, name: "Add Track")
         let n = project.tracks.filter { $0.kind == .instrument }.count + 1
         let t = Track(kind: .instrument, name: "Instrument \(n)", instrument: .grandPiano)
         project.tracks.append(t)
@@ -344,6 +354,7 @@ final class AppStore {
     }
 
     func addAudioTrack() {
+        history.record(project, name: "Add Track")
         let n = project.tracks.filter { $0.kind == .audio }.count + 1
         let t = Track(kind: .audio, name: "Audio \(n)")
         project.tracks.append(t)
@@ -354,6 +365,7 @@ final class AppStore {
 
     func deleteTrack(_ id: UUID) {
         guard project.tracks.count > 1 else { return }
+        history.record(project, name: "Delete Track")
         engine.removeTrack(id: id)
         project.tracks.removeAll { $0.id == id }
         if activeTrackID == id {
@@ -368,6 +380,8 @@ final class AppStore {
 
     // MARK: - Mix with solo logic (M4)
 
+    // Continuous slider drags must NOT record undo: each drag fires ~100 calls and would
+    // flush the 100-entry stack, destroying the AI-patch undo point.
     func setVolume(_ v: Double, _ id: UUID) { mutate(id) { $0.volume = v }; applyEffectiveMix() }
     func setPan(_ p: Double, _ id: UUID) { mutate(id) { $0.pan = p }; applyEffectiveMix() }
     func toggleMute(_ id: UUID) { mutate(id) { $0.mute.toggle() }; applyEffectiveMix() }
@@ -415,7 +429,7 @@ final class AppStore {
         let outcome = Copilot.apply(reply: copilotReply, to: &working)
         copilotMessage = outcome.userMessage
         guard outcome.status == .applied else { return }
-        history.record(project)            // one undo group for the whole patch
+        history.record(project, name: "Apply Claude Patch")  // one undo group for the whole patch
         project = working
         syncEngineToProject()
         recovery.autosave(project)
@@ -426,6 +440,8 @@ final class AppStore {
 
     var canUndo: Bool { history.canUndo }
     var canRedo: Bool { history.canRedo }
+    var undoName: String? { history.undoName }
+    var redoName: String? { history.redoName }
 
     func undo() {
         guard let prev = history.undo(current: project) else { return }
@@ -456,6 +472,10 @@ final class AppStore {
             await MainActor.run {
                 guard let self else { return }
                 self.analysisResult = r
+                // Snapshot immediately before the project mutation (not before the Task).
+                if r.tempoBPM != nil || r.key != nil {
+                    self.history.record(self.project, name: "Analyze Take")
+                }
                 if let bpm = r.tempoBPM { self.project.tempoBPM = (bpm * 10).rounded() / 10 }
                 if let k = r.key { self.project.key = k }
                 self.analysisBusy = false
@@ -471,6 +491,7 @@ final class AppStore {
     func resetTapTempo() { tapState.reset() }
 
     func setKey(tonic: Tonic, mode: Mode) {
+        history.record(project, name: "Set Key")
         project.key = KeySignature(tonic: tonic, mode: mode)
         recovery.autosave(project)
     }
@@ -512,7 +533,7 @@ final class AppStore {
         let result = HumToMIDI.convert(url: take.url, bpm: bpm)
         guard !result.notes.isEmpty else { statusMessage = "Couldn’t find clear notes in that take."; return }
 
-        history.record(project)
+        history.record(project, name: "Hum to MIDI")
         let end = result.notes.map { $0.startBeat + $0.lengthBeats }.max() ?? 4
         let clip = Clip(kind: .midi, name: "Hum melody", startBeat: 0,
                         lengthBeats: max(4, end), midiNotes: result.notes)
