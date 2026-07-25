@@ -4,6 +4,10 @@ import Foundation
 ///
 /// Handles running status and the common note-on-with-velocity-0 = note-off rule.
 /// SysEx and other system messages are skipped (not expanded into events).
+///
+/// Data bytes always have bit 7 clear (MIDI 0…127). A byte with bit 7 set is a
+/// status byte: real-time (0xF8–0xFF) may appear mid-message and is skipped;
+/// any other status abandons an incomplete message so fields never exceed 127.
 public enum MIDIParser {
 
     /// Decode a contiguous stream of MIDI bytes into channel-voice events.
@@ -55,11 +59,38 @@ public enum MIDIParser {
             case 0xC0, 0xD0: dataLen = 1
             default: dataLen = 2
             }
-            guard i + dataLen <= bytes.count else { break }
 
-            let d1 = bytes[i]
-            let d2 = dataLen == 2 ? bytes[i + 1] : 0
-            i += dataLen
+            // Collect dataLen legal data bytes (bit 7 clear). Real-time may interleave
+            // and is skipped. Any other status abandons the incomplete message so the
+            // outer loop can re-process it; truncated end-of-stream yields no event.
+            var data: [UInt8] = []
+            var abandonedForNewStatus = false
+            while data.count < dataLen {
+                guard i < bytes.count else { break }
+                let db = bytes[i]
+                if db >= 0xF8 {
+                    i += 1
+                    continue
+                }
+                if db & 0x80 != 0 {
+                    // New non-real-time status mid-message: leave i on this byte.
+                    abandonedForNewStatus = true
+                    break
+                }
+                data.append(db)
+                i += 1
+            }
+
+            if abandonedForNewStatus {
+                continue
+            }
+            if data.count < dataLen {
+                // Truncated message at end of stream: drop it.
+                break
+            }
+
+            let d1 = data[0]
+            let d2 = dataLen == 2 ? data[1] : 0
 
             switch type {
             case 0x80:

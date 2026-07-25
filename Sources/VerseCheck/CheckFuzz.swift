@@ -332,11 +332,10 @@ private func runPatchValidatorPropertyTests(_ tk: TestKit) {
         for trial in 0..<trials {
             var project = randomProject(rng: &rng)
             let before = projectSnapshot(project)
-            // omitDeleteClip: sequences with deleteClip + later use of the same handle
-            // trip known defect H2-VAL-1 (documented below). Random apply checks stay
-            // free of that hole so this suite asserts properties that should hold today.
+            // deleteClip invalidates the handle during validation (H2-VAL-1 fixed in H3),
+            // so use-after-delete is rejected and accepted ops must still apply cleanly.
             let ops = randomOpDicts(project: project, rng: &rng, count: rng.nextInt(in: 0...8),
-                                    omitDeleteClip: true)
+                                    omitDeleteClip: false)
             var opsWithFaults = ops
             if rng.nextBool() {
                 opsWithFaults.append(["op": "notARealOp"])
@@ -414,15 +413,15 @@ private func runPatchValidatorPropertyTests(_ tk: TestKit) {
         tk.expect(projectSnapshot(project) == before, "no mutation on multi-op reject")
     }
 
-    // Documents known defect H2-VAL-1 (see project_plan.md). Do not “fix” this by
-    // changing the production validator in this step. When the defect is fixed, this
-    // suite should be rewritten to assert rejection (or successful apply) instead.
-    tk.suite("H2 known defect VAL-1 — deleteClip then use same handle validates, apply throws") {
+    // H2-VAL-1 closed in H3: deleteClip removes the handle so later ops are rejected
+    // at validation (validation still guarantees apply cannot fail).
+    tk.suite("H3 VAL-1 fix — deleteClip then use same handle is rejected at validation") {
         var project = Project.newUntitled()
         project.tracks[0].clips = [
             Clip(kind: .midi, name: "Doomed", startBeat: 0, lengthBeats: 4,
                  midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
         ]
+        let before = projectSnapshot(project)
         guard let parsed = makeParsed(
             fingerprint: project.structuralFingerprint,
             ops: [
@@ -434,20 +433,16 @@ private func runPatchValidatorPropertyTests(_ tk: TestKit) {
             return
         }
         switch PatchValidator.validate(parsed, project: project) {
+        case .success:
+            tk.expect(false, "VAL-1: use-after-delete must be rejected at validation")
         case .failure(let errs):
-            // If this starts failing (validator now rejects), the defect is fixed: update plan.
-            tk.expect(false, "VAL-1 still validates (defect open)",
-                      "validator rejected (may be fixed): \(errs.errors.map(\.description))")
-        case .success(let ok):
-            tk.expectEqual(ok.ops.count, 2, "VAL-1: both ops typed despite use-after-delete")
-            var threw = false
-            do {
-                try PatchApplier.apply(ok.ops, to: &project)
-            } catch {
-                threw = true
-            }
-            tk.expect(threw, "VAL-1: apply throws after validate accepted use-after-delete")
+            tk.expect(!errs.errors.isEmpty, "VAL-1: at least one validation error")
+            let joined = errs.errors.map(\.description).joined(separator: " | ")
+            tk.expect(joined.contains("Unknown clip") || joined.contains("T1C1"),
+                      "VAL-1: later op reports unknown clip (got: \(joined))")
         }
+        tk.expect(projectSnapshot(project) == before,
+                  "VAL-1: rejected validation leaves project unchanged")
     }
 }
 
@@ -674,12 +669,10 @@ private func pickClipRef(project: Project, tempClips: [(tempId: String, track: S
 // MARK: - 3. MIDI parser fuzz
 
 private func runMIDIParserFuzz(_ tk: TestKit) {
-    // Streams whose data bytes are legal MIDI (0…127). Range property must hold.
-    // Streams that deliberately feed high-bit “data” are covered by known defect H2-MIDI-1.
-    tk.suite("H2 MIDI parser fuzz — fixed adversarial streams (no crash + legal data in range)") {
-        // Data-plane bytes here are 0…127 or pure status/SysEx/real-time at message
-        // boundaries. Hostile high-bit data and real-time *inside* data slots are H2-MIDI-1.
-        let legalStreams: [(String, [UInt8])] = [
+    // Every emitted event must carry pitch, velocity, and controller values in 0…127
+    // (H2-MIDI-1 fixed in H3). Truncated or malformed messages yield no out-of-range event.
+    tk.suite("H2 MIDI parser fuzz — fixed adversarial streams (all events in 0…127)") {
+        let allStreams: [(String, [UInt8])] = [
             ("empty", []),
             ("single status", [0x90]),
             ("truncated note on", [0x90, 60]),
@@ -688,7 +681,6 @@ private func runMIDIParserFuzz(_ tk: TestKit) {
             ("note-on vel 0", [0x90, 60, 0]),
             ("SysEx short", [0xF0, 0x43, 0x12, 0xF7]),
             ("SysEx unclosed", [0xF0, 0x01, 0x02, 0x03]),
-            // Real-time only between complete messages (after both data bytes).
             ("real-time between messages", [0x90, 60, 100, 0xF8, 0x90, 64, 90]),
             ("all data bytes", [60, 100, 64, 90]),
             ("song position", [0xF2, 0x00, 0x01, 0x90, 60, 100]),
@@ -698,10 +690,7 @@ private func runMIDIParserFuzz(_ tk: TestKit) {
             ("program change then note", [0xC0, 5, 0x90, 72, 100]),
             ("channel pressure then note", [0xD0, 40, 0x90, 60, 90]),
             ("multi-channel", [0x90, 60, 100, 0x91, 64, 90, 0x80, 60, 0]),
-        ]
-
-        // Hostile cases: must not crash (range property is H2-MIDI-1).
-        let hostileNoCrash: [(String, [UInt8])] = [
+            // Hostile: high-bit payload, status-as-data, real-time mid-data.
             ("high data bytes as payload", [0x90, 0xFF, 0xFF]),
             ("status as data byte", [0x90, 0x80, 0x40]),
             ("real-time mid-data", [0x90, 0xF8, 60, 0xFE, 100]),
@@ -709,49 +698,53 @@ private func runMIDIParserFuzz(_ tk: TestKit) {
         ]
 
         var rangeOK = 0
-        for (label, bytes) in legalStreams {
+        for (label, bytes) in allStreams {
             let events = MIDIParser.parse(bytes)
             let bad = outOfRangeNoteEvents(events)
             if bad.isEmpty {
                 rangeOK += 1
             } else {
-                tk.expect(false, "fixed \(label) pitches/velocities in 0…127",
+                tk.expect(false, "fixed \(label) pitches/velocities/CC in 0…127",
                           "out-of-range: \(bad)")
             }
         }
-        tk.expectEqual(rangeOK, legalStreams.count,
-                       "all \(legalStreams.count) legal fixed streams keep pitch/velocity in 0…127")
+        tk.expectEqual(rangeOK, allStreams.count,
+                       "all \(allStreams.count) fixed streams keep pitch/velocity/CC in 0…127")
 
-        for (label, bytes) in hostileNoCrash {
-            _ = MIDIParser.parse(bytes)
-            tk.expect(true, "hostile \(label) did not crash")
+        // Real-time mid-data still produces the intended note (60, 100).
+        let rtEvents = MIDIParser.parse([0x90, 0xF8, 60, 0xFE, 100])
+        tk.expectEqual(rtEvents.count, 1, "real-time mid-data yields one note-on")
+        if case .noteOn(_, 60, 100) = rtEvents.first {
+            tk.expect(true, "real-time mid-data note is 60@100")
+        } else {
+            tk.expect(false, "real-time mid-data note is 60@100", "got \(rtEvents)")
         }
     }
 
-    // Hard property for hostile input: never crash. Range violations under hostile
-    // high-bit bytes are known defect H2-MIDI-1 (documented, not fixed in this step).
-    tk.suite("H2 MIDI parser fuzz — seeded random streams never crash (seed 0xD1D1F002)") {
+    tk.suite("H2 MIDI parser fuzz — seeded random streams in range (seed 0xD1D1F002)") {
         var rng = SeededRNG(seed: 0xD1D1_F002)
         let trialCount = 500
-        var parsed = 0
-        var rangeViolations = 0
-        for _ in 0..<trialCount {
+        var rangeOK = 0
+        for trial in 0..<trialCount {
             let bytes = randomMIDIBytes(rng: &rng)
             let events = MIDIParser.parse(bytes)
-            parsed += 1
-            if !outOfRangeNoteEvents(events).isEmpty { rangeViolations += 1 }
+            let bad = outOfRangeNoteEvents(events)
+            if bad.isEmpty {
+                rangeOK += 1
+            } else {
+                tk.expect(false, "random trial \(trial) events in 0…127",
+                          "out-of-range: \(bad)")
+            }
         }
-        tk.expectEqual(parsed, trialCount, "\(trialCount) random streams parsed without crash")
-        // Observational: violations expected until H2-MIDI-1 is fixed.
-        tk.expect(true, "H2-MIDI-1 range violations in random set: \(rangeViolations)/\(trialCount)")
+        tk.expectEqual(rangeOK, trialCount,
+                       "\(trialCount)/\(trialCount) random streams keep pitch/velocity/CC in 0…127")
     }
 
-    tk.suite("H2 MIDI parser fuzz — structured + noise never crash (seed 0xC0FFEE01)") {
+    tk.suite("H2 MIDI parser fuzz — structured + noise in range (seed 0xC0FFEE01)") {
         var rng = SeededRNG(seed: 0xC0FF_EE01)
         let trialCount = 200
-        var parsed = 0
-        var rangeViolations = 0
-        for _ in 0..<trialCount {
+        var rangeOK = 0
+        for trial in 0..<trialCount {
             var bytes: [UInt8] = []
             let messages = rng.nextInt(in: 1...12)
             for _ in 0..<messages {
@@ -788,31 +781,37 @@ private func runMIDIParserFuzz(_ tk: TestKit) {
                 }
             }
             let events = MIDIParser.parse(bytes)
-            parsed += 1
-            if !outOfRangeNoteEvents(events).isEmpty { rangeViolations += 1 }
+            let bad = outOfRangeNoteEvents(events)
+            if bad.isEmpty {
+                rangeOK += 1
+            } else {
+                tk.expect(false, "structured trial \(trial) events in 0…127",
+                          "out-of-range: \(bad)")
+            }
         }
-        tk.expectEqual(parsed, trialCount, "\(trialCount) structured streams parsed without crash")
-        tk.expect(true, "H2-MIDI-1 range violations in structured set: \(rangeViolations)/\(trialCount)")
+        tk.expectEqual(rangeOK, trialCount,
+                       "\(trialCount)/\(trialCount) structured streams keep pitch/velocity/CC in 0…127")
     }
 
-    // Minimal repro for known defect H2-MIDI-1. When fixed, rewrite to assert in-range
-    // (or no event) and close the write-up in project_plan.md.
-    tk.suite("H2 known defect MIDI-1 — high-bit / real-time mid-data become out-of-range fields") {
-        let high = outOfRangeNoteEvents(MIDIParser.parse([0x90, 0xFF, 0xFF]))
-        tk.expect(!high.isEmpty,
-                  "MIDI-1 high data bytes still out of range (defect open)",
-                  "parser kept values in 0…127; update project_plan H2-MIDI-1 if fixed")
+    // H2-MIDI-1 closed in H3: high-bit / real-time mid-data never emit out-of-range fields.
+    tk.suite("H3 MIDI-1 fix — high-bit / real-time mid-data stay in 0…127") {
+        let high = MIDIParser.parse([0x90, 0xFF, 0xFF])
+        tk.expect(outOfRangeNoteEvents(high).isEmpty,
+                  "MIDI-1 high data bytes: no out-of-range fields")
 
-        let statusAsData = outOfRangeNoteEvents(MIDIParser.parse([0x90, 0x80, 0x40]))
-        tk.expect(!statusAsData.isEmpty,
-                  "MIDI-1 status-as-data still out of range (defect open)",
-                  "parser kept values in 0…127; update project_plan H2-MIDI-1 if fixed")
+        let statusAsData = MIDIParser.parse([0x90, 0x80, 0x40])
+        tk.expect(outOfRangeNoteEvents(statusAsData).isEmpty,
+                  "MIDI-1 status-as-data: no out-of-range fields")
 
-        // Real-time is skipped only at message boundaries today, not inside data slots.
-        let rtMid = outOfRangeNoteEvents(MIDIParser.parse([0x90, 0xF8, 60, 0xFE, 100]))
-        tk.expect(!rtMid.isEmpty,
-                  "MIDI-1 real-time mid-data still out of range (defect open)",
-                  "parser kept values in 0…127; update project_plan H2-MIDI-1 if fixed")
+        let rtMid = MIDIParser.parse([0x90, 0xF8, 60, 0xFE, 100])
+        tk.expect(outOfRangeNoteEvents(rtMid).isEmpty,
+                  "MIDI-1 real-time mid-data: no out-of-range fields")
+        tk.expectEqual(rtMid.count, 1, "MIDI-1 real-time mid-data yields one event")
+        if case .noteOn(_, 60, 100) = rtMid.first {
+            tk.expect(true, "MIDI-1 real-time mid-data is noteOn 60@100")
+        } else {
+            tk.expect(false, "MIDI-1 real-time mid-data is noteOn 60@100", "got \(rtMid)")
+        }
     }
 }
 
