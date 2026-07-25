@@ -845,13 +845,13 @@ the assertion was wrong.
    and that is why it failed CI. The correct assertion is that `startRecording` **returns**
    (throws or succeeds) within a bounded time and never hangs. That holds on every machine.
 
-## Step H2 — Fuzz and property tests — PARTIAL (items 1–3 done; 4–6 pending)
+## Step H2 — Fuzz and property tests — DONE
 
 Everything below is headless and needs no screen or hardware. Use a seeded, deterministic
 pseudo-random generator so failures reproduce; never `Date()` or unseeded randomness.
 
 Harness: `Sources/VerseCheck/CheckFuzz.swift` (`SeededRNG` + suites), wired from `main.swift`
-via `runFuzzChecks`. Defect write-ups from items 1–3 are under **H2 defects found** below.
+via `runFuzzChecks`. Defect write-ups are under **H2 defects found** below.
 
 1. **`PatchParser` fuzz.** DONE. Fixed adversarial corpus + 200 trials seed `0xA11CE001`.
    Property holds: always `ParsedPatch` or `ParseError`.
@@ -859,22 +859,23 @@ via `runFuzzChecks`. Defect write-ups from items 1–3 are under **H2 defects fo
    accepted ops apply. **H2-VAL-1** closed in H3 (`deleteClip` invalidates the handle).
 3. **MIDI parser fuzz.** DONE. No-crash + every emitted event in 0…127 (including hostile
    high-bit / real-time mid-data). **H2-MIDI-1** closed in H3. Seeds `0xD1D1F002`, `0xC0FFEE01`.
-4. **Model round-trip property test.** PENDING. Randomly generated projects (many tracks, many clips,
-   many notes) encode to JSON and decode back identically.
-5. **Migration hostility.** PENDING. Malformed, truncated, and wrong-type `project.json`, plus a
-   `schemaVersion` far in the future. Property: a readable error, never a crash or silent
-   data loss.
-6. **Scale.** PENDING. A project with roughly 50 tracks and 20,000 notes: it must save, load, and compute
-   the fingerprint in reasonable time, and the piano-roll layout maths must not degrade badly.
+4. **Model round-trip property test.** DONE. 80 seeded trials (`0xA011D7A1`) plus dense
+   control case (`0xC017A01D`): encode → decode → re-encode byte-identical; fingerprint stable.
+5. **Migration hostility.** DONE. 17 malformed/truncated/wrong-type `project.json` inputs all
+   throw a non-empty error; missing package `project.json` is readable `PackageError`.
+   Future `schemaVersion` found **H2-MIG-1** (open; not silent-fixed).
+6. **Scale.** DONE. Seed `0x5CA1E7E57`: 50 tracks × 400 notes = 20,000 notes. Save/load
+   (JSON + `.verse` package), fingerprint, and `PianoRollLayout` all succeed; layout covers
+   global and per-track pitch ranges. Timings printed (no flaky wall-clock upper bound).
 
 Report anything these find as a defect write-up, not a silent fix.
 
-## H2 defects found (items 1–3 run) — DO NOT silent-fix
+## H2 defects found — DO NOT silent-fix
 
-Found by the Step H2 fuzz/property harness on 2026-07-25 (items 1, 2, 3 only).
-Production code was left unchanged; tests document the open defects and assert the
+Found by the Step H2 fuzz/property harness on 2026-07-25.
+Production code was left unchanged for open defects; tests document them and assert the
 properties that still hold. Close each write-up when the fix lands and rewrite the
-matching “H2 known defect …” suite in `Sources/VerseCheck/CheckFuzz.swift`.
+matching suite in `Sources/VerseCheck/CheckFuzz.swift`.
 
 ### H2-VAL-1 — `deleteClip` does not invalidate the clip handle for later ops — CLOSED (H3)
 
@@ -904,14 +905,42 @@ out-of-range one. Velocity-0 still means note-off.
 Harness: suite `H3 MIDI-1 fix — high-bit / real-time mid-data stay in 0…127`; random
 and structured fuzz assert the 0…127 range property (not only no-crash).
 
-### H2 items 1–3 status
+### H2-MIG-1 — future `schemaVersion` loads without error and drops unknown fields — OPEN
+
+**Surface:** `Migration.migrateRawIfNeeded` then `Project.fromJSON`.
+
+**Found by:** suite `H2 migration hostility — future schemaVersion`.
+
+**What happens:** A valid v1-shaped `project.json` with `"schemaVersion": 99` and an
+extra key (`futureOnlyField`) is accepted. `migrateRawIfNeeded` returns the bytes
+unchanged whenever `version >= Schema.current` (so 99 skips the step loop). Codable
+then decodes the known v1 fields and **silently drops** unknown keys. Re-encoding
+writes `schemaVersion: 99` without `futureOnlyField`.
+
+**Why it matters:** Opening a project written by a newer Verse would look successful
+while stripping any fields the newer schema added, then re-saving that loss. That is
+silent data loss, not a readable “this song needs a newer Verse” error.
+
+**Expected (not implemented):** Reject with a clear message when
+`schemaVersion > Schema.current` (for example: “This song was saved with a newer
+version of Verse (schema 99). Open it in an updated Verse.”). Do not decode-as-v1
+and do not re-save under the future version number.
+
+**Not fixed in H2** (report only, per step rules).
+
+### H2 status (all items)
 
 | Item | Result |
 |------|--------|
 | 1 PatchParser fuzz | Pass: always `ParsedPatch` or `ParseError` on fixed corpus + 200 seeded trials |
 | 2 PatchValidator property | Pass; **H2-VAL-1** closed in H3 |
 | 3 MIDI parser fuzz | Pass: every emitted event in 0…127; **H2-MIDI-1** closed in H3 |
-| 4–6 | Not run in this step |
+| 4 Model round-trip | Pass: 80/80 seeded + dense control encode→decode→re-encode identical |
+| 5 Migration hostility | Pass on malformed/truncated/wrong-type; **H2-MIG-1** open for future schema |
+| 6 Scale | Pass: 50 tracks / 20k notes save, load, fingerprint, piano-roll layout |
+
+Scale timings from a green local run (illustrative; not pass/fail):
+`build≈0.04s encode≈0.04s decode≈0.06s fingerprint≈0.0003s packageWrite≈0.05s packageRead≈0.06s layout20k≈0.007s` (~4.4 MB JSON).
 
 ## Step H3 — Fix the two defects the fuzzer found — DONE
 
@@ -926,3 +955,22 @@ rather than an out-of-range one. Velocity-0-means-note-off is unchanged.
 
 Fuzz assertions tightened: every emitted event carries pitch, velocity, and controller
 values within 0–127 (fixed adversarial, seeded random, and structured+noise suites).
+
+## Step H4 — Fix H2-MIG-1: a newer schema loads and silently loses data — PENDING
+
+Found by the migration-hostility fuzz, and previously raised in the first objective review of
+this codebase as a non-blocking recommendation that was never actioned.
+
+`Migration.migrateRawIfNeeded` guards on `version < Schema.current` and returns the data
+untouched otherwise, so a project written by a FUTURE version of Verse decodes with no error.
+Codable drops the fields it does not know, and re-saving writes `schemaVersion: 99` back with
+those fields gone. That is silent data loss on the user's own song.
+
+Fix: reject when `schemaVersion > Schema.current` with a clear, plain-language error, for
+example "This song was made with a newer version of Verse." It must be a readable failure to
+open, never a partial load. Cover it both in `Project.fromJSON` and on the `.verse` package
+read path, and make sure `RecoveryManager` surfaces it sensibly rather than treating the
+autosave as unrecoverable garbage.
+
+Test: a project at `schemaVersion` above current fails to open with that message; a project at
+the current version is unaffected; an older version still migrates forward as today.

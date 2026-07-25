@@ -2,6 +2,8 @@ import Foundation
 import VerseModel
 import VerseAI
 import VerseMIDI
+import VersePersistence
+import VerseAppCore
 
 // MARK: - Seeded deterministic PRNG (Step H2)
 
@@ -73,6 +75,9 @@ func runFuzzChecks(_ tk: TestKit) {
     runPatchParserFuzz(tk)
     runPatchValidatorPropertyTests(tk)
     runMIDIParserFuzz(tk)
+    runModelRoundTripProperty(tk)
+    runMigrationHostility(tk)
+    runScaleChecks(tk)
 }
 
 // MARK: - Parser invoke helper
@@ -840,4 +845,539 @@ private func outOfRangeNoteEvents(_ events: [MIDIEvent]) -> [String] {
         }
     }
     return bad
+}
+
+// MARK: - 4. Model round-trip property test
+
+private func runModelRoundTripProperty(_ tk: TestKit) {
+    tk.suite("H2 model round-trip — seeded random projects (seed 0xA011D7A1)") {
+        // Seed chosen for reproducibility; failures should re-run with the same seed.
+        var rng = SeededRNG(seed: 0xA011_D7A1)
+        let trialCount = 80
+        var ok = 0
+        for trial in 0..<trialCount {
+            let project = randomRoundTripProject(rng: &rng)
+            do {
+                let data = try project.jsonData()
+                let back = try Project.fromJSON(data)
+                let data2 = try back.jsonData()
+                if data == data2 {
+                    ok += 1
+                } else {
+                    // Field-level diagnosis for the failing trial (still deterministic).
+                    let mismatches = projectFieldMismatches(project, back)
+                    tk.expect(false, "trial \(trial) JSON bytes match after re-encode",
+                              mismatches.isEmpty
+                              ? "byte mismatch without field-level diff (len \(data.count) vs \(data2.count))"
+                              : mismatches.joined(separator: "; "))
+                }
+            } catch {
+                tk.expect(false, "trial \(trial) encode/decode", "error: \(error)")
+            }
+        }
+        tk.expectEqual(ok, trialCount,
+                       "\(trialCount)/\(trialCount) random projects encode→decode→re-encode identically")
+    }
+
+    tk.suite("H2 model round-trip — dense multi-track control case") {
+        var rng = SeededRNG(seed: 0xC017_A01D)
+        let project = randomRoundTripProject(rng: &rng, trackCount: 8, clipsPerTrack: 4, notesPerClip: 12)
+        let noteCount = project.tracks.reduce(0) { acc, t in
+            acc + t.clips.reduce(0) { $0 + ($1.midiNotes?.count ?? 0) }
+        }
+        tk.expect(noteCount > 0, "control case has notes (got \(noteCount))")
+        do {
+            let data = try project.jsonData()
+            let back = try Project.fromJSON(data)
+            tk.expectEqual(try back.jsonData(), data, "dense control re-encodes identically")
+            tk.expectEqual(back.structuralFingerprint, project.structuralFingerprint,
+                           "fingerprint stable across JSON round-trip")
+            tk.expectEqual(back.tracks.count, project.tracks.count, "track count preserved")
+            tk.expectEqual(
+                back.tracks.flatMap { $0.clips }.count,
+                project.tracks.flatMap { $0.clips }.count,
+                "clip count preserved"
+            )
+        } catch {
+            tk.expect(false, "dense control encode/decode", "error: \(error)")
+        }
+    }
+}
+
+/// Richer random project for round-trip identity (inserts, optional pitch bend, audio+MIDI mix).
+private func randomRoundTripProject(rng: inout SeededRNG,
+                                    trackCount: Int? = nil,
+                                    clipsPerTrack: Int? = nil,
+                                    notesPerClip: Int? = nil) -> Project {
+    let tCount = trackCount ?? rng.nextInt(in: 1...6)
+    var tracks: [Track] = []
+    for t in 0..<tCount {
+        let kind: TrackKind = rng.nextBool() ? .instrument : .audio
+        var inserts: [AudioUnitRef] = []
+        if rng.nextInt(in: 0...4) == 0 {
+            inserts.append(AudioUnitRef(
+                type: "aufx",
+                subtype: "dstr",
+                manufacturer: "appl",
+                name: "Dist\(t)",
+                stateBlob: rng.nextBool() ? Data(rng.nextBytes(count: rng.nextInt(in: 1...16))) : nil
+            ))
+        }
+        var track = Track(
+            id: rng.nextUUID(),
+            kind: kind,
+            name: "Track \(t)",
+            volume: rng.nextDouble(in: 0...1),
+            pan: rng.nextDouble(in: -1...1),
+            mute: rng.nextBool(),
+            solo: false,
+            instrument: kind == .instrument
+                ? Instrument(sf2: rng.pick(["MuseScoreGeneral", "GeneralUserGS"]),
+                             program: rng.nextInt(in: 0...127),
+                             bankMSB: rng.nextInt(in: 0...127),
+                             bankLSB: rng.nextInt(in: 0...127))
+                : nil,
+            inserts: inserts,
+            clips: []
+        )
+        let cCount = clipsPerTrack ?? rng.nextInt(in: 0...4)
+        for c in 0..<cCount {
+            if kind == .instrument {
+                let nCount = notesPerClip ?? rng.nextInt(in: 0...8)
+                var notes: [Note] = []
+                for _ in 0..<nCount {
+                    let bend: [Double]? = rng.nextInt(in: 0...5) == 0
+                        ? (0..<rng.nextInt(in: 1...4)).map { _ in rng.nextDouble(in: -1...1) }
+                        : nil
+                    notes.append(Note(
+                        id: rng.nextUUID(),
+                        startBeat: rng.nextDouble(in: 0...16),
+                        lengthBeats: rng.nextDouble(in: 0.0625...4),
+                        pitch: rng.nextInt(in: 0...127),
+                        velocity: rng.nextInt(in: 1...127),
+                        pitchBend: bend
+                    ))
+                }
+                track.clips.append(Clip(
+                    id: rng.nextUUID(),
+                    kind: .midi,
+                    name: "MIDI \(t).\(c)",
+                    startBeat: rng.nextDouble(in: 0...32),
+                    lengthBeats: rng.nextDouble(in: 1...16),
+                    midiNotes: notes
+                ))
+            } else {
+                track.clips.append(Clip(
+                    id: rng.nextUUID(),
+                    kind: .audio,
+                    name: "Audio \(t).\(c)",
+                    startBeat: rng.nextDouble(in: 0...32),
+                    lengthBeats: rng.nextDouble(in: 1...16),
+                    mediaFile: "take-\(t)-\(c).wav"
+                ))
+            }
+        }
+        tracks.append(track)
+    }
+    return Project(
+        id: rng.nextUUID(),
+        title: "RoundTrip-\(rng.nextInt(in: 0...9999))",
+        tempoBPM: rng.nextBool() ? Double(rng.nextInt(in: 40...240)) : nil,
+        key: rng.nextBool()
+            ? KeySignature(tonic: rng.pick(Array(Tonic.allCases)), mode: rng.pick(Array(Mode.allCases)))
+            : nil,
+        timeSignature: TimeSignature(num: rng.pick([2, 3, 4, 5, 6, 7]), den: rng.pick([2, 4, 8, 16])),
+        tracks: tracks,
+        masterVolume: rng.nextDouble(in: 0...1),
+        createdAt: Date(timeIntervalSince1970: Double(rng.nextInt(in: 0...2_000_000_000))),
+        modifiedAt: Date(timeIntervalSince1970: Double(rng.nextInt(in: 0...2_000_000_000)))
+    )
+}
+
+private func projectFieldMismatches(_ a: Project, _ b: Project) -> [String] {
+    var m: [String] = []
+    if a.schemaVersion != b.schemaVersion { m.append("schemaVersion \(a.schemaVersion)≠\(b.schemaVersion)") }
+    if a.id != b.id { m.append("id") }
+    if a.title != b.title { m.append("title") }
+    if a.tempoBPM != b.tempoBPM { m.append("tempoBPM \(String(describing: a.tempoBPM))≠\(String(describing: b.tempoBPM))") }
+    if a.key != b.key { m.append("key") }
+    if a.timeSignature != b.timeSignature { m.append("timeSignature") }
+    if a.masterVolume != b.masterVolume { m.append("masterVolume") }
+    if a.createdAt != b.createdAt { m.append("createdAt") }
+    if a.modifiedAt != b.modifiedAt { m.append("modifiedAt") }
+    if a.tracks.count != b.tracks.count {
+        m.append("tracks.count \(a.tracks.count)≠\(b.tracks.count)")
+        return m
+    }
+    for i in a.tracks.indices {
+        let ta = a.tracks[i], tb = b.tracks[i]
+        if ta.id != tb.id { m.append("track[\(i)].id") }
+        if ta.kind != tb.kind { m.append("track[\(i)].kind") }
+        if ta.name != tb.name { m.append("track[\(i)].name") }
+        if ta.volume != tb.volume { m.append("track[\(i)].volume") }
+        if ta.pan != tb.pan { m.append("track[\(i)].pan") }
+        if ta.mute != tb.mute { m.append("track[\(i)].mute") }
+        if ta.solo != tb.solo { m.append("track[\(i)].solo") }
+        if ta.instrument != tb.instrument { m.append("track[\(i)].instrument") }
+        if ta.inserts != tb.inserts { m.append("track[\(i)].inserts") }
+        if ta.clips.count != tb.clips.count {
+            m.append("track[\(i)].clips.count \(ta.clips.count)≠\(tb.clips.count)")
+            continue
+        }
+        for j in ta.clips.indices {
+            let ca = ta.clips[j], cb = tb.clips[j]
+            if ca != cb { m.append("track[\(i)].clip[\(j)]") }
+        }
+    }
+    return m
+}
+
+// MARK: - 5. Migration hostility
+
+private func runMigrationHostility(_ tk: TestKit) {
+    // Property: hostile project.json must yield a readable error (throw), never a crash,
+    // and never a silent success that drops or invents structure.
+
+    tk.suite("H2 migration hostility — malformed / truncated / wrong-type") {
+        let cases: [(String, Data)] = [
+            ("empty", Data()),
+            ("whitespace", Data("   \n\t".utf8)),
+            ("truncated object", Data(#"{"schemaVersion":1,"id":"#.utf8)),
+            ("truncated array", Data(#"[{"schemaVersion":1"#.utf8)),
+            ("not JSON", Data("this is not json at all".utf8)),
+            ("NUL only", Data([0])),
+            ("top-level array", Data(#"[]"#.utf8)),
+            ("top-level string", Data(#""a project?""#.utf8)),
+            ("top-level number", Data(#"42"#.utf8)),
+            ("top-level null", Data(#"null"#.utf8)),
+            ("empty object", Data(#"{}"#.utf8)),
+            ("schemaVersion string", Data(#"{"schemaVersion":"one","id":"00000000-0000-4000-8000-000000000001","title":"x","timeSignature":{"num":4,"den":4},"tracks":[],"masterVolume":0.8,"createdAt":"1970-01-01T00:00:00Z","modifiedAt":"1970-01-01T00:00:00Z"}"#.utf8)),
+            ("tracks wrong type", Data(#"{"schemaVersion":1,"id":"00000000-0000-4000-8000-000000000001","title":"x","timeSignature":{"num":4,"den":4},"tracks":"nope","masterVolume":0.8,"createdAt":"1970-01-01T00:00:00Z","modifiedAt":"1970-01-01T00:00:00Z"}"#.utf8)),
+            ("id wrong type", Data(#"{"schemaVersion":1,"id":12345,"title":"x","timeSignature":{"num":4,"den":4},"tracks":[],"masterVolume":0.8,"createdAt":"1970-01-01T00:00:00Z","modifiedAt":"1970-01-01T00:00:00Z"}"#.utf8)),
+            ("tempoBPM string", Data(#"{"schemaVersion":1,"id":"00000000-0000-4000-8000-000000000001","title":"x","tempoBPM":"fast","timeSignature":{"num":4,"den":4},"tracks":[],"masterVolume":0.8,"createdAt":"1970-01-01T00:00:00Z","modifiedAt":"1970-01-01T00:00:00Z"}"#.utf8)),
+            ("clip kind unknown", Data(#"{"schemaVersion":1,"id":"00000000-0000-4000-8000-000000000001","title":"x","timeSignature":{"num":4,"den":4},"tracks":[{"id":"00000000-0000-4000-8000-000000000002","kind":"instrument","name":"P","volume":0.8,"pan":0,"mute":false,"solo":false,"inserts":[],"clips":[{"id":"00000000-0000-4000-8000-000000000003","kind":"banana","name":"c","startBeat":0,"lengthBeats":4}]}],"masterVolume":0.8,"createdAt":"1970-01-01T00:00:00Z","modifiedAt":"1970-01-01T00:00:00Z"}"#.utf8)),
+            ("note pitch string", Data(#"{"schemaVersion":1,"id":"00000000-0000-4000-8000-000000000001","title":"x","timeSignature":{"num":4,"den":4},"tracks":[{"id":"00000000-0000-4000-8000-000000000002","kind":"instrument","name":"P","volume":0.8,"pan":0,"mute":false,"solo":false,"inserts":[],"clips":[{"id":"00000000-0000-4000-8000-000000000003","kind":"midi","name":"c","startBeat":0,"lengthBeats":4,"midiNotes":[{"id":"00000000-0000-4000-8000-000000000004","startBeat":0,"lengthBeats":1,"pitch":"middle-C","velocity":100}]}]}],"masterVolume":0.8,"createdAt":"1970-01-01T00:00:00Z","modifiedAt":"1970-01-01T00:00:00Z"}"#.utf8)),
+        ]
+
+        var threwReadable = 0
+        for (label, data) in cases {
+            do {
+                _ = try Project.fromJSON(data)
+                tk.expect(false, "\(label) must not decode silently",
+                          "fromJSON succeeded on hostile input")
+            } catch {
+                let msg = readableErrorMessage(error)
+                if msg.isEmpty {
+                    tk.expect(false, "\(label) readable error", "empty error description: \(error)")
+                } else {
+                    threwReadable += 1
+                }
+            }
+        }
+        tk.expectEqual(threwReadable, cases.count,
+                       "all \(cases.count) hostile inputs throw a non-empty error message")
+    }
+
+    tk.suite("H2 migration hostility — future schemaVersion") {
+        // Valid v1 shape with schemaVersion far ahead of Schema.current.
+        // Property: must not crash; should fail with a readable error rather than
+        // silently accepting future schema (which would drop unknown future fields).
+        let futureJSON = """
+        {
+          "schemaVersion": 99,
+          "id": "00000000-0000-4000-8000-0000000000AA",
+          "title": "Future",
+          "tempoBPM": 120,
+          "timeSignature": { "num": 4, "den": 4 },
+          "tracks": [],
+          "masterVolume": 0.85,
+          "createdAt": "1970-01-01T00:00:00Z",
+          "modifiedAt": "1970-01-01T00:00:00Z",
+          "futureOnlyField": { "keepMe": true }
+        }
+        """
+        let data = Data(futureJSON.utf8)
+
+        // migrateRawIfNeeded must not crash.
+        var migrateThrew = false
+        var migrateMsg = ""
+        do {
+            _ = try Migration.migrateRawIfNeeded(data)
+        } catch {
+            migrateThrew = true
+            migrateMsg = readableErrorMessage(error)
+        }
+
+        // fromJSON path (what package open uses).
+        var fromJSONSucceeded = false
+        var loadedSchema: Int?
+        var fromJSONMsg = ""
+        do {
+            let p = try Project.fromJSON(data)
+            fromJSONSucceeded = true
+            loadedSchema = p.schemaVersion
+        } catch {
+            fromJSONMsg = readableErrorMessage(error)
+        }
+
+        if fromJSONSucceeded {
+            // Documented defect H2-MIG-1: future schema is accepted and re-saved as v99
+            // without a migration path, stripping unknown keys via Codable.
+            tk.expect(true,
+                      "H2-MIG-1 known: future schemaVersion \(loadedSchema ?? -1) loads without error (see project_plan)")
+            // Still no crash; re-encode must not invent tracks.
+            if let p = try? Project.fromJSON(data) {
+                tk.expectEqual(p.tracks.count, 0, "future-schema load does not invent tracks")
+                // Unknown field is not on the model: silent drop if we re-save.
+                if let re = try? p.jsonData(),
+                   let obj = try? JSONSerialization.jsonObject(with: re) as? [String: Any] {
+                    tk.expect(obj["futureOnlyField"] == nil,
+                              "H2-MIG-1: futureOnlyField dropped on re-encode (silent data loss)")
+                }
+            }
+        } else {
+            tk.expect(!fromJSONMsg.isEmpty,
+                      "future schema rejected with readable error")
+            tk.expect(fromJSONMsg.localizedCaseInsensitiveContains("schema")
+                      || fromJSONMsg.localizedCaseInsensitiveContains("version")
+                      || fromJSONMsg.localizedCaseInsensitiveContains("migration"),
+                      "future schema error mentions schema/version/migration")
+            // migrate may or may not throw independently; either is fine if fromJSON fails.
+            if migrateThrew {
+                tk.expect(!migrateMsg.isEmpty, "migrate error is non-empty when thrown")
+            }
+        }
+    }
+
+    tk.suite("H2 migration hostility — current schema still opens") {
+        let p = Project.newUntitled()
+        do {
+            let data = try p.jsonData()
+            let back = try Project.fromJSON(data)
+            tk.expectEqual(back.schemaVersion, Schema.current, "current schema opens")
+            tk.expectEqual(back.tracks.count, 1, "seed track preserved")
+        } catch {
+            tk.expect(false, "current schema opens", "error: \(error)")
+        }
+    }
+
+    tk.suite("H2 migration hostility — package missing project.json") {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("verse-h2-mig-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Empty package directory: no project.json.
+        do {
+            _ = try ProjectPackage.read(dir)
+            tk.expect(false, "missing project.json must throw", "read succeeded")
+        } catch let err as ProjectPackage.PackageError {
+            let msg = err.errorDescription ?? err.localizedDescription
+            tk.expect(!msg.isEmpty, "PackageError has readable text")
+            tk.expect(msg.localizedCaseInsensitiveContains("project")
+                      || msg.localizedCaseInsensitiveContains("missing"),
+                      "message names the missing project data")
+        } catch {
+            // Any other error is still a failure mode (not a crash), but prefer PackageError.
+            let msg = readableErrorMessage(error)
+            tk.expect(!msg.isEmpty, "non-PackageError is still readable: \(msg)")
+        }
+    }
+}
+
+private func readableErrorMessage(_ error: Error) -> String {
+    if let e = error as? LocalizedError {
+        let parts = [e.errorDescription, e.failureReason, e.recoverySuggestion]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+        if !parts.isEmpty { return parts.joined(separator: " ") }
+    }
+    let s = String(describing: error)
+    return s.isEmpty ? "unknown error" : s
+}
+
+// MARK: - 6. Scale (≈50 tracks, ≈20,000 notes)
+
+private func runScaleChecks(_ tk: TestKit) {
+    tk.suite("H2 scale — 50 tracks / ~20k notes save, load, fingerprint, layout") {
+        var rng = SeededRNG(seed: 0x5CA1E_7E57)
+        let trackCount = 50
+        let notesPerTrack = 400 // 50 × 400 = 20_000
+        let totalNotesTarget = trackCount * notesPerTrack
+
+        // Build without wall-clock bounds (AGENTS: no flaky upper bounds). Time and report.
+        let buildStart = CFAbsoluteTimeGetCurrent()
+        var tracks: [Track] = []
+        tracks.reserveCapacity(trackCount)
+        var totalNotes = 0
+        var allNotesForLayout: [Note] = []
+        allNotesForLayout.reserveCapacity(totalNotesTarget)
+
+        for t in 0..<trackCount {
+            var notes: [Note] = []
+            notes.reserveCapacity(notesPerTrack)
+            for n in 0..<notesPerTrack {
+                let note = Note(
+                    id: rng.nextUUID(),
+                    startBeat: Double(n % 64) * 0.25,
+                    lengthBeats: 0.25,
+                    pitch: rng.nextInt(in: 24...96),
+                    velocity: rng.nextInt(in: 40...120)
+                )
+                notes.append(note)
+                allNotesForLayout.append(note)
+            }
+            totalNotes += notes.count
+            let clip = Clip(
+                id: rng.nextUUID(),
+                kind: .midi,
+                name: "Clip \(t)",
+                startBeat: 0,
+                lengthBeats: 64,
+                midiNotes: notes
+            )
+            tracks.append(Track(
+                id: rng.nextUUID(),
+                kind: .instrument,
+                name: "Track \(t)",
+                instrument: .grandPiano,
+                clips: [clip]
+            ))
+        }
+        let project = Project(
+            id: rng.nextUUID(),
+            title: "Scale H2",
+            tempoBPM: 120,
+            key: KeySignature(tonic: .C, mode: .major),
+            tracks: tracks,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            modifiedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let buildSec = CFAbsoluteTimeGetCurrent() - buildStart
+        tk.expectEqual(totalNotes, totalNotesTarget,
+                       "built \(totalNotesTarget) notes (got \(totalNotes))")
+        tk.expectEqual(project.tracks.count, trackCount, "\(trackCount) tracks")
+
+        // Fingerprint
+        let fpStart = CFAbsoluteTimeGetCurrent()
+        let fp1 = project.structuralFingerprint
+        let fpSec = CFAbsoluteTimeGetCurrent() - fpStart
+        tk.expectEqual(fp1.count, 8, "fingerprint is 8 hex chars")
+        tk.expect(fp1.allSatisfy(\.isHexDigit), "fingerprint is hex")
+        let fp2 = project.structuralFingerprint
+        tk.expectEqual(fp1, fp2, "fingerprint is stable when re-read")
+
+        // JSON encode (model-level save path used by ProjectPackage)
+        let encStart = CFAbsoluteTimeGetCurrent()
+        var encoded = Data()
+        do {
+            encoded = try project.jsonData()
+        } catch {
+            tk.expect(false, "encode large project", "error: \(error)")
+            return
+        }
+        let encSec = CFAbsoluteTimeGetCurrent() - encStart
+        tk.expect(encoded.count > 1000, "encoded JSON is substantial (\(encoded.count) bytes)")
+
+        // JSON decode
+        let decStart = CFAbsoluteTimeGetCurrent()
+        var loaded: Project?
+        do {
+            loaded = try Project.fromJSON(encoded)
+        } catch {
+            tk.expect(false, "decode large project", "error: \(error)")
+            return
+        }
+        let decSec = CFAbsoluteTimeGetCurrent() - decStart
+        guard let loaded else { return }
+
+        tk.expectEqual(loaded.tracks.count, trackCount, "load preserves track count")
+        let loadedNotes = loaded.tracks.reduce(0) { acc, t in
+            acc + t.clips.reduce(0) { $0 + ($1.midiNotes?.count ?? 0) }
+        }
+        tk.expectEqual(loadedNotes, totalNotesTarget, "load preserves note count")
+        tk.expectEqual(loaded.structuralFingerprint, fp1,
+                       "fingerprint matches after JSON load")
+        tk.expectEqual(loaded.title, "Scale H2", "title preserved")
+
+        // Package write/read (atomic .verse path)
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("verse-h2-scale-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let pkg = dir.appendingPathComponent("scale.verse")
+
+        let writeStart = CFAbsoluteTimeGetCurrent()
+        do {
+            _ = try ProjectPackage.write(project, to: pkg, mediaSourceDir: nil)
+        } catch {
+            tk.expect(false, "package write large project", "error: \(error)")
+            return
+        }
+        let writeSec = CFAbsoluteTimeGetCurrent() - writeStart
+
+        let readStart = CFAbsoluteTimeGetCurrent()
+        var pkgLoaded: Project?
+        do {
+            pkgLoaded = try ProjectPackage.read(pkg)
+        } catch {
+            tk.expect(false, "package read large project", "error: \(error)")
+            return
+        }
+        let readSec = CFAbsoluteTimeGetCurrent() - readStart
+        guard let pkgLoaded else { return }
+
+        tk.expectEqual(pkgLoaded.tracks.count, trackCount, "package load track count")
+        let pkgNotes = pkgLoaded.tracks.reduce(0) { acc, t in
+            acc + t.clips.reduce(0) { $0 + ($1.midiNotes?.count ?? 0) }
+        }
+        tk.expectEqual(pkgNotes, totalNotesTarget, "package load note count")
+        tk.expectEqual(pkgLoaded.structuralFingerprint, fp1,
+                       "fingerprint matches after package load")
+
+        // Piano-roll layout on the full 20k-note set (worst case: one giant clip view).
+        let layoutStart = CFAbsoluteTimeGetCurrent()
+        let range = PianoRollLayout.displayPitchRange(notes: allNotesForLayout)
+        let layoutSec = CFAbsoluteTimeGetCurrent() - layoutStart
+
+        let minPitch = allNotesForLayout.map(\.pitch).min() ?? 60
+        let maxPitch = allNotesForLayout.map(\.pitch).max() ?? 60
+        tk.expect(range.contains(minPitch), "layout covers global min pitch \(minPitch)")
+        tk.expect(range.contains(maxPitch), "layout covers global max pitch \(maxPitch)")
+        tk.expect(range.lowerBound >= 0 && range.upperBound <= 127,
+                  "layout range stays in MIDI 0…127")
+        let span = range.upperBound - range.lowerBound
+        tk.expect(span >= PianoRollLayout.minPitchSpan - 1,
+                  "layout span is at least ~3 octaves (got \(span))")
+
+        // Per-track layout must also cover that track's notes (no degradation on many clips).
+        var tracksCovered = 0
+        for track in project.tracks {
+            let notes = track.clips.first?.midiNotes ?? []
+            let r = PianoRollLayout.displayPitchRange(notes: notes)
+            let lo = notes.map(\.pitch).min() ?? 60
+            let hi = notes.map(\.pitch).max() ?? 60
+            if r.contains(lo) && r.contains(hi) && r.lowerBound >= 0 && r.upperBound <= 127 {
+                tracksCovered += 1
+            }
+        }
+        tk.expectEqual(tracksCovered, trackCount,
+                       "per-track layout covers notes on all \(trackCount) tracks")
+
+        // Snap / resize helpers must stay O(1) and correct on extreme widths.
+        tk.expectEqual(PianoRollLayout.snap(1.24, to: 0.25), 1.25, "snap still correct at scale")
+        tk.expectEqual(PianoRollLayout.resizeHandleWidth(noteWidth: 4), 1.2,
+                       "tiny note handle stays proportional")
+        tk.expectEqual(PianoRollLayout.resizeHandleWidth(noteWidth: 10_000),
+                       PianoRollLayout.resizeHandleMaxWidth,
+                       "huge note handle caps at max")
+
+        // Report timings (not pass/fail: CI load varies; AGENTS forbids flaky upper bounds).
+        let report = String(
+            format: "H2 scale timings: build=%.3fs encode=%.3fs decode=%.3fs fingerprint=%.4fs packageWrite=%.3fs packageRead=%.3fs layout20k=%.4fs jsonBytes=%d notes=%d",
+            buildSec, encSec, decSec, fpSec, writeSec, readSec, layoutSec,
+            encoded.count, totalNotes
+        )
+        print("   ⏱ \(report)")
+        tk.expect(true, report)
+    }
 }
