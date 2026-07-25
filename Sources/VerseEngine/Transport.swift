@@ -19,12 +19,29 @@ public final class Transport {
     private var loopTimer: Timer?
     private let metronome: Metronome
 
+    /// Wall-clock start of the current play call (before the scheduling lead).
+    private var playWallStart: Date?
+    private var playStartBeat: Double = 0
+    private var playBPM: Double = 120
+    private var playLead: Double = 0.12
+
     public var onStop: (() -> Void)?
     public var metronomeEnabled = false
 
     public init(engine: VerseAudioEngine) {
         self.engine = engine
         self.metronome = Metronome(engine: engine)
+    }
+
+    /// Arrangement beat under the playhead while playing; `nil` when stopped.
+    ///
+    /// Cheap: derived from wall clock, start beat, BPM, and the same lead used for scheduling.
+    /// Musical t=0 is `playWallStart + lead` (when the first scheduled events fire).
+    public var currentBeat: Double? {
+        guard state == .playing, let start = playWallStart else { return nil }
+        let elapsed = Date().timeIntervalSince(start) - playLead
+        if elapsed < 0 { return playStartBeat }
+        return playStartBeat + elapsed * (playBPM / 60.0)
     }
 
     /// Begin playback from `startBeat`. `mediaDir` resolves audio clip filenames.
@@ -34,6 +51,11 @@ public final class Transport {
         let bpm = project.tempoBPM ?? 120
         let spb = 60.0 / bpm
         let lead = 0.12   // small scheduling lead so all sources start together
+        let wallStart = Date()
+        playWallStart = wallStart
+        playStartBeat = startBeat
+        playBPM = bpm
+        playLead = lead
         let anchorHost = mach_absolute_time() + AVAudioTime.hostTime(forSeconds: lead)
         let midiAnchor = DispatchTime.now() + lead
         var endSeconds = 0.0
@@ -103,6 +125,7 @@ public final class Transport {
         metronome.stop()
         engine.allNotesOff()
         for id in engine.allTrackIDs { engine.playerNode(for: id)?.stop() }
+        playWallStart = nil
         state = .stopped
     }
 

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import VerseModel
 
@@ -23,7 +24,6 @@ struct PianoRollView: View {
     private static let rowHeight: CGFloat = 18
     private static let beatWidth: CGFloat = 56
     private static let gutterWidth: CGFloat = 48
-    private static let resizeHandleWidth: CGFloat = 10
     private static let clickSlop: CGFloat = 4
 
     private var clipID: UUID? { store.pianoRollClipID }
@@ -70,7 +70,7 @@ struct PianoRollView: View {
                 ContentUnavailableView(
                     "No clip to show",
                     systemImage: "music.note.list",
-                    description: Text("Open the piano roll from a track that has a MIDI clip.")
+                    description: Text("Open the piano roll from an instrument track. A brand-new project creates an empty MIDI clip for you.")
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -170,6 +170,8 @@ struct PianoRollView: View {
                     emptyGridHitTarget(beatWidth: beatW, rowHeight: rowH,
                                        totalWidth: totalWidth, totalHeight: totalHeight)
                     notesLayer(beatWidth: beatW, rowHeight: rowH)
+                    // Playhead over the grid during playback (cheap: one vertical line).
+                    playheadLayer(beatWidth: beatW, totalHeight: totalHeight)
                 }
                 .frame(width: totalWidth, height: totalHeight, alignment: .topLeading)
                 .coordinateSpace(name: "pianoRollGrid")
@@ -178,6 +180,27 @@ struct PianoRollView: View {
         .background(Color(nsColor: .textBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.black.opacity(0.12)))
+    }
+
+    /// Vertical playhead at the transport’s current arrangement beat, mapped into clip-local time.
+    @ViewBuilder
+    private func playheadLayer(beatWidth: CGFloat, totalHeight: CGFloat) -> some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !store.isPlaying)) { _ in
+            if store.isPlaying,
+               let beat = store.playbackBeat,
+               let clip {
+                let local = beat - clip.startBeat
+                if local >= 0 && local <= contentBeats {
+                    let x = CGFloat(local) * beatWidth
+                    Rectangle()
+                        .fill(Color.red.opacity(0.85))
+                        .frame(width: 1.5, height: totalHeight)
+                        .offset(x: x)
+                        .allowsHitTesting(false)
+                }
+            }
+        }
+        .allowsHitTesting(false)
     }
 
     // MARK: - Gutter (piano keys)
@@ -281,6 +304,8 @@ struct PianoRollView: View {
         let w = max(CGFloat(note.lengthBeats) * beatWidth, 6)
         let h = max(rowHeight - 2, 6)
         let selected = note.id == selectedNoteID
+        // Proportional, capped resize zone so short notes (default 1/16) keep a move body.
+        let handleW = PianoRollLayout.resizeHandleWidth(noteWidth: w)
 
         ZStack(alignment: .trailing) {
             RoundedRectangle(cornerRadius: 3)
@@ -293,8 +318,15 @@ struct PianoRollView: View {
             // Right-edge resize handle (high priority so it wins over body move).
             Rectangle()
                 .fill(Color.primary.opacity(selected ? 0.35 : 0.18))
-                .frame(width: Self.resizeHandleWidth)
+                .frame(width: handleW)
                 .contentShape(Rectangle())
+                .onHover { hovering in
+                    if hovering {
+                        NSCursor.resizeLeftRight.push()
+                    } else {
+                        NSCursor.pop()
+                    }
+                }
                 .highPriorityGesture(resizeGesture(for: note, beatWidth: beatWidth))
         }
         .frame(width: w, height: h)
@@ -469,6 +501,21 @@ struct PianoRollView: View {
 public enum PianoRollLayout {
     /// About three octaves of pitch rows (minimum viewport height in pitch space).
     public static let minPitchSpan = 36
+
+    /// Max pixel width of the right-edge resize handle on a note block.
+    public static let resizeHandleMaxWidth: CGFloat = 10
+    /// Fraction of note width used for resize when the note is shorter than the fixed max.
+    public static let resizeHandleFraction: CGFloat = 0.3
+
+    /// Resize hit zone for a note of the given pixel width.
+    ///
+    /// Fixed-width handles cover the whole block on short notes (default snap is 1/16), so
+    /// every newly drawn note became unmovable. Cap the zone at 30% of note width so the
+    /// middle always moves.
+    public static func resizeHandleWidth(noteWidth: CGFloat) -> CGFloat {
+        guard noteWidth > 0 else { return 0 }
+        return min(resizeHandleMaxWidth, noteWidth * resizeHandleFraction)
+    }
 
     /// Inclusive pitch window: always covers every note, at least ~3 octaves, clamped to 0…127.
     /// Opening the roll therefore shows existing notes without vertical scrolling.

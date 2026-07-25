@@ -506,7 +506,7 @@ completed gesture: snapshot on drag begin, mutate freely during the drag, and do
 again until the next gesture starts. Label entries plainly: "Add Note", "Move Note",
 "Resize Note", "Delete Note".
 
-## Step P4 — Integration — PENDING
+## Step P4 — Integration — DONE
 
 1. Reachable in an obvious way from the track row for MIDI clips, and for a track with no clip
    yet, an obvious way to create an empty clip and start drawing.
@@ -552,7 +552,7 @@ Also required:
 - Edits route through the same autosave path as every other mutation.
 - Remove the "Read-only preview; drawing notes comes next" banner once editing works.
 
-## Step P5 — Short notes cannot be moved (found by running it) — PENDING
+## Step P5 — Short notes cannot be moved (found by running it) — DONE
 
 Verified live: the resize hit zone is a fixed pixel width taken from the right edge of a note.
 On a note only 1/16 long, that zone covers essentially the whole block, so dragging it always
@@ -563,7 +563,7 @@ Fix: make the resize zone proportional and bounded, for example
 `min(fixedEdgeWidth, noteWidth * 0.3)`, so the middle of even the shortest note always moves.
 Consider a cursor change over the resize zone so the two behaviours are discoverable.
 
-## Step P4 — Piano roll integration — PENDING
+## Step P4 — Piano roll integration — DONE
 
 1. A track with no MIDI clip needs an obvious way to create an empty clip and start drawing.
    Today the roll can only be opened for a clip that already exists, so a brand-new project
