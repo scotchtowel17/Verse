@@ -390,3 +390,62 @@ failing until this bug is fixed (do not weaken it to match the broken return val
 the file. Latent only: production reads the value before `stop()` in
 `VerseAudioEngine.stopRecording`, so no user-visible behavior changed. The G5 assertion stays
 as the contract lock. 514 assertions green.
+
+---
+
+# Phase F — Sound that is actually good, and instruments that behave
+
+Investigation before writing this: the SF2 was never fetched on this machine, so every preset
+played the sampler's built-in default voice. "Grand Piano", "Warm Pad", and "Drum Kit" all
+sounded identical, and the whole preset list was cosmetic. Fetching `GeneralUserGS.sf2`
+(SHA-256 verified against THIRD-PARTY-LICENSES.md) fixed that instantly and the header badge
+now reads "GeneralUser GS" instead of "Built-in voice". That is the single biggest sound win
+available and it needed no code.
+
+## Step F1 — Guarantee a built app has real sounds — PENDING
+
+The SF2 is gitignored by design and the app degrades gracefully without it, so a fresh clone
+or a CI build silently produces an app where every instrument sounds the same.
+
+1. `scripts/make-app.sh` fetches the SF2 when it is missing, before assembling the bundle.
+2. Verify the download against the SHA-256 already recorded in THIRD-PARTY-LICENSES.md. On a
+   checksum mismatch, do NOT bundle it: warn clearly and continue with the built-in voice.
+   Never bundle an unverified binary.
+3. Keep the graceful-degradation path intact (Build Contract section 9): no network, no SF2,
+   the app must still build, launch, and make sound.
+4. Do not commit the SF2. Do not change `.gitignore`.
+
+## Step F2 — Separate track name from instrument — PENDING
+
+`TrackListView` binds the instrument Picker to `track.name`, and the preset tags are preset
+names. A new project's track is named "Piano" while the preset is "Grand Piano", so **the
+picker renders blank on every new project**. Worse, the two are conflated in both directions:
+`selectPreset` overwrites `track.name`, so choosing an instrument renames the user's track;
+and renaming a track (including via a Claude `renameTrack` patch) blanks its instrument.
+
+1. Bind the Picker to the track's actual instrument identity (program + bankMSB + bankLSB),
+   not to `track.name`. Match the current `Instrument` against the preset list so the correct
+   preset always shows selected.
+2. `selectPreset` must set the instrument and must NOT rename the track. Auto-naming a
+   still-default track name is acceptable (for example a track literally named "Piano",
+   "Instrument 2", or "Audio 3"), but a name the user or Claude chose must be preserved.
+3. If the current instrument matches no curated preset (a Claude `setInstrument` patch can
+   choose any GM program 0-127), show it honestly rather than blank: a "Custom (program N)"
+   entry that is displayed but not selectable as a new choice.
+4. Tests: a new project's track resolves to the Grand Piano preset; renaming a track leaves
+   its instrument selection intact; `selectPreset` on a user-renamed track keeps the name;
+   an off-list GM program resolves to the custom label instead of nothing.
+
+## Step F3 — Curated preset list worth browsing — PENDING
+
+Only meaningful now that the SF2 is real. Expand `presets.json` from 7 to roughly 20-28
+auditioned GM presets, grouped by the existing `category` field, covering at least Keys,
+Guitar, Bass, Strings, Brass, Woodwind, Synth Lead, Pad, and Drums. Use standard GM program
+numbers (bankMSB 121 for melodic, 120 for drums). Keep `fallbackPresets` in `SoundBank.swift`
+in sync with the manifest. Group by category in the picker so a longer list stays scannable.
+
+Do NOT add a phrase library in this phase; it is a separate capability with its own safety
+questions and gets its own phase.
+
+Constraints: no new dependencies, no schema change, `swift build` clean, `swift run VerseCheck`
+green, app bundles and launches.
