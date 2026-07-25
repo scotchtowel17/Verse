@@ -30,7 +30,7 @@ public final class AppStore {
     var baseOctaveC: Int = 60
 
     // Recording / metering UI state
-    var isRecording = false
+    public var isRecording = false
     var monitoring = false
     var masterLevel: Float = 0
     var inputLevel: Float = 0
@@ -43,7 +43,7 @@ public final class AppStore {
     var statusMessage: String?
 
     // Transport / multitrack state
-    var isPlaying = false
+    public var isPlaying = false
     var metronomeOn = false
     var loopOn = false
     var trackLevels: [UUID: Float] = [:]
@@ -97,11 +97,24 @@ public final class AppStore {
     @ObservationIgnored private var meterTimer: Timer?
     @ObservationIgnored private var autosaveTimer: Timer?
     @ObservationIgnored private var midiInput: MIDIInput?
+    /// In-progress MIDI take while record is armed (notes land on stop). See Phase M3.
+    @ObservationIgnored private var midiCapture: MIDICaptureState?
     /// True between `beginPianoRollGesture` and `endPianoRollGesture`. Prevents a second
     /// undo snapshot mid-drag if the view mis-fires begin.
     @ObservationIgnored private var pianoRollGestureActive = false
     /// Pitch currently sounding from a piano-roll audition (separate from keyboard holds).
     @ObservationIgnored private var pianoRollAuditionPitch: Int?
+
+    /// Pending MIDI notes captured during an armed record take (arrangement-absolute starts).
+    struct MIDICaptureState {
+        var trackID: UUID
+        /// Completed notes with arrangement-beat `startBeat` / `lengthBeats`.
+        var completed: [Note] = []
+        /// Pitch → (arrangement start beat, velocity) for notes still held.
+        var open: [Int: (startBeat: Double, velocity: Int)] = [:]
+        /// Last transport beat seen while capturing (used when the playhead stops).
+        var lastBeat: Double = 0
+    }
 
     /// Captured takes stream here; this is the persistent crash-recovery workspace.
     @ObservationIgnored var workingMediaDir: URL { recovery.mediaDir }
@@ -386,14 +399,21 @@ public final class AppStore {
     }
 
     /// Route decoded MIDI to the active instrument and `heldNotes` (same path as the
-    /// on-screen keyboard). Control changes are accepted by the parser but not mapped yet.
+    /// on-screen keyboard). While record is armed and the transport is playing, note on/off
+    /// are also captured into a pending MIDI take (committed on stop as one “Record MIDI” undo).
+    /// Control changes are accepted by the parser but not mapped yet.
     public func handleMIDIEvents(_ events: [MIDIEvent]) {
         for event in events {
             switch event {
             case .noteOn(_, let note, let velocity):
-                noteOn(Int(note), velocity: Int(velocity))
+                let pitch = Int(note)
+                let vel = Int(velocity)
+                noteOn(pitch, velocity: vel)
+                captureMIDINoteOn(pitch: pitch, velocity: vel)
             case .noteOff(_, let note, _):
-                noteOff(Int(note))
+                let pitch = Int(note)
+                noteOff(pitch)
+                captureMIDINoteOff(pitch: pitch)
             case .controlChange:
                 break
             }
@@ -404,6 +424,128 @@ public final class AppStore {
     public func rescanMIDISources() {
         midiInput?.rescanSources()
         midiSourceNames = midiInput?.sourceNames ?? []
+    }
+
+    // MARK: MIDI capture (Phase M3)
+
+    /// True when note events should be captured into a MIDI clip (record armed + playing +
+    /// active instrument track).
+    private var isCapturingMIDI: Bool {
+        guard isRecording, isPlaying else { return false }
+        guard let track = project.track(id: activeTrackID), track.kind == .instrument else {
+            return false
+        }
+        return true
+    }
+
+    /// Ensure a capture session exists for the active instrument while record is armed.
+    private func ensureMIDICaptureSession() {
+        guard isRecording else { return }
+        guard let track = project.track(id: activeTrackID), track.kind == .instrument else {
+            return
+        }
+        if midiCapture == nil || midiCapture?.trackID != activeTrackID {
+            // Switching the active track mid-take starts a fresh pending buffer for that track.
+            // Any prior uncommitted notes on another track are discarded (record was still armed).
+            midiCapture = MIDICaptureState(trackID: activeTrackID)
+        }
+    }
+
+    private func captureMIDINoteOn(pitch: Int, velocity: Int) {
+        guard isCapturingMIDI else { return }
+        ensureMIDICaptureSession()
+        guard var session = midiCapture else { return }
+        guard let beat = transport.currentBeat else { return }
+        session.lastBeat = beat
+        // Re-trigger: close any prior open note on this pitch at this beat, then open again.
+        if let prior = session.open.removeValue(forKey: pitch) {
+            let length = max(Project.minimumNoteLengthBeats, beat - prior.startBeat)
+            session.completed.append(
+                Note(startBeat: prior.startBeat, lengthBeats: length,
+                     pitch: pitch, velocity: prior.velocity)
+            )
+        }
+        session.open[pitch] = (startBeat: beat, velocity: max(1, min(127, velocity)))
+        midiCapture = session
+    }
+
+    private func captureMIDINoteOff(pitch: Int) {
+        guard isRecording, var session = midiCapture else { return }
+        guard let prior = session.open.removeValue(forKey: pitch) else { return }
+        let beat = transport.currentBeat ?? session.lastBeat
+        session.lastBeat = beat
+        let length = max(Project.minimumNoteLengthBeats, beat - prior.startBeat)
+        session.completed.append(
+            Note(startBeat: prior.startBeat, lengthBeats: length,
+                 pitch: pitch, velocity: prior.velocity)
+        )
+        midiCapture = session
+    }
+
+    /// Close every still-held capture note at `beat` (recording or playback stop).
+    private func closeOpenMIDINotes(at beat: Double) {
+        guard var session = midiCapture else { return }
+        session.lastBeat = beat
+        for (pitch, prior) in session.open {
+            let length = max(Project.minimumNoteLengthBeats, beat - prior.startBeat)
+            session.completed.append(
+                Note(startBeat: prior.startBeat, lengthBeats: length,
+                     pitch: pitch, velocity: prior.velocity)
+            )
+        }
+        session.open.removeAll()
+        midiCapture = session
+    }
+
+    /// Transport stop hook: finish open capture notes at the playhead without committing.
+    func endOpenMIDICaptureNotesAtPlayhead() {
+        guard isRecording, let session = midiCapture else { return }
+        let beat = transport.currentBeat ?? session.lastBeat
+        closeOpenMIDINotes(at: beat)
+    }
+
+    /// Write the pending MIDI take into a clip on the capture track. One undo entry when
+    /// anything was captured; no-op (and no undo) when the take was empty.
+    private func commitMIDICapture() {
+        let stopBeat = transport.currentBeat ?? midiCapture?.lastBeat ?? 0
+        closeOpenMIDINotes(at: stopBeat)
+        guard let session = midiCapture else { return }
+        midiCapture = nil
+        guard !session.completed.isEmpty else { return }
+        guard let ti = project.trackIndex(id: session.trackID) else { return }
+        guard project.tracks[ti].kind == .instrument else { return }
+
+        history.record(project, name: "Record MIDI")
+
+        let clipIndex: Int
+        if let existing = project.tracks[ti].clips.firstIndex(where: { $0.kind == .midi }) {
+            clipIndex = existing
+        } else {
+            let maxEnd = session.completed.map { $0.startBeat + $0.lengthBeats }.max() ?? 4
+            let bars = 4
+            let beatsPerBar = max(1, project.timeSignature.num)
+            let length = max(Double(beatsPerBar * bars), maxEnd + 0.25)
+            let clip = Clip(kind: .midi, name: "MIDI", startBeat: 0, lengthBeats: length, midiNotes: [])
+            project.tracks[ti].clips.append(clip)
+            clipIndex = project.tracks[ti].clips.count - 1
+        }
+
+        var clip = project.tracks[ti].clips[clipIndex]
+        var notes = clip.midiNotes ?? []
+        for n in session.completed {
+            let relStart = max(0, n.startBeat - clip.startBeat)
+            let length = max(Project.minimumNoteLengthBeats, n.lengthBeats)
+            notes.append(Note(startBeat: relStart, lengthBeats: length,
+                              pitch: n.pitch, velocity: n.velocity))
+        }
+        let noteEnd = notes.map { $0.startBeat + $0.lengthBeats }.max() ?? 0
+        if noteEnd > clip.lengthBeats {
+            clip.lengthBeats = noteEnd
+        }
+        clip.midiNotes = notes
+        project.tracks[ti].clips[clipIndex] = clip
+        recovery.autosave(project)
+        statusMessage = "Recorded \(session.completed.count) MIDI note\(session.completed.count == 1 ? "" : "s")."
     }
 
     // MARK: - Instrument selection
@@ -450,28 +592,54 @@ public final class AppStore {
 
     // MARK: - Recording → clips
 
-    func toggleRecording() {
+    public func toggleRecording() {
         // Copilot preview sheet does not disable menu/keyboard shortcuts on its own.
         guard !copilotPreviewBlocksTransport else { return }
         isRecording ? stopRecording() : startRecording()
     }
 
-    func startRecording() {
+    public func startRecording() {
         guard !copilotPreviewBlocksTransport else { return }
         recordError = nil
+        // Audio take path (mic → CAF). May fail without a microphone; instrument tracks can
+        // still arm for MIDI capture (Phase M3) without audio input.
+        var audioArmed = false
         let url = recovery.newTakeURL()
         do {
             try engine.startRecording(to: url)
             recovery.noteRecordingStarted(takeFilename: url.lastPathComponent)
-            isRecording = true
+            audioArmed = true
         } catch {
-            recordError = error.localizedDescription
+            if activeTrack?.kind == .instrument {
+                // Soft-fail: MIDI record does not need the mic. Clear error so the UI does
+                // not claim recording failed when MIDI capture is available.
+                recordError = nil
+            } else {
+                recordError = error.localizedDescription
+                return
+            }
+        }
+        isRecording = true
+        // Pending MIDI take for the active instrument; notes only land while playing.
+        if activeTrack?.kind == .instrument {
+            midiCapture = MIDICaptureState(trackID: activeTrackID,
+                                           lastBeat: transport.currentBeat ?? 0)
+        } else if !audioArmed {
+            // Should be unreachable: non-instrument without audio already returned.
+            isRecording = false
         }
     }
 
-    func stopRecording() {
-        let result = engine.stopRecording()
-        recovery.noteRecordingStopped()
+    public func stopRecording() {
+        // Commit MIDI take first so a held note closes at the current playhead.
+        commitMIDICapture()
+
+        let audioWasRecording = engine.isRecording
+        var result: (url: URL?, frames: AVAudioFramePosition, seconds: Double) = (nil, 0, 0)
+        if audioWasRecording {
+            result = engine.stopRecording()
+            recovery.noteRecordingStopped()
+        }
         isRecording = false
         if let url = result.url, result.seconds > 0 {
             history.record(project, name: "Record Take")

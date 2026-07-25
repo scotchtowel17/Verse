@@ -7,6 +7,10 @@ import CoreMIDI
 /// **Threading:** CoreMIDI packet callbacks arrive on a high-priority MIDI thread.
 /// `VerseAudioEngine` is main-thread-only. This type always hops to the main queue before
 /// invoking `onEvents` or `onSourcesChanged`. Never call the audio engine from a MIDI callback.
+///
+/// **Hot-plug:** CoreMIDI setup notifications (`msgSetupChanged`, object added/removed) re-scan
+/// sources and connect new endpoints / drop vanished ones. A controller plugged in after launch
+/// is picked up without restarting the app.
 public final class MIDIInput: @unchecked Sendable {
 
     public private(set) var sourceNames: [String] = []
@@ -19,15 +23,24 @@ public final class MIDIInput: @unchecked Sendable {
 
     private var client: MIDIClientRef = 0
     private var port: MIDIPortRef = 0
-    private var connectedSources: [MIDIEndpointRef] = []
+    /// Connected sources keyed by CoreMIDI unique ID (stable across re-enumeration).
+    private var connectedByUniqueID: [MIDIUniqueID: MIDIEndpointRef] = [:]
+    /// Holds CoreMIDI blocks so they do not capture `self` mid-init (weak self would be nil).
+    private let callbacks = CallbackBox()
+    /// Coalesces bursty setup notifications into one rescan on the main queue.
+    private var rescanPending = false
 
     /// Create a CoreMIDI client and input port, then connect every current source.
     /// Throws a plain-language error if CoreMIDI setup fails.
     public init(clientName: String = "Verse") throws {
+        let box = callbacks
+
         var clientRef: MIDIClientRef = 0
         // Notification block: CoreMIDI may call this off the main thread.
-        let clientStatus = MIDIClientCreateWithBlock(clientName as CFString, &clientRef) { [weak self] notification in
-            self?.handleNotification(notification)
+        // Route through CallbackBox so the block is valid for the client lifetime without
+        // capturing an uninitialized `self`.
+        let clientStatus = MIDIClientCreateWithBlock(clientName as CFString, &clientRef) { notification in
+            box.onNotify?(notification)
         }
         guard clientStatus == noErr else {
             throw MIDIInputError.setupFailed("Couldn’t create a MIDI client (error \(clientStatus)).")
@@ -40,8 +53,8 @@ public final class MIDIInput: @unchecked Sendable {
             client,
             "\(clientName) Input" as CFString,
             &portRef
-        ) { [weak self] packetList, _ in
-            self?.handlePacketList(packetList)
+        ) { packetList, _ in
+            box.onPacket?(packetList)
         }
         guard portStatus == noErr else {
             MIDIClientDispose(client)
@@ -50,14 +63,25 @@ public final class MIDIInput: @unchecked Sendable {
         }
         port = portRef
 
+        // Wire callbacks only after all stored properties are set.
+        box.onNotify = { [weak self] notification in
+            self?.handleNotification(notification)
+        }
+        box.onPacket = { [weak self] packetList in
+            self?.handlePacketList(packetList)
+        }
+
         rescanSources()
     }
 
     deinit {
+        callbacks.onNotify = nil
+        callbacks.onPacket = nil
         if port != 0 {
-            for src in connectedSources {
+            for src in connectedByUniqueID.values {
                 MIDIPortDisconnectSource(port, src)
             }
+            connectedByUniqueID.removeAll()
             MIDIPortDispose(port)
             port = 0
         }
@@ -67,28 +91,43 @@ public final class MIDIInput: @unchecked Sendable {
         }
     }
 
-    /// Re-enumerate sources and reconnect. Safe to call after hot-plug notifications.
+    /// Re-enumerate sources and connect any new ones / drop any that vanished.
+    /// Safe to call after hot-plug notifications and from tests.
     public func rescanSources() {
         guard port != 0 else { return }
 
-        for src in connectedSources {
-            MIDIPortDisconnectSource(port, src)
-        }
-        connectedSources.removeAll()
-
+        var seen: [MIDIUniqueID: MIDIEndpointRef] = [:]
         var names: [String] = []
         let count = MIDIGetNumberOfSources()
         if count > 0 {
             for i in 0..<count {
                 let src = MIDIGetSource(i)
                 guard src != 0 else { continue }
+                var uid: MIDIUniqueID = 0
+                let idStatus = MIDIObjectGetIntegerProperty(src, kMIDIPropertyUniqueID, &uid)
+                // Fall back to the endpoint ref as a key if unique ID is unavailable.
+                let key: MIDIUniqueID = (idStatus == noErr) ? uid : MIDIUniqueID(bitPattern: UInt32(src))
+
+                if let existing = connectedByUniqueID[key] {
+                    // Already connected: keep the connection, do not connect twice.
+                    seen[key] = existing
+                    names.append(Self.displayName(for: existing))
+                    continue
+                }
+
                 let status = MIDIPortConnectSource(port, src, nil)
                 if status == noErr {
-                    connectedSources.append(src)
+                    seen[key] = src
                     names.append(Self.displayName(for: src))
                 }
             }
         }
+
+        // Disconnect sources that disappeared.
+        for (key, src) in connectedByUniqueID where seen[key] == nil {
+            MIDIPortDisconnectSource(port, src)
+        }
+        connectedByUniqueID = seen
 
         let sorted = names.sorted()
         let changed = sorted != sourceNames
@@ -101,15 +140,34 @@ public final class MIDIInput: @unchecked Sendable {
     // MARK: - CoreMIDI callbacks (MIDI thread or arbitrary queue)
 
     private func handleNotification(_ notification: UnsafePointer<MIDINotification>) {
+        // Read messageID only: the pointer is valid solely for this call.
         let messageID = notification.pointee.messageID
         switch messageID {
         case .msgObjectAdded, .msgObjectRemoved, .msgSetupChanged, .msgPropertyChanged:
-            // Always hop off the notification thread before touching source list / UI.
-            DispatchQueue.main.async { [weak self] in
-                self?.rescanSources()
-            }
+            scheduleRescanFromNotification()
         default:
             break
+        }
+    }
+
+    /// Coalesce notification storms (added + setupChanged often fire together) onto one main-queue rescan.
+    private func scheduleRescanFromNotification() {
+        // Always hop off the notification thread before touching connection state / UI.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            // Collapse back-to-back notifications in the same turn into a single rescan.
+            if self.rescanPending { return }
+            self.rescanPending = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.rescanPending = false
+                self.rescanSources()
+                // CoreMIDI can publish the endpoint slightly after the first notification.
+                // A short follow-up rescan catches sources that were not yet visible.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                    self?.rescanSources()
+                }
+            }
         }
     }
 
@@ -165,6 +223,12 @@ public final class MIDIInput: @unchecked Sendable {
         }
         return "MIDI device"
     }
+}
+
+/// Mutable box so CoreMIDI create-blocks can call into the owner after `init` finishes.
+private final class CallbackBox: @unchecked Sendable {
+    var onNotify: ((UnsafePointer<MIDINotification>) -> Void)?
+    var onPacket: ((UnsafePointer<MIDIPacketList>) -> Void)?
 }
 
 public enum MIDIInputError: Error, LocalizedError {

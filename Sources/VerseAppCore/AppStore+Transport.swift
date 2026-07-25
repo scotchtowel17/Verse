@@ -7,13 +7,13 @@ import VerseEngine
 extension AppStore {
     // MARK: Transport (M4)
 
-    func togglePlay() {
+    public func togglePlay() {
         // Copilot preview sheet does not disable menu/keyboard shortcuts on its own.
         guard !copilotPreviewBlocksTransport else { return }
         isPlaying ? stopPlayback() : startPlayback()
     }
 
-    func startPlayback() {
+    public func startPlayback() {
         guard !copilotPreviewBlocksTransport else { return }
         transport.metronomeEnabled = metronomeOn
         let end = arrangementBeats
@@ -22,7 +22,13 @@ extension AppStore {
         isPlaying = true
     }
 
-    func stopPlayback() { transport.stop(); isPlaying = false }
+    public func stopPlayback() {
+        // Close still-held MIDI capture notes at the last playhead beat (M3). The take
+        // stays pending until recording stops, so a second play pass can add more notes.
+        endOpenMIDICaptureNotesAtPlayhead()
+        transport.stop()
+        isPlaying = false
+    }
 
     var arrangementBeats: Double {
         project.tracks.flatMap { $0.clips }.map { $0.startBeat + $0.lengthBeats }.max() ?? 8

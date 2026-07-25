@@ -641,7 +641,7 @@ any claim about the physical controller must be stated as unverified.
 5. The app must launch and work normally with **no** MIDI device attached, and must not block,
    hang, or prompt at startup.
 
-## Step M3 — Record MIDI input into a clip — PENDING
+## Step M3 — Record MIDI input into a clip — DONE
 
 The real songwriting payoff: play the controller during playback and capture it.
 
@@ -661,7 +661,7 @@ the thread hop, and decoding. Cover at minimum: note on, note off, note-on-veloc
 note-off, velocity preserved, and a stuck-note check. State clearly in the report that the
 physical device is unverified.
 
-## Step M2b — MIDI hot-plug is broken (found by running it) — PENDING
+## Step M2b — MIDI hot-plug is broken (found by running it) — DONE
 
 Verified live against a virtual CoreMIDI source named "MPK mini TEST":
 
@@ -683,3 +683,19 @@ re-added, and do not connect the same source twice.
 Test: with the harness's virtual source, create it AFTER the input engine has started and
 assert it becomes connected and delivers events; then dispose it and assert it is dropped from
 the connected list.
+
+## Step M4 — Record arm has no visible state — PENDING
+
+Found while testing M3 by hand. Clicking the transport record button produces no visual change:
+the button looks identical armed and unarmed, so there is no way to tell whether a take is
+being captured. For a non-programmer this is the difference between "I recorded that" and
+"I lost that". MIDI capture itself is covered by tests but could not be confirmed by hand
+because the armed state could not be established or observed.
+
+1. Give the record button a clear armed appearance (colour/fill), and a distinct appearance
+   again while actually capturing during playback.
+2. Surface a plain-language status while armed, for example "Armed. Press play to record what
+   you play." and while capturing, "Recording what you play…".
+3. If arming fails (no audio input, for instance) say so; never leave the control looking armed
+   when it is not, and never leave it looking unarmed when it is.
+4. Confirm by hand afterwards that arm plus play plus incoming MIDI produces a clip.

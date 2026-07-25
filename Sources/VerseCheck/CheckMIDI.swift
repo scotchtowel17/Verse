@@ -232,6 +232,147 @@ private func runMIDILiveChecks(_ tk: TestKit) {
         waitUntil(timeout: 3.0) { !store.heldNotes.contains(61) }
         tk.expect(!store.heldNotes.contains(61), "virtual vel-0 note-on clears heldNotes (no stuck note)")
     }
+
+    // MARK: M2b — hot-plug without manual rescan
+
+    tk.suite("MIDI input: hot-plug source after start connects and delivers") {
+        // Create the input engine FIRST, then the virtual source. Connection must come from
+        // CoreMIDI setup notifications, not a manual rescanSources() call (that is the bug).
+        let input = try MIDIInput(clientName: "VerseCheck-Hot-\(UUID().uuidString.prefix(8))")
+        var published: [String] = input.sourceNames
+        input.onSourcesChanged = { published = $0 }
+
+        let virtName = "VerseCheck-Hotplug-\(UUID().uuidString.prefix(8))"
+        let virtual = try VirtualMIDISource(name: virtName)
+        defer { virtual.tearDown() }
+
+        let appeared = waitUntil(timeout: 3.0) {
+            // Do NOT call rescanSources here: the notification path must do the work.
+            input.sourceNames.contains(where: { $0.contains("VerseCheck-Hotplug") || $0 == virtName })
+                || published.contains(where: { $0.contains("VerseCheck-Hotplug") || $0 == virtName })
+        }
+        tk.expect(appeared, "hot-plugged source appears without manual rescan (names: \(input.sourceNames))")
+        tk.expect(
+            published.contains(where: { $0.contains("VerseCheck-Hotplug") || $0 == virtName })
+                || input.sourceNames.contains(where: { $0.contains("VerseCheck-Hotplug") || $0 == virtName }),
+            "onSourcesChanged / sourceNames lists hot-plugged device"
+        )
+
+        var received: [MIDIEvent] = []
+        input.onEvents = { received.append(contentsOf: $0) }
+        virtual.send(bytes: [0x90, 62, 88])
+        waitUntil(timeout: 3.0) {
+            received.contains { if case .noteOn(_, 62, 88) = $0 { return true }; return false }
+        }
+        tk.expect(
+            received.contains { if case .noteOn(_, 62, 88) = $0 { return true }; return false },
+            "hot-plugged source delivers note-on"
+        )
+
+        virtual.tearDown()
+        let dropped = waitUntil(timeout: 3.0) {
+            !input.sourceNames.contains(where: { $0.contains("VerseCheck-Hotplug") || $0 == virtName })
+        }
+        tk.expect(dropped, "disposed hot-plug source leaves the connected list (names: \(input.sourceNames))")
+
+        withExtendedLifetime(input) { _ in }
+    }
+
+    // MARK: M3 — record MIDI into a clip
+
+    tk.suite("MIDI record: notes land in clip with velocity, undo is Record MIDI") {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VerseCheck-MIDI-Rec-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = AppStore(recoveryBaseDir: dir)
+        store.startEngineIfNeeded()
+        // Active track is the default instrument; arm record (MIDI path works even if mic fails).
+        store.startRecording()
+        tk.expect(store.isRecording, "recording armed for MIDI capture")
+        store.startPlayback()
+        tk.expect(store.isPlaying, "transport playing during capture")
+
+        // Allow the playhead to advance past the scheduling lead (~0.12s).
+        waitUntil(timeout: 1.0) { (store.playbackBeat ?? 0) > 0.05 }
+
+        store.handleMIDIEvents([.noteOn(channel: 0, note: 60, velocity: 97)])
+        // Hold long enough that length is clearly above the 1/32 floor (0.125 beats at 120 BPM
+        // is 62.5ms; wait enough wall time so we are well clear of the floor).
+        let onBeat = store.playbackBeat ?? 0
+        waitUntil(timeout: 2.0) { (store.playbackBeat ?? 0) >= onBeat + 0.4 }
+        store.handleMIDIEvents([.noteOff(channel: 0, note: 60, velocity: 0)])
+
+        // Note still held at stop is closed out: leave a second note open, then stop record.
+        store.handleMIDIEvents([.noteOn(channel: 0, note: 64, velocity: 80)])
+        waitUntil(timeout: 1.0) { (store.playbackBeat ?? 0) >= onBeat + 0.7 }
+
+        store.stopRecording()
+        store.stopPlayback()
+        store.panic()
+
+        tk.expect(!store.isRecording, "recording disarmed after stop")
+        tk.expectEqual(store.undoName, "Record MIDI", "one undo entry labelled Record MIDI")
+
+        let track = store.project.tracks.first { $0.id == store.activeTrackID }
+        let midiClip = track?.clips.first { $0.kind == .midi }
+        tk.expect(midiClip != nil, "MIDI clip exists on the armed instrument track")
+        let notes = midiClip?.midiNotes ?? []
+        tk.expect(notes.count >= 2, "at least note-off closed note plus held-at-stop note (got \(notes.count))")
+
+        if let c = notes.first(where: { $0.pitch == 60 }) {
+            tk.expectEqual(c.velocity, 97, "velocity preserved on recorded note")
+            tk.expect(c.lengthBeats >= 0.125, "length at least minimum (got \(c.lengthBeats))")
+            tk.expect(c.startBeat >= 0, "startBeat non-negative")
+        } else {
+            tk.expect(false, "recorded middle-C note present")
+        }
+        if let e = notes.first(where: { $0.pitch == 64 }) {
+            tk.expectEqual(e.velocity, 80, "held-at-stop note keeps velocity")
+            tk.expect(e.lengthBeats >= 0.125, "held-at-stop note closed with positive length")
+        } else {
+            tk.expect(false, "held-at-stop note (E) was closed into the clip")
+        }
+
+        // Undo restores pre-take project (no recorded notes).
+        let noteCountBeforeUndo = notes.count
+        store.undo()
+        let afterUndo = store.project.tracks.first { $0.id == store.activeTrackID }
+            .flatMap { $0.clips.first { $0.kind == .midi }?.midiNotes } ?? []
+        tk.expect(afterUndo.count < noteCountBeforeUndo || afterUndo.isEmpty,
+                  "undo removes the recorded take notes")
+    }
+
+    tk.suite("MIDI record: creates clip when track has none") {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VerseCheck-MIDI-RecEmpty-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = AppStore(recoveryBaseDir: dir)
+        store.startEngineIfNeeded()
+        // Default project instrument track has no clips.
+        tk.expect(store.project.tracks[0].clips.isEmpty, "fresh track has no clips")
+
+        store.startRecording()
+        store.startPlayback()
+        waitUntil(timeout: 1.0) { (store.playbackBeat ?? 0) > 0.05 }
+        store.handleMIDIEvents([
+            .noteOn(channel: 0, note: 72, velocity: 100),
+        ])
+        waitUntil(timeout: 1.0) { (store.playbackBeat ?? 0) > 0.3 }
+        store.handleMIDIEvents([.noteOff(channel: 0, note: 72, velocity: 0)])
+        store.stopRecording()
+        store.stopPlayback()
+        store.panic()
+
+        let clips = store.project.tracks[0].clips.filter { $0.kind == .midi }
+        tk.expectEqual(clips.count, 1, "one MIDI clip created for the take")
+        tk.expectEqual(clips.first?.midiNotes?.count, 1, "one note in the new clip")
+        tk.expectEqual(clips.first?.midiNotes?.first?.pitch, 72, "captured pitch")
+        tk.expectEqual(store.undoName, "Record MIDI", "undo label")
+    }
 }
 
 // MARK: - Virtual source helper
