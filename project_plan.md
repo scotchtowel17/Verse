@@ -175,3 +175,40 @@ entirely and use static "Undo" / "Redo" labels. `AppStore.undo()` already guards
 so an always-enabled item is a safe no-op when the stack is empty. A working Cmd-Z with a
 generic label beats a permanently dead menu item. Say clearly in your report which path you
 took and why.
+
+## Step 9 — Make AppStore testable, then test the undo contract — PENDING
+
+Step 8 was a bug that made undo permanently dead and survived every test, because `AppStore`
+lives in the `Verse` executable target and no test target can import an executable. Close that
+structural gap.
+
+1. **New library target `VerseAppCore`** in `Package.swift` containing everything currently in
+   `Sources/Verse/` EXCEPT the `@main` entry point: `AppStore.swift`, the three `AppStore+*`
+   extensions, `ContentView.swift`, `UndoFocus.swift`, and `Views/`.
+   Same dependencies the `Verse` target has today.
+2. **`Verse` executable becomes a thin shim**: only `VerseApp.swift` with `@main`, importing
+   `VerseAppCore`. Move nothing else into it.
+3. Add `public` where the shim and tests now require it. Do not widen more than necessary,
+   and do not change any logic.
+4. **Testability injection**: `AppStore.init` currently hardcodes `RecoveryManager()`, which
+   writes to the real Application Support directory. Add an optional parameter so a test can
+   pass a temporary directory (`RecoveryManager` already accepts a `baseDir`). Default
+   behavior must be identical when the parameter is omitted.
+5. `VerseCheck` gains a dependency on `VerseAppCore` and a new `CheckAppStore.swift` asserting
+   the undo contract that Steps 3 and 6 established:
+   - `addInstrumentTrack` / `addAudioTrack` / `deleteTrack` / `setTempo` / `setKey` /
+     `selectPreset` each push exactly one undo entry, with the expected label
+   - `setVolume` and `setPan` push NOTHING, even when called 200 times in a row, and an
+     earlier undo entry is still present afterward (this is the regression that would
+     otherwise silently destroy the AI-patch undo point)
+   - `newProject()` clears the stack, so undo cannot resurrect the previous document
+   - `undo()` restores the prior state and `undoName` / `redoName` report the right labels
+   - applying a validated patch through the copilot path records exactly one undo entry
+     for the whole patch (one undo group)
+
+Constraints: no behavior change, no schema change, `swift build` clean, `swift run VerseCheck`
+green, and the app must still launch (`scripts/make-app.sh` then open the bundle).
+
+Note honestly in your report what this does NOT cover: SwiftUI view rendering and macOS menu
+behavior still cannot be reached from `VerseCheck`. Step 8's exact bug would still require a
+manual run to catch.
