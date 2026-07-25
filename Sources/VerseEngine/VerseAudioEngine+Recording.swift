@@ -18,10 +18,38 @@ public extension VerseAudioEngine {
         }
     }
 
+    // MARK: - Input-node safety
+
+    /// Whether touching `AVAudioEngine.inputNode` is expected to complete.
+    ///
+    /// Bare CLI executables (including VerseCheck) have no `NSMicrophoneUsageDescription`.
+    /// On those processes, reading `inputNode` enables the hardware input device and then
+    /// blocks forever inside CoreAudio (`EnableInputDevice` → `CreateIOProcID` →
+    /// `_TellServerAboutStreamUsage`) instead of throwing. The real Verse.app bundle carries
+    /// the usage string and audio-input entitlement, so the OS can prompt and finish the bind.
+    ///
+    /// Callers that only need MIDI arm (instrument tracks) already soft-fail on
+    /// `noInputAvailable`; this gate turns an infinite hang into that clean error.
+    static var canSafelyOpenInputNode: Bool {
+        switch AVAudioApplication.shared.recordPermission {
+        case .denied:
+            return false
+        case .granted:
+            return true
+        case .undetermined:
+            // Only attempt the HAL path when this process declared mic use to the OS.
+            return Bundle.main.object(forInfoDictionaryKey: "NSMicrophoneUsageDescription") != nil
+        @unknown default:
+            return false
+        }
+    }
+
     // MARK: - Recording (input-node tap → pre-opened file)
 
     func startRecording(to url: URL) throws {
         guard isRunning else { throw RecordingError.notRunning }
+        // Must preflight: `inputNode` itself can hang indefinitely (see canSafelyOpenInputNode).
+        guard Self.canSafelyOpenInputNode else { throw RecordingError.noInputAvailable }
         let input = avEngine.inputNode
         let fmt = input.outputFormat(forBus: 0)
         guard fmt.channelCount > 0, fmt.sampleRate > 0 else { throw RecordingError.noInputAvailable }
@@ -35,7 +63,11 @@ public extension VerseAudioEngine {
 
     @discardableResult
     func stopRecording() -> (url: URL?, frames: AVAudioFramePosition, seconds: Double) {
-        avEngine.inputNode.removeTap(onBus: 0)
+        // Only remove a tap when one was installed. Calling inputNode after a failed/skipped
+        // arm would re-enter the same hang-prone HAL path.
+        if recorder.isRecording {
+            avEngine.inputNode.removeTap(onBus: 0)
+        }
         let frames = recorder.frameCount
         let secs = recorder.durationSeconds
         let url = recorder.stop()
@@ -48,21 +80,23 @@ public extension VerseAudioEngine {
     // MARK: - Input monitoring (off by default to avoid feedback)
 
     func setMonitoring(_ on: Bool) {
+        // Same hang risk as startRecording: never touch inputNode without the preflight.
+        guard on else {
+            monitorMixer?.outputVolume = 0.0
+            return
+        }
+        guard Self.canSafelyOpenInputNode else { return }
         let input = avEngine.inputNode
         let fmt = input.outputFormat(forBus: 0)
         guard fmt.channelCount > 0 else { return }
-        if on {
-            if monitorMixer == nil {
-                let m = AVAudioMixerNode()
-                avEngine.attach(m)
-                avEngine.connect(input, to: m, format: fmt)
-                avEngine.connect(m, to: avEngine.mainMixerNode, format: nil)
-                monitorMixer = m
-            }
-            monitorMixer?.outputVolume = 1.0
-        } else {
-            monitorMixer?.outputVolume = 0.0
+        if monitorMixer == nil {
+            let m = AVAudioMixerNode()
+            avEngine.attach(m)
+            avEngine.connect(input, to: m, format: fmt)
+            avEngine.connect(m, to: avEngine.mainMixerNode, format: nil)
+            monitorMixer = m
         }
+        monitorMixer?.outputVolume = 1.0
     }
 
     // MARK: - Metering

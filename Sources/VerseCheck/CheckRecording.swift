@@ -1,8 +1,39 @@
 import Foundation
 import AVFoundation
 import VerseEngine
+import VerseModel
 
 func runRecordingChecks(_ tk: TestKit) {
+    // MARK: - Step I1b: inputNode must not hang the harness
+
+    tk.suite("Recording I1b: startRecording refuses mic when process cannot open input") {
+        // VerseCheck is a bare executable without NSMicrophoneUsageDescription. Touching
+        // AVAudioEngine.inputNode used to block forever in CoreAudio; the engine must throw
+        // noInputAvailable instead so AppStore can soft-fail into MIDI-only arm.
+        tk.expect(!VerseAudioEngine.canSafelyOpenInputNode,
+                  "VerseCheck must not claim it can safely open the input node")
+        let engine = VerseAudioEngine()
+        engine.configure(with: Project.newUntitled())
+        try engine.start()
+        defer { engine.stop() }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("verse-i1b-\(UUID().uuidString).caf")
+        do {
+            try engine.startRecording(to: url)
+            tk.expect(false, "startRecording must throw noInputAvailable in VerseCheck")
+            _ = engine.stopRecording()
+        } catch let err as VerseAudioEngine.RecordingError {
+            if case .noInputAvailable = err {
+                tk.expect(true, "throws noInputAvailable rather than hanging")
+            } else {
+                tk.expect(false, "expected noInputAvailable, got \(err)")
+            }
+        } catch {
+            tk.expect(false, "expected RecordingError.noInputAvailable, got \(error)")
+        }
+        try? FileManager.default.removeItem(at: url)
+    }
+
     tk.suite("Recording: journaled take written to disk") {
         guard let fmt = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1) else {
             tk.expect(false, "could not make format"); return

@@ -747,38 +747,22 @@ the licence-gate allowlist.
 
 Implement M4 as already specified above in the Phase M section.
 
-## Step I1b — VerseCheck hangs after the I1/M4 changes — PENDING
+## Step I1b — VerseCheck hangs after the I1/M4 changes — DONE
 
-The I1 + M4 run was interrupted by a 10-minute cap and left the tree in a state where
-`swift run VerseCheck` **hangs indefinitely**. Established so far:
+**True root cause (not the selectPreset / CoreMIDI hypotheses):** the new M4 suite (and any
+later MIDI-record suite) calls `AppStore.startRecording()` → `VerseAudioEngine.startRecording(to:)`
+→ `avEngine.inputNode`. On a bare CLI process (VerseCheck has no `NSMicrophoneUsageDescription`),
+reading `inputNode` enables the hardware input device and then **blocks forever** inside
+CoreAudio (`EnableInputDevice` → `CreateIOProcID` → `_TellServerAboutStreamUsage` / `mach_msg`),
+instead of throwing. Sample stacks confirmed the hang even with M4 isolated (no MIDI clients,
+no expanded preset loads). The earlier F2 suite name in the plan was a mis-attribution: stdout
+buffering / progress made it look like selectPreset, but the blocked frame is always
+`startRecording` on the M4 path. Instrument soft-fail for MIDI arm never ran because the hang
+is before any throw.
 
-- Reproducible on a cleaned environment (no stray Verse, VerseCheck, or virtual-MIDI processes),
-  so it is a genuine regression, not machine state.
-- The run completes ~624 lines of output, finishes the suite
-  "AppStore F2: renaming a track leaves instrument selection intact", prints a partial header
-  for the next suite, and then stops forever.
-- The next suite is "AppStore F2: selectPreset preserves user-chosen track name", which calls
-  `store.selectPreset(...)` -> `engine.loadInstrument(...)` -> SF2 load.
-- `SoundBank.swift` changed only as data (29 to 70 presets, 9 drum kits) with no logic change.
-- `AppStore.swift` changed only by adding the computed `recordArmStatus` and widening
-  `recordError` to public. Neither should block.
-- "Warm Pad" is still present, so the suite is NOT falling through to `presets.last`
-  (which is now "SFX Kit").
-
-Leading hypothesis, unproven: resource exhaustion across the many `makeTestStore()` instances.
-Each `AppStore` can start a CoreMIDI client (`startMIDIInput`, added in Phase M). `MIDIInput`
-does have a `deinit` that calls `MIDIPortDispose`/`MIDIClientDispose`, but if stores are not
-released promptly, or if a client is created per store in a tight loop, CoreMIDI may block.
-A second candidate is `AVAudioUnitSampler.loadSoundBankInstrument` blocking on a particular
-program in the expanded list.
-
-Task:
-1. Find the actual cause. Bisect if needed: the fastest discriminator is to run the harness with
-   the new drum-kit load suite removed, and separately with MIDI startup disabled in test stores.
-2. Fix it properly. If test stores should not start CoreMIDI, make that explicit and documented
-   rather than incidental. If a specific preset hangs the sampler, drop it from the manifest and
-   say which one, because a preset that hangs the sampler would also hang the app when a user
-   picks it.
-3. `swift run VerseCheck` must complete in a reasonable time and exit 0.
-4. Report the true root cause. Do not paper over it with a timeout or by deleting the suite that
-   exposed it.
+**Fix:** `VerseAudioEngine.canSafelyOpenInputNode` preflights mic permission + presence of
+`NSMicrophoneUsageDescription` on `Bundle.main`. When unsafe, `startRecording` throws
+`noInputAvailable` (AppStore soft-fails into MIDI-only arm) and `setMonitoring` / `stopRecording`
+never touch `inputNode` without a live tap. Verse.app still has the usage string and attempts
+the real HAL path. Regression suite: `Recording I1b: startRecording refuses mic when process
+cannot open input`.
