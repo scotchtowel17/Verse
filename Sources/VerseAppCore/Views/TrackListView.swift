@@ -6,6 +6,11 @@ import VerseEngine
 struct TrackListView: View {
     @Environment(AppStore.self) private var store
 
+    /// Enough height for at least one full track row (instrument, volume, pan, M/S, effect).
+    /// Without a floor the flexible ScrollView collapses to zero at the default window size.
+    private static let rowMinHeight: CGFloat = 72
+    private static let listMaxHeight: CGFloat = 230
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
@@ -23,7 +28,9 @@ struct TrackListView: View {
                     }
                 }
             }
-            .frame(maxHeight: 230)
+            .frame(minHeight: Self.rowMinHeight, maxHeight: Self.listMaxHeight)
+            // Prefer keeping tracks visible when the window is tight; arrangement fills leftover.
+            .layoutPriority(1)
         }
     }
 }

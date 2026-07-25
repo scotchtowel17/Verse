@@ -13,9 +13,10 @@ public struct ContentView: View {
             header
             TransportBar()
             TrackListView()
+            // Arrangement expands into leftover height so tracks keep their min size.
             ArrangementView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             if !store.takes.isEmpty { takesList }
-            Spacer(minLength: 0)
             keyboardHint
             PianoKeyboardView(
                 baseC: store.baseOctaveC,

@@ -1035,3 +1035,33 @@ mid-drag updates no-op without begin. Resize hit zone is `min(10px, 30% of clip 
 `ArrangementLayout` so short clips keep a move body. Pure click on a MIDI clip opens the piano
 roll. Harness: model resizeClip suite; AppStore move/resize undo grouping + double-begin;
 layout handle and contentBeats suites.
+
+## Step R3 — Arrangement view issues found by looking at it — DONE
+
+All three found by opening the app once. Layout maths and gesture/undo behaviour are correct:
+clips render at the right beats, drag-to-move and edge-resize both work, undo reads
+"Undo Move Clip" / "Undo Resize Clip", and clicking a MIDI clip opens it in the piano roll.
+
+1. **The Tracks list collapses to zero height at the default window size.** At the window size
+   the app opens with, the track rows (instrument picker, volume, pan, M/S, effect, delete) are
+   squeezed out entirely and only the Arrangement is visible. The user opens Verse and their
+   tracks appear to have vanished. Give the track list a sensible minimum height and let the
+   arrangement take the remaining space, so both are usable at the default size.
+2. **The arrangement grid is centred, with a large dead area to its left.** The lane gutter and
+   clips start roughly a third of the way across the window, wasting most of the width and
+   making the timeline look misaligned with everything above it. It should be left-aligned and
+   fill the available width, consistent with the Tracks section.
+3. **Clicking a MIDI clip takes two clicks to open the piano roll.** The first click is consumed
+   by selection or hover. The hint says "click MIDI to open piano roll", so one click should do
+   it, or the hint should describe what actually happens.
+
+Do not change the interaction model or the undo behaviour; these are layout and affordance
+fixes only.
+
+**Resolution (R3):** Track list ScrollView has `minHeight` 72 (one full row) and layout priority
+so it no longer collapses; arrangement expands into leftover height (`maxHeight: .infinity`) and
+the empty `Spacer` was removed. Window min height raised to 640 so both regions fit. Timeline
+content is left-pinned via GeometryReader min frame (macOS ScrollView no longer centres short
+grids). Clip move/resize gesture bookkeeping moved to a reference-type `GestureSession` so
+mid-gesture writes do not re-render and cancel pure click; one click still opens the piano roll.
+Move/resize undo grouping unchanged.

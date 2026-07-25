@@ -10,16 +10,17 @@ struct ArrangementView: View {
 
     /// Snap grid in beats: 0 (Off), 1 (1/4), 0.5 (1/8), 0.25 (1/16). Default 1/16.
     @State private var snapBeats: Double = 0.25
-    @State private var moveOrigin: MoveOrigin?
-    @State private var resizeOrigin: ResizeOrigin?
-    /// True while a continuous move/resize gesture is live (guards double-begin).
-    @State private var continuousGestureLive = false
+    /// Live gesture bookkeeping lives on a class so mid-gesture writes do not re-render the
+    /// view hierarchy (a re-render mid-drag cancels the gesture and made pure click need two
+    /// tries to open the piano roll).
+    @State private var session = GestureSession()
 
     private static let laneHeight: CGFloat = 44
     private static let beatWidth: CGFloat = 28
     private static let gutterWidth: CGFloat = 100
     private static let rulerHeight: CGFloat = 22
     private static let clickSlop: CGFloat = 4
+    private static let timelineMinHeight: CGFloat = 120
 
     private var beatsPerBar: Int {
         max(1, store.project.timeSignature.num)
@@ -39,10 +40,11 @@ struct ArrangementView: View {
             snapBar
             timeline
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onDisappear {
-            if continuousGestureLive {
+            if session.continuousGestureLive {
                 store.endArrangementGesture()
-                continuousGestureLive = false
+                session.continuousGestureLive = false
             }
         }
     }
@@ -85,42 +87,51 @@ struct ArrangementView: View {
         let laneH = Self.laneHeight
         let totalWidth = CGFloat(contentBeats) * beatW
         let lanesHeight = CGFloat(max(1, store.project.tracks.count)) * laneH
+        let contentHeight = Self.rulerHeight + lanesHeight
 
-        return ScrollView([.horizontal, .vertical]) {
-            HStack(alignment: .top, spacing: 0) {
-                // Track-name gutter (aligned under ruler padding).
-                VStack(alignment: .leading, spacing: 0) {
-                    Color.clear.frame(width: Self.gutterWidth, height: Self.rulerHeight)
-                    ForEach(store.project.tracks) { track in
-                        Text(track.name)
-                            .font(.caption)
-                            .lineLimit(1)
-                            .frame(width: Self.gutterWidth, height: laneH, alignment: .leading)
-                            .padding(.leading, 4)
-                            .background(Color.black.opacity(0.03))
-                            .overlay(alignment: .bottom) {
-                                Rectangle().fill(Color.black.opacity(0.08)).frame(height: 0.5)
-                            }
-                    }
-                }
-
-                ZStack(alignment: .topLeading) {
+        // GeometryReader so the scroll content can pin top-leading when the grid is narrower
+        // than the viewport (macOS ScrollView otherwise centres short content).
+        return GeometryReader { geo in
+            ScrollView([.horizontal, .vertical]) {
+                HStack(alignment: .top, spacing: 0) {
+                    // Track-name gutter (aligned under ruler padding).
                     VStack(alignment: .leading, spacing: 0) {
-                        ruler(beatWidth: beatW, totalWidth: totalWidth)
-                        ForEach(Array(store.project.tracks.enumerated()), id: \.element.id) { _, track in
-                            lane(track: track, beatWidth: beatW, totalWidth: totalWidth)
+                        Color.clear.frame(width: Self.gutterWidth, height: Self.rulerHeight)
+                        ForEach(store.project.tracks) { track in
+                            Text(track.name)
+                                .font(.caption)
+                                .lineLimit(1)
+                                .frame(width: Self.gutterWidth, height: laneH, alignment: .leading)
+                                .padding(.leading, 4)
+                                .background(Color.black.opacity(0.03))
+                                .overlay(alignment: .bottom) {
+                                    Rectangle().fill(Color.black.opacity(0.08)).frame(height: 0.5)
+                                }
                         }
                     }
-                    playheadLayer(beatWidth: beatW,
-                                  totalHeight: Self.rulerHeight + lanesHeight)
+
+                    ZStack(alignment: .topLeading) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ruler(beatWidth: beatW, totalWidth: totalWidth)
+                            ForEach(Array(store.project.tracks.enumerated()), id: \.element.id) { _, track in
+                                lane(track: track, beatWidth: beatW, totalWidth: totalWidth)
+                            }
+                        }
+                        playheadLayer(beatWidth: beatW,
+                                      totalHeight: contentHeight)
+                    }
+                    .frame(width: totalWidth,
+                           height: contentHeight,
+                           alignment: .topLeading)
+                    .coordinateSpace(name: "arrangementGrid")
                 }
-                .frame(width: totalWidth,
-                       height: Self.rulerHeight + lanesHeight,
+                // Fill the viewport so short timelines stay left-aligned, not centred.
+                .frame(minWidth: geo.size.width,
+                       minHeight: geo.size.height,
                        alignment: .topLeading)
-                .coordinateSpace(name: "arrangementGrid")
             }
         }
-        .frame(minHeight: 120, idealHeight: 180, maxHeight: 240)
+        .frame(minHeight: Self.timelineMinHeight, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.black.opacity(0.12)))
@@ -271,18 +282,18 @@ struct ArrangementView: View {
         DragGesture(minimumDistance: 0, coordinateSpace: .named("arrangementGrid"))
             .onChanged { value in
                 let moved = hypot(value.translation.width, value.translation.height)
-                if moveOrigin == nil {
+                if session.moveOrigin == nil {
                     // First update: bookkeep origin. Only begin undo once motion exceeds slop
                     // so a pure click does not leave a no-op “Move Clip” on the stack.
-                    moveOrigin = MoveOrigin(clipID: clip.id, startBeat: clip.startBeat)
+                    session.moveOrigin = MoveOrigin(clipID: clip.id, startBeat: clip.startBeat)
                     return
                 }
                 guard moved >= Self.clickSlop else { return }
-                if !continuousGestureLive {
+                if !session.continuousGestureLive {
                     store.beginArrangementGesture(name: "Move Clip")
-                    continuousGestureLive = true
+                    session.continuousGestureLive = true
                 }
-                guard let origin = moveOrigin, origin.clipID == clip.id else { return }
+                guard let origin = session.moveOrigin, origin.clipID == clip.id else { return }
                 let beatDelta = Double(value.translation.width / beatWidth)
                 let rawStart = origin.startBeat + beatDelta
                 let newStart = max(0, ArrangementLayout.snap(rawStart, to: snapBeats))
@@ -290,33 +301,33 @@ struct ArrangementView: View {
             }
             .onEnded { value in
                 let moved = hypot(value.translation.width, value.translation.height)
-                if continuousGestureLive {
+                if session.continuousGestureLive {
                     store.endArrangementGesture()
-                    continuousGestureLive = false
+                    session.continuousGestureLive = false
                 } else if moved < Self.clickSlop {
                     // Pure click on a MIDI clip opens the piano roll.
                     if clip.kind == .midi {
                         store.openPianoRoll(clipID: clip.id)
                     }
                 }
-                moveOrigin = nil
+                session.moveOrigin = nil
             }
     }
 
     private func resizeGesture(for clip: Clip, beatWidth: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .named("arrangementGrid"))
             .onChanged { value in
-                if resizeOrigin == nil {
-                    resizeOrigin = ResizeOrigin(clipID: clip.id, lengthBeats: clip.lengthBeats)
+                if session.resizeOrigin == nil {
+                    session.resizeOrigin = ResizeOrigin(clipID: clip.id, lengthBeats: clip.lengthBeats)
                     return
                 }
                 let moved = abs(value.translation.width)
                 guard moved >= Self.clickSlop else { return }
-                if !continuousGestureLive {
+                if !session.continuousGestureLive {
                     store.beginArrangementGesture(name: "Resize Clip")
-                    continuousGestureLive = true
+                    session.continuousGestureLive = true
                 }
-                guard let origin = resizeOrigin, origin.clipID == clip.id else { return }
+                guard let origin = session.resizeOrigin, origin.clipID == clip.id else { return }
                 let deltaBeats = Double(value.translation.width / beatWidth)
                 let raw = origin.lengthBeats + deltaBeats
                 let snapped = max(Project.minimumClipLengthBeats,
@@ -327,11 +338,11 @@ struct ArrangementView: View {
                 )
             }
             .onEnded { _ in
-                if continuousGestureLive {
+                if session.continuousGestureLive {
                     store.endArrangementGesture()
-                    continuousGestureLive = false
+                    session.continuousGestureLive = false
                 }
-                resizeOrigin = nil
+                session.resizeOrigin = nil
             }
     }
 
@@ -341,6 +352,13 @@ struct ArrangementView: View {
     }
 
     // MARK: - Gesture origin snapshots
+
+    /// Reference-type session so gesture fields can update without invalidating the view.
+    private final class GestureSession {
+        var moveOrigin: MoveOrigin?
+        var resizeOrigin: ResizeOrigin?
+        var continuousGestureLive = false
+    }
 
     private struct MoveOrigin {
         let clipID: UUID

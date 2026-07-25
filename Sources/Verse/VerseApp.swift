@@ -11,7 +11,8 @@ struct VerseApp: App {
         WindowGroup {
             ContentView()
                 .environment(store)
-                .frame(minWidth: 760, minHeight: 520)
+                // Tall enough that Tracks (min one row) and Arrangement both fit; R3.
+                .frame(minWidth: 760, minHeight: 640)
                 .onAppear { store.startEngineIfNeeded() }
         }
         .windowResizability(.contentMinSize)
