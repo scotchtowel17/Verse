@@ -72,6 +72,18 @@ private struct TrackRow: View {
                 ForEach(VerseAudioEngine.BuiltInEffect.allCases) { Text($0.label).tag($0) }
             }.labelsHidden().frame(width: 90).help("Insert effect")
 
+            if let midiClip = track.clips.first(where: { $0.kind == .midi }) {
+                Button {
+                    store.selectTrack(track.id)
+                    store.openPianoRoll(clipID: midiClip.id)
+                } label: {
+                    Image(systemName: "rectangle.split.2x1")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help("Open piano roll for “\(midiClip.name.isEmpty ? "MIDI clip" : midiClip.name)”")
+            }
+
             Button(role: .destructive) { store.deleteTrack(track.id) } label: { Image(systemName: "trash") }
                 .buttonStyle(.borderless).controlSize(.small)
         }

@@ -55,6 +55,15 @@ public struct ContentView: View {
         .sheet(isPresented: Binding(get: { store.showTools }, set: { store.showTools = $0 })) {
             ToolsPanel()
         }
+        .sheet(isPresented: Binding(
+            get: { store.showPianoRoll },
+            set: { newValue in
+                store.showPianoRoll = newValue
+                if !newValue { store.pianoRollClipID = nil }
+            }
+        )) {
+            PianoRollView()
+        }
     }
 
     private var header: some View {

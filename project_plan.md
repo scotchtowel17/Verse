@@ -461,7 +461,7 @@ by hand. `PianoKeyboardView` is the on-screen keyboard for PLAYING notes; it is 
 Target: notes drawn as horizontal blocks on a pitch-by-time grid that can be clicked, dragged,
 lengthened, shortened, and deleted. Must feel obvious to a non-programmer songwriter.
 
-## Step P1 — Note-level model helpers — PENDING
+## Step P1 — Note-level model helpers — DONE
 
 Pure helpers on `Project` in `VerseModel`, alongside the existing clip helpers. Schema stays v1.
 
@@ -475,7 +475,7 @@ Pure helpers on `Project` in `VerseModel`, alongside the existing clip helpers. 
 6. Tests for each, including every rejection path and that editing one note leaves others
    untouched.
 
-## Step P2 — Piano roll view, read-only first — PENDING
+## Step P2 — Piano roll view, read-only first — DONE
 
 Get rendering and layout right before any editing.
 
@@ -518,3 +518,36 @@ again until the next gesture starts. Label entries plainly: "Add Note", "Move No
 
 Constraints: no new dependencies, no schema change, `swift build` clean, `swift run VerseCheck`
 green, app bundles and launches. Do not weaken any existing safety behavior.
+
+## Step P2b — Piano roll view corrections (found by running it) — PENDING
+
+The read-only roll renders, but opening it on a real clip shows an EMPTY grid while the header
+says "6 notes". Verified live with a 6-note melody at pitches 60-67:
+
+1. **Default vertical scroll does not centre on the clip's notes.** P2 item 5 required this and
+   it was not done. The roll opens parked around C8/C9 while the melody sits at C4. The user
+   opens their clip and sees nothing. Fix: on open, centre the viewport on the mean pitch of
+   the clip's notes (fall back to middle C for an empty clip).
+2. **The pitch range is effectively unnavigable.** All 128 pitches are laid out and 25 scroll
+   ticks moved roughly one octave. P2 item 5 asked for a bounded useful range. Fix: show about
+   3 octaves around the content, and make scrolling cover ground at a sane rate.
+3. **Duplicate "Snap" label** in the toolbar: it currently reads "Snap Snap 1/4 1/8 1/16".
+4. **The sheet is cramped.** Give the roll a substantially larger default size and let it
+   resize; a piano roll is the primary editing surface, not a dialog.
+
+## Step P3 — Editing interactions — PENDING
+
+See the Phase P section above for the full interaction list and the undo-grouping requirement.
+Implement it now, on top of the P2b corrections.
+
+Restating the one thing that must not be got wrong: **record exactly one undo entry per
+completed gesture.** Snapshot on gesture begin, mutate freely during the drag, do not record
+again until the next gesture. Per-update recording would flood and flush the 100-entry stack,
+which is the same failure mode `setVolume`/`setPan` were deliberately excluded from undo to
+avoid. Labels: "Add Note", "Move Note", "Resize Note", "Delete Note".
+
+Also required:
+- Clicking or dragging a note auditions that pitch through the engine.
+- A note can never be resized to zero length and become invisible.
+- Edits route through the same autosave path as every other mutation.
+- Remove the "Read-only preview; drawing notes comes next" banner once editing works.

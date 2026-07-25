@@ -72,6 +72,10 @@ public final class AppStore {
     @ObservationIgnored lazy var installedEffects: [DiscoveredAU] = AudioUnitDiscovery.effects()
     var musicUnderstandingAvailable: Bool { Analysis.isMusicUnderstandingAvailable }
 
+    // Piano roll (Phase P): read-only view first; editing arrives in P3.
+    var showPianoRoll = false
+    var pianoRollClipID: UUID?
+
     @ObservationIgnored let engine = VerseAudioEngine()
     @ObservationIgnored let recovery: RecoveryManager
     @ObservationIgnored let history = UndoStack<Project>()
@@ -152,6 +156,23 @@ public final class AppStore {
     /// Filenames under the workspace Media directory that clips still reference.
     func referencedMediaFilenames() -> Set<String> {
         Set(project.tracks.flatMap(\.clips).compactMap(\.mediaFile))
+    }
+
+    // MARK: - Piano roll
+
+    /// Open the piano roll for a MIDI clip. No-op (with status) if the clip is missing or audio.
+    func openPianoRoll(clipID: UUID) {
+        guard let loc = project.clipLocation(id: clipID) else {
+            statusMessage = "That clip isn’t in this project."
+            return
+        }
+        let clip = project.tracks[loc.trackIndex].clips[loc.clipIndex]
+        guard clip.kind == .midi else {
+            statusMessage = "The piano roll is for MIDI clips, not audio takes."
+            return
+        }
+        pianoRollClipID = clipID
+        showPianoRoll = true
     }
 
     // MARK: - Playing notes

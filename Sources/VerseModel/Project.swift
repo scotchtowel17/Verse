@@ -218,20 +218,34 @@ public struct Project: Codable, Sendable, Identifiable {
 /// Readable failures from pure project/track mutations. Callers must not treat a throw as success.
 public enum MutationError: Error, Equatable, CustomStringConvertible {
     case clipNotFound
+    case noteNotFound
     case negativeStartBeat
+    case negativeNoteStartBeat
     case invalidQuantizeGrid(Double)
     case pitchOutOfRange(pitch: Int, semitones: Int)
+    /// Pitch for a single-note add/move is outside MIDI 0–127.
+    case invalidPitch(Int)
+    /// Note length is not positive (or otherwise unusable).
+    case invalidNoteLength(Double)
 
     public var description: String {
         switch self {
         case .clipNotFound:
             return "That clip isn’t in this project."
+        case .noteNotFound:
+            return "That note isn’t in this clip."
         case .negativeStartBeat:
             return "A clip can’t start before beat 0."
+        case .negativeNoteStartBeat:
+            return "A note can’t start before beat 0."
         case .invalidQuantizeGrid(let g):
             return "Quantize grid must be 1/4, 1/8, or 1/16 beat (got \(g))."
         case .pitchOutOfRange(let pitch, let semitones):
             return "Transposing pitch \(pitch) by \(semitones) semitones would leave the MIDI range 0–127."
+        case .invalidPitch(let pitch):
+            return "Pitch must be between 0 and 127 (got \(pitch))."
+        case .invalidNoteLength(let length):
+            return "A note’s length must be greater than 0 beats (got \(length))."
         }
     }
 }
@@ -313,6 +327,77 @@ public extension Project {
         for i in notes.indices {
             notes[i].pitch += semitones
         }
+        tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes = notes
+    }
+
+    // MARK: - Note-level helpers (piano roll)
+
+    /// Shortest allowed note length in beats: one 1/32 note (so a note can never become
+    /// zero-length and invisible on the roll).
+    static let minimumNoteLengthBeats: Double = 0.125
+
+    /// Append a note to a clip. Rejects pitch outside 0–127, `startBeat < 0`, and
+    /// `lengthBeats <= 0`. Lengths below `minimumNoteLengthBeats` are raised to that floor.
+    /// Initializes `midiNotes` when the clip has none yet.
+    @discardableResult
+    mutating func addNote(toClip clipID: UUID, pitch: Int, startBeat: Double,
+                          lengthBeats: Double, velocity: Int) throws -> UUID {
+        guard (0...127).contains(pitch) else { throw MutationError.invalidPitch(pitch) }
+        guard startBeat >= 0 else { throw MutationError.negativeNoteStartBeat }
+        guard lengthBeats > 0 else { throw MutationError.invalidNoteLength(lengthBeats) }
+        guard let loc = clipLocation(id: clipID) else { throw MutationError.clipNotFound }
+        let length = max(lengthBeats, Self.minimumNoteLengthBeats)
+        let note = Note(startBeat: startBeat, lengthBeats: length, pitch: pitch, velocity: velocity)
+        var notes = tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes ?? []
+        notes.append(note)
+        tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes = notes
+        return note.id
+    }
+
+    /// Remove a note by id from a clip. Leaves other notes untouched.
+    mutating func deleteNote(id noteID: UUID, inClip clipID: UUID) throws {
+        guard let loc = clipLocation(id: clipID) else { throw MutationError.clipNotFound }
+        guard var notes = tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes else {
+            throw MutationError.noteNotFound
+        }
+        guard let idx = notes.firstIndex(where: { $0.id == noteID }) else {
+            throw MutationError.noteNotFound
+        }
+        notes.remove(at: idx)
+        tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes = notes
+    }
+
+    /// Move a note’s pitch and start. Same pitch / start validation as `addNote`. Length is
+    /// unchanged. Other notes in the clip are untouched.
+    mutating func moveNote(id noteID: UUID, inClip clipID: UUID,
+                           toPitch pitch: Int, toStartBeat startBeat: Double) throws {
+        guard (0...127).contains(pitch) else { throw MutationError.invalidPitch(pitch) }
+        guard startBeat >= 0 else { throw MutationError.negativeNoteStartBeat }
+        guard let loc = clipLocation(id: clipID) else { throw MutationError.clipNotFound }
+        guard var notes = tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes else {
+            throw MutationError.noteNotFound
+        }
+        guard let idx = notes.firstIndex(where: { $0.id == noteID }) else {
+            throw MutationError.noteNotFound
+        }
+        notes[idx].pitch = pitch
+        notes[idx].startBeat = startBeat
+        tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes = notes
+    }
+
+    /// Change a note’s length. Rejects `lengthBeats <= 0`. Lengths below
+    /// `minimumNoteLengthBeats` are raised to that floor so the note stays visible.
+    mutating func resizeNote(id noteID: UUID, inClip clipID: UUID,
+                             toLengthBeats lengthBeats: Double) throws {
+        guard lengthBeats > 0 else { throw MutationError.invalidNoteLength(lengthBeats) }
+        guard let loc = clipLocation(id: clipID) else { throw MutationError.clipNotFound }
+        guard var notes = tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes else {
+            throw MutationError.noteNotFound
+        }
+        guard let idx = notes.firstIndex(where: { $0.id == noteID }) else {
+            throw MutationError.noteNotFound
+        }
+        notes[idx].lengthBeats = max(lengthBeats, Self.minimumNoteLengthBeats)
         tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes = notes
     }
 }
