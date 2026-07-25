@@ -175,11 +175,38 @@ public final class AppStore {
         let inst = Instrument(sf2: SoundBank.generalUserGS,
                               program: preset.program, bankMSB: preset.bankMSB, bankLSB: preset.bankLSB)
         project.tracks[idx].instrument = inst
-        project.tracks[idx].name = preset.name
+        // Only auto-name still-default track names. User- or Claude-chosen names stay put.
+        if Self.isDefaultTrackName(project.tracks[idx].name) {
+            project.tracks[idx].name = preset.name
+        }
         engine.loadInstrument(id: tid, instrument: inst)
         recovery.autosave(project)
     }
-    var currentPresetName: String { activeTrack?.name ?? "Instrument" }
+
+    /// Resolved instrument label for the active track (curated preset or custom), not track.name.
+    public var currentPresetName: String {
+        SoundBank.displayName(for: activeTrack?.instrument)
+    }
+
+    /// Picker identity for a track's instrument (program + bank), independent of track.name.
+    public func presetSelectionKey(for track: Track) -> String {
+        guard let inst = track.instrument else { return "" }
+        return SoundBank.selectionKey(for: inst)
+    }
+
+    /// Apply a picker selection key by matching a curated preset. Unknown keys are ignored.
+    public func selectPreset(selectionKey key: String, for id: UUID) {
+        guard let preset = presets.first(where: { $0.selectionKey == key }) else { return }
+        selectPreset(preset, for: id)
+    }
+
+    /// True when the name is still a factory default (safe to replace when choosing a preset).
+    public static func isDefaultTrackName(_ name: String) -> Bool {
+        if name == "Piano" { return true }
+        let parts = name.split(separator: " ", omittingEmptySubsequences: true)
+        guard parts.count == 2, let n = Int(parts[1]), n >= 1 else { return false }
+        return parts[0] == "Instrument" || parts[0] == "Audio"
+    }
 
     // MARK: - Recording → clips
 

@@ -48,12 +48,7 @@ private struct TrackRow: View {
             .onTapGesture { store.selectTrack(track.id) }
 
             if track.kind == .instrument {
-                Picker("", selection: Binding(
-                    get: { track.name },
-                    set: { name in if let p = store.presets.first(where: { $0.name == name }) {
-                        store.selectPreset(p, for: track.id) } })) {
-                    ForEach(store.presets, id: \.name) { Text($0.name).tag($0.name) }
-                }.labelsHidden().frame(width: 130)
+                instrumentPicker
             } else {
                 Text("\(track.clips.count) clip(s)").font(.caption).foregroundStyle(.secondary).frame(width: 130)
             }
@@ -83,5 +78,32 @@ private struct TrackRow: View {
         .padding(8)
         .background(isActive ? Color.accentColor.opacity(0.10) : Color.black.opacity(0.04),
                     in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    /// Bound to program + bank (not track.name) so a new project's "Piano" track still shows
+    /// Grand Piano selected, and renaming never blanks the instrument.
+    @ViewBuilder
+    private var instrumentPicker: some View {
+        let selection = Binding(
+            get: { store.presetSelectionKey(for: track) },
+            set: { store.selectPreset(selectionKey: $0, for: track.id) }
+        )
+        Picker("", selection: selection) {
+            ForEach(SoundBank.presetCategories, id: \.self) { category in
+                Section(category) {
+                    ForEach(SoundBank.presets(in: category), id: \.selectionKey) { preset in
+                        Text(preset.name).tag(preset.selectionKey)
+                    }
+                }
+            }
+            // Off-list GM program (e.g. Claude setInstrument): show honestly, not blank.
+            // Only present when this track's instrument is not in the curated list.
+            if let inst = track.instrument, SoundBank.preset(matching: inst) == nil {
+                Text(SoundBank.customLabel(for: inst))
+                    .tag(SoundBank.selectionKey(for: inst))
+            }
+        }
+        .labelsHidden()
+        .frame(width: 130)
     }
 }
