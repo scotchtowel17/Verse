@@ -699,3 +699,50 @@ because the armed state could not be established or observed.
 3. If arming fails (no audio input, for instance) say so; never leave the control looking armed
    when it is not, and never leave it looking unarmed when it is.
 4. Confirm by hand afterwards that arm plus play plus incoming MIDI produces a clip.
+
+---
+
+# Phase I — Richer instruments
+
+## Step I1 — Expand curated presets over the existing bank — PENDING
+
+GeneralUser GS ships 261 presets and 13 drum kits. Verse exposes 29 presets and exactly ONE
+drum kit. This is free variety with zero licence risk and no new download.
+
+1. Expand `presets.json` to roughly 60-80 auditioned GM presets, keeping the existing
+   `category` grouping and adding categories as needed (Organ, Synth Pad, Ethnic, Percussion,
+   Sound Effects).
+2. **Expose the drum kits.** Bank 120 carries multiple kits at different program numbers
+   (Standard 0, Room 8, Power 16, Electronic 24, TR-808 25, Jazz 32, Brush 40, Orchestra 48,
+   SFX 56). Give them clear plain-language names. Verify each program actually loads rather
+   than assuming; drop any that do not.
+3. Keep `fallbackPresets` in `SoundBank.swift` in sync with the manifest.
+4. The picker must stay scannable at this size: keep the category grouping and make sure a
+   long list does not become a wall of names.
+
+## Step I2 — Optional higher-quality bank (MuseScore General) — PENDING
+
+Licence verified directly at source, not assumed:
+`https://ftp.osuosl.org/pub/musescore/soundfont/MuseScore_General/MuseScore_General_License.md`
+states MIT, copyright Michael Cowgill (2014-16) and Frank Wen (2000-2002, 2008), with no
+restriction on redistribution or commercial use beyond retaining the notice. MIT is already on
+the licence-gate allowlist.
+
+- File: `MuseScore_General.sf2`, version 0.2, roughly 210 MB, uncompressed.
+- Source: `https://ftp.osuosl.org/pub/musescore/soundfont/MuseScore_General/`
+- NOTE: the `.sf3` variant is Ogg-compressed and **will not load** in `AVAudioUnitSampler`.
+  Use the `.sf2` only.
+
+1. Add it to `scripts/fetch-artifacts.sh` behind an explicit opt-in flag (it is ~7x the size of
+   the current bank). Record its real SHA-256 on first download.
+2. Add a THIRD-PARTY-LICENSES.md entry with `SPDX-License-Identifier: MIT`, both copyright
+   holders, and the source URL, so the licence gate sees it.
+3. `SoundBank` gains a second logical bank. `Instrument.sf2` is already a logical bank name in
+   the schema, so **no schema change is needed**.
+4. If the file is absent, everything must behave exactly as today with GeneralUser GS. Absence
+   is the normal case and must never be an error.
+5. Keep it gitignored. Do not commit a 210 MB binary.
+
+## Step M4 — Record arm has no visible state (see Phase M) — PENDING
+
+Implement M4 as already specified above in the Phase M section.
