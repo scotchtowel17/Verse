@@ -10,7 +10,8 @@ public enum TrackRef: Equatable {
 }
 
 public enum ClipRef: Equatable {
-    case temp(String)       // a tempClipId minted earlier in the same patch
+    case temp(String)                          // a tempClipId minted earlier in the same patch
+    case existing(track: UUID, clip: UUID)     // resolved from a positional handle (T2C1, …)
 }
 
 public enum TypedOp {
