@@ -572,3 +572,29 @@ Consider a cursor change over the resize zone so the two behaviours are discover
 3. A patch applied while the roll is open must be reflected in the roll.
 4. Draw the transport playhead over the grid during playback if it is cheap. If it is not,
    say so and defer rather than half-building it.
+
+## Step P6 — Snap off, for free manual positioning — DONE
+
+Owner request: keep the grid snap for note start and length, but allow turning it OFF so a
+note can be dragged to an exact manual position and length.
+
+The math already supports this: `PianoRollView.snap(_:)` has `guard snapBeats > 0 else
+{ return beats }`. Snap-off is simply never offered in the UI.
+
+1. Snap control becomes **Off | 1/4 | 1/8 | 1/16**, with `Off` tagged `0.0`. Keep 1/16 as the
+   default so existing behaviour is unchanged until the user opts out.
+2. With snap Off, move, resize, and add must all be continuous, with no rounding of start
+   position or length.
+3. **New-note length when snap is Off.** Today a new note's length is `max(snapBeats,
+   minimumNoteLengthBeats)`. With `snapBeats == 0` that collapses to the 1/32 minimum, so
+   clicking would produce a near-invisible sliver. Instead remember the last non-zero grid
+   value (default 1/16) and use that as the drawn length when snap is Off. The user can then
+   drag it to any exact length they want.
+4. The minimum length guard stays in force with snap Off: a note must never reach zero and
+   become invisible.
+5. The choice persists for the session while the roll is open.
+6. Tests: with snap Off a move lands on an unrounded start beat and a resize produces an
+   unrounded length; with snap on 1/8 both are rounded to 0.5; a note added with snap Off has
+   the remembered grid length, not the 1/32 minimum; the minimum guard still holds with snap Off.
+
+Do not add a modifier-key snap override in this step; the request was a toggle.

@@ -525,6 +525,44 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         tk.expectEqual(store.undoName, "Move Note", "label from first begin")
     }
 
+    // MARK: - Phase P6: snap Off
+
+    tk.suite("Piano roll layout: snap Off leaves values unrounded; grid snaps; new-note length") {
+        // Move with snap Off: unrounded start.
+        let freeStart = PianoRollLayout.snap(1.37, to: 0.0)
+        tk.expectEqual(freeStart, 1.37, "snap Off move lands on unrounded start")
+
+        // Resize with snap Off: unrounded length (caller still applies min floor).
+        let freeLen = PianoRollLayout.snap(0.73, to: 0.0)
+        tk.expectEqual(freeLen, 0.73, "snap Off resize produces unrounded length")
+
+        // Snap on 1/8: both round to 0.5.
+        tk.expectEqual(PianoRollLayout.snap(0.37, to: 0.5), 0.5, "1/8 snaps 0.37 → 0.5")
+        tk.expectEqual(PianoRollLayout.snap(0.74, to: 0.5), 0.5, "1/8 snaps 0.74 → 0.5")
+        tk.expectEqual(PianoRollLayout.snap(0.76, to: 0.5), 1.0, "1/8 snaps 0.76 → 1.0")
+
+        // New note with snap Off uses remembered grid (default 1/16), not the 1/32 minimum.
+        let offLength = PianoRollLayout.newNoteLengthBeats(snapBeats: 0, lastGridBeats: 0.25)
+        tk.expectEqual(offLength, 0.25, "snap Off add uses last grid length, not 1/32 min")
+        tk.expect(offLength > Project.minimumNoteLengthBeats,
+                  "remembered length is longer than the 1/32 floor")
+
+        // Last grid was 1/8 then user switched Off.
+        let offAfterEighth = PianoRollLayout.newNoteLengthBeats(snapBeats: 0, lastGridBeats: 0.5)
+        tk.expectEqual(offAfterEighth, 0.5, "snap Off add remembers last non-zero grid (1/8)")
+
+        // Snap on: length is the grid unit.
+        tk.expectEqual(PianoRollLayout.newNoteLengthBeats(snapBeats: 1.0, lastGridBeats: 0.25), 1.0,
+                       "snap 1/4 add length is one quarter note")
+        tk.expectEqual(PianoRollLayout.newNoteLengthBeats(snapBeats: 0.25, lastGridBeats: 0.25), 0.25,
+                       "snap 1/16 add length is one sixteenth")
+
+        // Minimum guard still holds with snap Off (raw length below floor).
+        let floored = max(Project.minimumNoteLengthBeats, PianoRollLayout.snap(0.01, to: 0.0))
+        tk.expectEqual(floored, Project.minimumNoteLengthBeats,
+                       "min length guard holds with snap Off")
+    }
+
     // MARK: - Phase P5: short notes keep a move body
 
     tk.suite("Piano roll layout: resize handle is proportional and never covers the whole note") {
