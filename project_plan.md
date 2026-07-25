@@ -802,3 +802,72 @@ Verified before writing this step, not assumed:
 7. The header badge must name whichever bank is actually in use, so it never claims a sound
    the app is not producing.
 8. Tests must pass with the file ABSENT (that is the CI case) and must not assume either bank.
+
+---
+
+# Phase H — Battle hardening (remote, no screen required)
+
+## Step H1 — Record can freeze the whole app — PENDING
+
+**Real, user-facing, and structurally invisible to CI.** Proven with `sample` on a hung process:
+
+```
+AppStore.startRecording()                       AppStore.swift:621
+  VerseAudioEngine.startRecording(to:)          +Recording.swift:25
+    -[AVAudioEngine inputNode]
+      AVAudioEngineImpl::UpdateInputNode
+        AVAudioIOUnit_OSX::EnableInputDevice
+          BindToDeviceInternal
+            -[AUHALOutputUnit setDeviceID:error:]   <- blocked indefinitely
+```
+
+`let input = avEngine.inputNode` blocks forever when the input device cannot be bound (no
+permission, contended device, unentitled binary). `startRecording` runs on the main actor, so
+**pressing Record freezes the entire app**. The existing
+`guard fmt.channelCount > 0` was meant to catch "no input" but runs AFTER the blocking call.
+
+CI cannot catch this: the runner has no audio device, so it takes a different path. This is why
+the earlier mic guard was reverted. That revert was my mistake; the instinct was right and only
+the assertion was wrong.
+
+1. Before touching `avEngine.inputNode`, do a **non-blocking** pre-check:
+   - Query the HAL for a default input device
+     (`AudioObjectGetPropertyData` / `kAudioHardwarePropertyDefaultInputDevice`). If it is
+     `kAudioObjectUnknown`, throw `noInputAvailable`.
+   - Check microphone authorization non-blockingly
+     (`AVCaptureDevice.authorizationStatus(for: .audio)`). If denied or restricted, throw a
+     distinct, readable error such as "Verse doesn't have permission to use the microphone."
+2. Only after both pass may `avEngine.inputNode` be touched.
+3. Recording must never be able to hang the main actor. If binding can still be slow, that work
+   belongs off the main actor with a bounded wait and a readable failure.
+4. **Test the property, not the environment.** The reverted test asserted
+   `startRecording` must throw `noInputAvailable`, which is false on a machine that has a mic,
+   and that is why it failed CI. The correct assertion is that `startRecording` **returns**
+   (throws or succeeds) within a bounded time and never hangs. That holds on every machine.
+
+## Step H2 — Fuzz and property tests — PENDING
+
+Everything below is headless and needs no screen or hardware. Use a seeded, deterministic
+pseudo-random generator so failures reproduce; never `Date()` or unseeded randomness.
+
+1. **`PatchParser` fuzz.** It parses arbitrary text from an LLM, so it is the most exposed
+   surface in the app. Feed it: truncated JSON, unbalanced braces and brackets, deeply nested
+   objects, enormous strings, NUL and invalid UTF-8, emoji and RTL text, HTML, multiple fenced
+   blocks, a fence with no closing fence, comments inside strings, trailing commas everywhere.
+   Property: it must always either return a `ParsedPatch` or throw a `ParseError`. It must never
+   crash, hang, or consume unbounded memory.
+2. **`PatchValidator` property test.** Random op sequences with random values against random
+   projects. Properties: a rejected patch mutates nothing; an accepted patch's ops all resolve;
+   errors are collected rather than early-returned; the project is never left partly modified.
+3. **MIDI parser fuzz.** Random byte streams, truncated packets, running status, SysEx, real-time
+   bytes interleaved mid-message. Property: never crashes, never emits a note with pitch or
+   velocity outside 0-127.
+4. **Model round-trip property test.** Randomly generated projects (many tracks, many clips,
+   many notes) encode to JSON and decode back identically.
+5. **Migration hostility.** Malformed, truncated, and wrong-type `project.json`, plus a
+   `schemaVersion` far in the future. Property: a readable error, never a crash or silent
+   data loss.
+6. **Scale.** A project with roughly 50 tracks and 20,000 notes: it must save, load, and compute
+   the fingerprint in reasonable time, and the piano-roll layout maths must not degrade badly.
+
+Report anything these find as a defect write-up, not a silent fix.
