@@ -13,6 +13,7 @@ public struct ContentView: View {
             header
             TransportBar()
             TrackListView()
+            ArrangementView()
             if !store.takes.isEmpty { takesList }
             Spacer(minLength: 0)
             keyboardHint

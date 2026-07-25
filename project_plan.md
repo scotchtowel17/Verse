@@ -1008,7 +1008,7 @@ early, no loop). Negative onsets still skip. No `resizeClip` AI op. Harness: R1 
 This also unblocks `resizeClip` as an AI op, which was cut precisely because length was inert.
 Do NOT re-add that op in this step; note it as newly unblocked.
 
-## Step R2 — Arrangement view — PENDING
+## Step R2 — Arrangement view — DONE
 
 1. New `Sources/VerseAppCore/Views/ArrangementView.swift`: one horizontal lane per track, with a
    shared beat ruler above showing bars. Clips draw as blocks positioned by `startBeat` and
@@ -1027,3 +1027,11 @@ Do NOT re-add that op in this step; note it as newly unblocked.
 
 Constraints: no new dependencies, no schema change, `swift build` clean, `swift run VerseCheck`
 green, app bundles.
+
+**Resolution (R2):** Arrangement timeline is embedded in the main window under the track list.
+`Project.resizeClip` floors length at `minimumClipLengthBeats` (1/32). AppStore continuous
+gestures snapshot once (`beginArrangementGesture` / `endArrangementGesture` + autosave);
+mid-drag updates no-op without begin. Resize hit zone is `min(10px, 30% of clip width)` via
+`ArrangementLayout` so short clips keep a move body. Pure click on a MIDI clip opens the piano
+roll. Harness: model resizeClip suite; AppStore move/resize undo grouping + double-begin;
+layout handle and contentBeats suites.

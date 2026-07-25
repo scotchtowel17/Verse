@@ -711,4 +711,128 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         defer { try? FileManager.default.removeItem(at: dir) }
         tk.expect(store.playbackBeat == nil, "no playhead beat while stopped")
     }
+
+    // MARK: - Phase R2: arrangement view (move / resize undo grouping + layout)
+
+    tk.suite("AppStore arrangement: drag move is one undo for many updates") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 4,
+                        midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
+        store.project.tracks[0].clips = [clip]
+
+        store.beginArrangementGesture(name: "Move Clip")
+        for i in 1...80 {
+            store.arrangementMoveClip(id: clip.id, toStartBeat: Double(i) * 0.05)
+        }
+        store.endArrangementGesture()
+
+        tk.expectEqual(undoDepth(of: store), 1, "80 move updates are exactly one undo entry")
+        tk.expectEqual(store.undoName, "Move Clip", "move undo label")
+        let after = store.project.tracks[0].clips[0]
+        tk.expect(after.startBeat != 0, "clip actually moved")
+
+        store.undo()
+        tk.expectEqual(store.project.tracks[0].clips[0].startBeat, 0,
+                       "one undo restores original start")
+    }
+
+    tk.suite("AppStore arrangement: drag resize is one undo; move without begin is no-op") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let clip = Clip(kind: .audio, name: "Take", startBeat: 0, lengthBeats: 4, mediaFile: "t.wav")
+        store.project.tracks[0].clips = [clip]
+
+        // Without begin, continuous updates must not mutate (no silent undo-less edit).
+        store.arrangementMoveClip(id: clip.id, toStartBeat: 8)
+        store.arrangementResizeClip(id: clip.id, toLengthBeats: 2)
+        let untouched = store.project.tracks[0].clips[0]
+        tk.expectEqual(untouched.startBeat, 0, "move without begin does not change start")
+        tk.expectEqual(untouched.lengthBeats, 4, "resize without begin does not change length")
+        tk.expectEqual(undoDepth(of: store), 0, "no-op updates push nothing")
+
+        store.beginArrangementGesture(name: "Resize Clip")
+        for i in 1...50 {
+            store.arrangementResizeClip(id: clip.id, toLengthBeats: 0.5 + Double(i) * 0.05)
+        }
+        store.arrangementResizeClip(id: clip.id, toLengthBeats: 0.01)
+        store.endArrangementGesture()
+
+        tk.expectEqual(undoDepth(of: store), 1, "50 resize updates are exactly one undo entry")
+        tk.expectEqual(store.undoName, "Resize Clip", "resize undo label")
+        let resized = store.project.tracks[0].clips[0]
+        tk.expectEqual(resized.lengthBeats, Project.minimumClipLengthBeats,
+                       "final sub-minimum length floored so clip stays visible")
+
+        store.undo()
+        tk.expectEqual(store.project.tracks[0].clips[0].lengthBeats, 4,
+                       "one undo restores original length")
+    }
+
+    tk.suite("AppStore arrangement: double begin does not double-snapshot") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 4, midiNotes: [])
+        store.project.tracks[0].clips = [clip]
+
+        store.beginArrangementGesture(name: "Move Clip")
+        store.beginArrangementGesture(name: "Move Clip") // accidental second begin
+        store.arrangementMoveClip(id: clip.id, toStartBeat: 3)
+        store.endArrangementGesture()
+
+        tk.expectEqual(undoDepth(of: store), 1, "double begin still one undo entry")
+        tk.expectEqual(store.undoName, "Move Clip", "label from first begin")
+        tk.expectEqual(store.project.tracks[0].clips[0].startBeat, 3, "clip moved")
+    }
+
+    tk.suite("Arrangement layout: resize handle is proportional and never covers the whole clip") {
+        // Short clip (1/16 at beatWidth 28 → 7px): fixed 10px handle would swallow the body.
+        let shortClipWidth: CGFloat = 0.25 * 28
+        let handle = ArrangementLayout.resizeHandleWidth(clipWidth: shortClipWidth)
+        tk.expect(handle < shortClipWidth * 0.5,
+                  "short-clip handle is under half the block (got \(handle) of \(shortClipWidth))")
+        tk.expectEqual(handle, shortClipWidth * ArrangementLayout.resizeHandleFraction,
+                       "short clips use fraction of width, not the fixed max")
+        tk.expect(shortClipWidth - handle > 0, "middle of short clip remains for move")
+
+        let longClipWidth: CGFloat = 8 * 28
+        let longHandle = ArrangementLayout.resizeHandleWidth(clipWidth: longClipWidth)
+        tk.expectEqual(longHandle, ArrangementLayout.resizeHandleMaxWidth,
+                       "long clips cap at the fixed max edge width")
+
+        tk.expectEqual(ArrangementLayout.resizeHandleWidth(clipWidth: 0), 0,
+                       "zero-width clip has no handle")
+        for w: CGFloat in [6, 10, 14, 20, 56, 112] {
+            let h = ArrangementLayout.resizeHandleWidth(clipWidth: w)
+            let expected = min(ArrangementLayout.resizeHandleMaxWidth,
+                               w * ArrangementLayout.resizeHandleFraction)
+            tk.expectEqual(h, expected, "handle for width \(w) matches min(max, w*0.3)")
+            tk.expect(h < w || w == 0, "handle never covers full width \(w)")
+        }
+    }
+
+    tk.suite("Arrangement layout: contentBeats handles empty project and clip ends") {
+        let empty = ArrangementLayout.contentBeats(tracks: [], beatsPerBar: 4)
+        tk.expectEqual(empty, 16, "empty project shows at least 4 bars")
+
+        let shortTrack = Track(kind: .instrument, name: "P",
+                               instrument: .grandPiano,
+                               clips: [Clip(kind: .midi, name: "c", startBeat: 0, lengthBeats: 2)])
+        let short = ArrangementLayout.contentBeats(tracks: [shortTrack], beatsPerBar: 4)
+        tk.expectEqual(short, 16, "short clips still pad to 4 bars")
+
+        let longTrack = Track(kind: .instrument, name: "P",
+                              instrument: .grandPiano,
+                              clips: [Clip(kind: .midi, name: "c", startBeat: 20, lengthBeats: 8)])
+        let long = ArrangementLayout.contentBeats(tracks: [longTrack], beatsPerBar: 4)
+        // clip end 28 + one bar pad 4 = 32
+        tk.expectEqual(long, 32, "long arrangement includes clip end plus one bar pad")
+
+        // Snap Off leaves values unrounded; grid snaps.
+        tk.expectEqual(ArrangementLayout.snap(1.37, to: 0.0), 1.37, "snap Off is free")
+        tk.expectEqual(ArrangementLayout.snap(1.37, to: 0.25), 1.25, "1/16 snaps 1.37 → 1.25")
+    }
 }

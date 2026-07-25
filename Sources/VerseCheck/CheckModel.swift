@@ -115,6 +115,34 @@ func runModelChecks(_ tk: TestKit) {
         }
     }
 
+    tk.suite("Model: resizeClip") {
+        var p = Project.newUntitled()
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 2, lengthBeats: 4,
+                        midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
+        p.tracks[0].clips = [clip]
+        try p.resizeClip(id: clip.id, toLengthBeats: 2.5)
+        tk.expectEqual(p.tracks[0].clips[0].lengthBeats, 2.5, "length updates")
+        tk.expectEqual(p.tracks[0].clips[0].startBeat, 2, "start untouched on resize")
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].pitch, 60, "notes untouched on resize")
+
+        try p.resizeClip(id: clip.id, toLengthBeats: 0.01)
+        tk.expectEqual(p.tracks[0].clips[0].lengthBeats, Project.minimumClipLengthBeats,
+                       "sub-minimum resize floored to 1/32")
+
+        tk.expectThrows("reject zero length on resize") {
+            try p.resizeClip(id: clip.id, toLengthBeats: 0)
+        }
+        tk.expectThrows("reject negative length on resize") {
+            try p.resizeClip(id: clip.id, toLengthBeats: -0.5)
+        }
+        tk.expectEqual(p.tracks[0].clips[0].lengthBeats, Project.minimumClipLengthBeats,
+                       "failed resize leaves length")
+
+        tk.expectThrows("reject unknown clip on resize") {
+            try p.resizeClip(id: UUID(), toLengthBeats: 1)
+        }
+    }
+
     tk.suite("Model: duplicateClip") {
         var p = Project.newUntitled()
         let n1 = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)

@@ -228,6 +228,8 @@ public enum MutationError: Error, Equatable, CustomStringConvertible {
     case invalidPitch(Int)
     /// Note length is not positive (or otherwise unusable).
     case invalidNoteLength(Double)
+    /// Clip length is not positive (or otherwise unusable).
+    case invalidClipLength(Double)
 
     public var description: String {
         switch self {
@@ -247,6 +249,8 @@ public enum MutationError: Error, Equatable, CustomStringConvertible {
             return "Pitch must be between 0 and 127 (got \(pitch))."
         case .invalidNoteLength(let length):
             return "A note’s length must be greater than 0 beats (got \(length))."
+        case .invalidClipLength(let length):
+            return "A clip’s length must be greater than 0 beats (got \(length))."
         }
     }
 }
@@ -269,6 +273,19 @@ public extension Project {
         guard startBeat >= 0 else { throw MutationError.negativeStartBeat }
         guard let loc = clipLocation(id: id) else { throw MutationError.clipNotFound }
         tracks[loc.trackIndex].clips[loc.clipIndex].startBeat = startBeat
+    }
+
+    /// Shortest allowed clip length in beats (one 1/32 note). Keeps a clip visible and
+    /// resizable on the arrangement timeline.
+    static let minimumClipLengthBeats: Double = 0.125
+
+    /// Change a clip’s length. Rejects `lengthBeats <= 0`. Lengths below
+    /// `minimumClipLengthBeats` are raised to that floor so the clip stays visible.
+    mutating func resizeClip(id: UUID, toLengthBeats lengthBeats: Double) throws {
+        guard lengthBeats > 0 else { throw MutationError.invalidClipLength(lengthBeats) }
+        guard let loc = clipLocation(id: id) else { throw MutationError.clipNotFound }
+        tracks[loc.trackIndex].clips[loc.clipIndex].lengthBeats =
+            max(lengthBeats, Self.minimumClipLengthBeats)
     }
 
     /// Duplicate a clip. The copy gets a fresh clip UUID and every contained `Note` gets a
