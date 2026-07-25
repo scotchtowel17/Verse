@@ -7,7 +7,7 @@ Each step must leave `swift build` clean and `swift run VerseCheck` exiting 0.
 
 ---
 
-## Step 1 — A3 corrections — DONE
+## Step 1 — A3 corrections — PENDING
 
 Close the defects found in the A3 review.
 
@@ -26,7 +26,7 @@ Close the defects found in the A3 review.
    existing clip removes it; a clip handle naming the wrong track is rejected; an unresolvable
    reference surfaces a rejection rather than a silent success.
 
-## Step 2 — A1 project fingerprint — DONE
+## Step 2 — A1 project fingerprint — PENDING
 
 Close the staleness hole. Handles are positional; without this they can silently resolve to
 the wrong track or clip if the project changes between "Copy request" and "Apply".
@@ -47,7 +47,7 @@ the wrong track or clip if the project changes between "Copy request" and "Apply
    rejects with the missing message; a tempo or title change alone does NOT invalidate a
    fingerprint; adding or deleting a clip DOES.
 
-## Step 3 — A2 undo hygiene — DONE
+## Step 3 — A2 undo hygiene — PENDING
 
 1. `UndoStack` stores a label alongside each state. Expose `undoName` / `redoName`.
    `record(_ state:name:)`. Keep the 100-entry limit.
@@ -60,14 +60,14 @@ the wrong track or clip if the project changes between "Copy request" and "Apply
 5. `setVolume` / `setPan` must NOT record. A slider drag emits ~100 calls and would flush the
    entire 100-entry stack, destroying the AI-patch undo point. Leave a comment saying so.
 
-## Step 4 — B file organization — DONE
+## Step 4 — B file organization — PENDING
 
 Split `AppStore.swift` into extensions. No behavior change, no logic edits.
 `AppStore+Transport.swift`, `AppStore+Persistence.swift`, `AppStore+Copilot.swift`.
 All stored properties, timers, `init`, and lifecycle stay in `AppStore.swift`.
 Widen `private` to `internal` only where a move requires it.
 
-## Step 5 — C mutation helpers — DONE
+## Step 5 — C mutation helpers — PENDING
 
 Pure helpers on `Project` / `Track` in `VerseModel`. Schema stays v1.
 
@@ -80,7 +80,7 @@ Pure helpers on `Project` / `Track` in `VerseModel`. Schema stays v1.
 4. Do NOT add `resizeClip` (see Step 7). Do NOT add `gain`, `color`, or `locked`.
 5. Tests for each, including the rejection cases and note-id regeneration.
 
-## Step 6 — D mandatory preview — DONE
+## Step 6 — D mandatory preview — PENDING
 
 1. Split `Copilot.apply` into `preview(reply:project:) -> Result<Success, ...>` and
    `commit(ops:to:)`. Keep `apply` as a thin wrapper if anything still needs it.
@@ -94,7 +94,7 @@ Pure helpers on `Project` / `Track` in `VerseModel`. Schema stays v1.
    sheet is up (a SwiftUI sheet does not disable `CommandGroup` menu items on its own).
 5. Tests for the renderer: it never emits `parsed.summary`, and it names the right tracks.
 
-## Step 7 — E AI expansion — DONE
+## Step 7 — E AI expansion — PENDING
 
 Add ops to `versePatchOps`, `TypedOp`, `RequestBuilder.capabilityOps`, validator, applier,
 and the preview renderer.
