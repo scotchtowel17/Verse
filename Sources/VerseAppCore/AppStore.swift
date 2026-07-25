@@ -184,11 +184,47 @@ public final class AppStore {
         showPianoRoll = true
     }
 
+    /// Open the piano roll for an instrument track.
+    ///
+    /// Uses the first MIDI clip when one exists. On a brand-new project (or any instrument
+    /// track with no MIDI clip yet) creates an empty 4-bar clip, records one undo entry,
+    /// autosaves, then opens the roll so drawing notes has a path in.
+    public func openPianoRoll(forTrack trackID: UUID) {
+        guard let idx = project.trackIndex(id: trackID) else {
+            statusMessage = "That track isn’t in this project."
+            return
+        }
+        let track = project.tracks[idx]
+        guard track.kind == .instrument else {
+            statusMessage = "The piano roll is for instrument tracks."
+            return
+        }
+        if let existing = track.clips.first(where: { $0.kind == .midi }) {
+            openPianoRoll(clipID: existing.id)
+            return
+        }
+        let bars = 4
+        let beatsPerBar = max(1, project.timeSignature.num)
+        let length = Double(beatsPerBar * bars)
+        let clip = Clip(kind: .midi, name: "MIDI", startBeat: 0, lengthBeats: length, midiNotes: [])
+        history.record(project, name: "Add MIDI Clip")
+        project.tracks[idx].clips.append(clip)
+        recovery.autosave(project)
+        openPianoRoll(clipID: clip.id)
+    }
+
     /// Track that owns the open piano-roll clip (for audition routing).
     public var pianoRollTrackID: UUID? {
         guard let clipID = pianoRollClipID,
               let loc = project.clipLocation(id: clipID) else { return nil }
         return project.tracks[loc.trackIndex].id
+    }
+
+    /// Arrangement beat under the playhead while transport is playing; `nil` when stopped.
+    /// Used by the piano roll to draw a playhead over the grid.
+    public var playbackBeat: Double? {
+        guard isPlaying else { return nil }
+        return transport.currentBeat
     }
 
     // MARK: Piano roll editing (one undo entry per completed gesture)

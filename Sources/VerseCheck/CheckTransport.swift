@@ -166,4 +166,48 @@ private func runTransportChecksOnMain(_ tk: TestKit) {
         engine.stop()
         tk.expect(true, "no crash and no negative onset scheduled")
     }
+
+    // MARK: - Phase P4: playhead position
+
+    tk.suite("Transport: currentBeat is nil when stopped and advances while playing") {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("verse-tr-playhead-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let midiID = UUID()
+        var project = Project(title: "playhead", tempoBPM: 120)
+        project.tracks = [
+            Track(id: midiID, kind: .instrument, name: "Keys", instrument: .grandPiano, clips: [
+                Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 8,
+                     midiNotes: [Note(startBeat: 0, lengthBeats: 4, pitch: 60, velocity: 90)])
+            ])
+        ]
+
+        let engine = VerseAudioEngine()
+        engine.configure(with: project)
+        try engine.start()
+        let transport = Transport(engine: engine)
+
+        tk.expect(transport.currentBeat == nil, "currentBeat is nil before play")
+        transport.play(project: project, mediaDir: dir, from: 0)
+        tk.expectEqual(transport.state, .playing, "playing")
+        // During the 0.12s lead the beat should still report the start beat (not negative).
+        if let early = transport.currentBeat {
+            tk.expect(early >= 0, "beat is never negative during lead (got \(early))")
+        } else {
+            tk.expect(false, "currentBeat is non-nil while playing")
+        }
+        // Wait past the lead so musical time has advanced; only a lower bound matters.
+        pumpMain(for: 0.4)
+        if let later = transport.currentBeat {
+            // 0.4s wall − 0.12 lead = 0.28s → at 120 BPM ≈ 0.56 beats; allow slack for scheduling.
+            tk.expect(later >= 0.2, "beat advances after the lead (got \(later))")
+        } else {
+            tk.expect(false, "currentBeat stays non-nil while still playing")
+        }
+        transport.stop()
+        tk.expect(transport.currentBeat == nil, "currentBeat is nil after stop")
+        engine.stop()
+    }
 }
