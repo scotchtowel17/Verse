@@ -845,29 +845,133 @@ the assertion was wrong.
    and that is why it failed CI. The correct assertion is that `startRecording` **returns**
    (throws or succeeds) within a bounded time and never hangs. That holds on every machine.
 
-## Step H2 — Fuzz and property tests — PENDING
+## Step H2 — Fuzz and property tests — PARTIAL (items 1–3 done; 4–6 pending)
 
 Everything below is headless and needs no screen or hardware. Use a seeded, deterministic
 pseudo-random generator so failures reproduce; never `Date()` or unseeded randomness.
 
-1. **`PatchParser` fuzz.** It parses arbitrary text from an LLM, so it is the most exposed
-   surface in the app. Feed it: truncated JSON, unbalanced braces and brackets, deeply nested
-   objects, enormous strings, NUL and invalid UTF-8, emoji and RTL text, HTML, multiple fenced
-   blocks, a fence with no closing fence, comments inside strings, trailing commas everywhere.
-   Property: it must always either return a `ParsedPatch` or throw a `ParseError`. It must never
-   crash, hang, or consume unbounded memory.
-2. **`PatchValidator` property test.** Random op sequences with random values against random
-   projects. Properties: a rejected patch mutates nothing; an accepted patch's ops all resolve;
-   errors are collected rather than early-returned; the project is never left partly modified.
-3. **MIDI parser fuzz.** Random byte streams, truncated packets, running status, SysEx, real-time
-   bytes interleaved mid-message. Property: never crashes, never emits a note with pitch or
-   velocity outside 0-127.
-4. **Model round-trip property test.** Randomly generated projects (many tracks, many clips,
+Harness: `Sources/VerseCheck/CheckFuzz.swift` (`SeededRNG` + suites), wired from `main.swift`
+via `runFuzzChecks`. Defect write-ups from items 1–3 are under **H2 defects found** below.
+
+1. **`PatchParser` fuzz.** DONE. Fixed adversarial corpus + 200 trials seed `0xA11CE001`.
+   Property holds: always `ParsedPatch` or `ParseError`.
+2. **`PatchValidator` property test.** DONE (held properties). Multi-error collection, reject
+   mutates nothing, accepted ops apply (generator omits use-after-`deleteClip`). Open defect
+   **H2-VAL-1** for delete-then-use same handle.
+3. **MIDI parser fuzz.** DONE (no-crash + legal-stream range). Open defect **H2-MIDI-1** for
+   high-bit / real-time mid-data out-of-range fields. Seeds `0xD1D1F002`, `0xC0FFEE01`.
+4. **Model round-trip property test.** PENDING. Randomly generated projects (many tracks, many clips,
    many notes) encode to JSON and decode back identically.
-5. **Migration hostility.** Malformed, truncated, and wrong-type `project.json`, plus a
+5. **Migration hostility.** PENDING. Malformed, truncated, and wrong-type `project.json`, plus a
    `schemaVersion` far in the future. Property: a readable error, never a crash or silent
    data loss.
-6. **Scale.** A project with roughly 50 tracks and 20,000 notes: it must save, load, and compute
+6. **Scale.** PENDING. A project with roughly 50 tracks and 20,000 notes: it must save, load, and compute
    the fingerprint in reasonable time, and the piano-roll layout maths must not degrade badly.
 
 Report anything these find as a defect write-up, not a silent fix.
+
+## H2 defects found (items 1–3 run) — DO NOT silent-fix
+
+Found by the Step H2 fuzz/property harness on 2026-07-25 (items 1, 2, 3 only).
+Production code was left unchanged; tests document the open defects and assert the
+properties that still hold. Close each write-up when the fix lands and rewrite the
+matching “H2 known defect …” suite in `Sources/VerseCheck/CheckFuzz.swift`.
+
+### H2-VAL-1 — `deleteClip` does not invalidate the clip handle for later ops
+
+**Surface:** `PatchValidator` then `PatchApplier`.
+
+**Symptom:** A patch that deletes a clip and then operates on the same positional
+handle (for example `deleteClip` T1C1 followed by `moveClip` / `addNotes` /
+`quantizeNotes` / `transposeNotes` on T1C1) **validates successfully**. Apply then
+throws (`MutationError` “That clip isn’t in this project.” or “Clip no longer exists
+in project.”). That breaks the property “an accepted patch’s ops all resolve.”
+
+**Root cause (observed):** On `deleteClip`, the validator removes the clip from
+`clipNotePitches` but leaves `clipHandles` (and any matching temp-clip bookkeeping)
+intact, so later ops still resolve the deleted handle to a UUID that no longer
+exists after the delete is applied.
+
+**Minimal repro (seed-independent):**
+
+```text
+Project: one instrument track, one MIDI clip T1C1
+ops: deleteClip T1C1; moveClip T1C1 startBeat=8
+→ validate .success; apply throws
+```
+
+Harness: suite `H2 known defect VAL-1 — deleteClip then use same handle validates, apply throws`.
+
+**Suggested fix (not applied here):** When `deleteClip` is accepted, remove that
+handle from `clipHandles` / temp clip sets so later ops report “Unknown clip” and
+the whole patch is rejected (transactional). Optionally simulate delete order so
+temp ids created earlier in the same patch are also invalidated.
+
+### H2-MIDI-1 — parser emits note/CC fields outside 0…127 on hostile streams
+
+**Surface:** `MIDIParser.parse`.
+
+**Symptom:** Property “never emits a note with pitch or velocity outside 0–127”
+fails when data slots contain high-bit bytes. The parser never crashes (good), but
+it can emit `noteOn` / `noteOff` / `controlChange` with values 128…255.
+
+**Root cause (observed):** After a channel status is chosen, the next `dataLen`
+bytes are taken raw. There is no check that a data byte has bit 7 clear. Two common
+feeds:
+
+1. **High-bit payload:** `[0x90, 0xFF, 0xFF]` → `noteOn` with note=255, vel=255.
+2. **Status treated as data:** `[0x90, 0x80, 0x40]` → note=128 (0x80 used as pitch).
+3. **Real-time mid-data:** `[0x90, 0xF8, 60, 0xFE, 100]` → real-time bytes (0xF8…)
+   are skipped only at the top of the loop, not while filling data slots, so 0xF8
+   becomes pitch 248.
+
+Well-formed streams (data bytes 0…127, real-time only between complete messages)
+stay in range.
+
+**Minimal repros:** `[0x90, 0xFF, 0xFF]`, `[0x90, 0x80, 0x40]`, `[0x90, 0xF8, 60, 0xFE, 100]`.
+
+Harness: suite `H2 known defect MIDI-1 — high-bit / real-time mid-data become out-of-range fields`.
+Random/structured fuzz still asserts **no crash** and reports violation counts.
+
+**Suggested fix (not applied here):** When reading channel-message data, if a byte
+has bit 7 set, treat it as a new status (or skip real-time 0xF8–0xFF and continue
+filling data). Never attach values > 127 to `MIDIEvent` note/velocity/controller fields.
+
+### H2 items 1–3 status
+
+| Item | Result |
+|------|--------|
+| 1 PatchParser fuzz | Pass: always `ParsedPatch` or `ParseError` on fixed corpus + 200 seeded trials |
+| 2 PatchValidator property | Pass on held properties; **H2-VAL-1** open |
+| 3 MIDI parser fuzz | Pass on no-crash + legal-stream range; **H2-MIDI-1** open |
+| 4–6 | Not run in this step |
+
+## Step H3 — Fix the two defects the fuzzer found — PENDING
+
+**H2-VAL-1 (serious: breaks the pipeline's core invariant).** `deleteClip` followed by another
+op using the same handle (for example `moveClip` on `T1C1`) passes validation and then throws
+during apply. The validator clears `clipNotePitches` but leaves the handle in `clipHandles`.
+
+This violates the stated contract of the whole patch system: validation is supposed to
+guarantee that application cannot fail. `PatchApplier`'s own doc comment says ops are
+"validated, fully-resolved" and `Copilot` treats a throw as an exceptional case. A user-visible
+symptom would be a patch that previews cleanly, is approved, and then fails on Apply.
+
+Fix: when `deleteClip` consumes a clip handle during validation, remove that handle so any
+later op referencing it is **rejected at validation** with a readable message, not at apply.
+Also confirm the same reasoning for a deleted track handle. Keep the "collect all errors"
+behaviour: the later op should produce an error, not abort the pass.
+
+**H2-MIDI-1.** Hostile bytes with bit 7 set produce note or CC values above 127. Repros:
+`[0x90, 0xFF, 0xFF]`, `[0x90, 0x80, 0x40]`, `[0x90, 0xF8, 60, 0xFE, 100]`.
+
+Per the MIDI spec a data byte always has bit 7 clear; a byte with bit 7 set is a status byte.
+Real-time bytes (0xF8-0xFF) may appear anywhere, including inside another message, and must be
+ignored without disturbing the message in progress or the running status.
+
+Fix: never treat a byte with bit 7 set as data. Skip real-time bytes transparently. A truncated
+or malformed message yields no event rather than an out-of-range one. Keep the existing
+velocity-0-means-note-off behaviour.
+
+Both fixes need the fuzz assertions tightened from "did not crash" to the real property: every
+emitted event carries pitch, velocity and controller values within 0-127.
