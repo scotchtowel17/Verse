@@ -212,3 +212,59 @@ green, and the app must still launch (`scripts/make-app.sh` then open the bundle
 Note honestly in your report what this does NOT cover: SwiftUI view rendering and macOS menu
 behavior still cannot be reached from `VerseCheck`. Step 8's exact bug would still require a
 manual run to catch.
+
+---
+
+# Phase G — Safety parity for the audio and state layer
+
+Phase A hardened the AI layer. These are the equivalent defects one layer down, found by an
+objective review at `037caff`. Same rules: no silent state lies, no silent no-ops, honest
+messages, no behavior change beyond what each step names.
+
+## Step G1 — Effects truth — PENDING
+
+Today `setEffect` records the chosen kind in `AppStore.trackEffects` while the engine holds the
+actual node in `trackNodes`. `syncEngineToProject()` calls `engine.reconfigure`, which calls
+`reset()` -> `removeTrack` on every track and destroys every effect node. `trackEffects` is
+never cleared. `syncEngineToProject` runs on undo, redo, and every applied Claude patch, so a
+track's effect silently disappears while the UI picker still shows it.
+
+Separately, `Track.inserts: [AudioUnitRef]` is persisted schema that no code anywhere reads or
+writes, so effects also vanish on save and reopen with no message.
+
+1. **Survive reconfigure.** After `engine.reconfigure(with:)` in `syncEngineToProject()`,
+   re-apply the built-in effect for every track that still exists, and drop `trackEffects`
+   entries whose track is gone. Effects must survive undo, redo, and patch apply.
+2. **Persist built-in effects.** Write the chosen `BuiltInEffect` into the track's existing
+   `inserts: [AudioUnitRef]` on change, and restore it on open. Use a clear marker, for example
+   `AudioUnitRef(type: "aufx", subtype: <kind.rawValue>, manufacturer: "verse.builtin",
+   name: <kind.label>)`. **The schema already has this field. Do NOT bump `Schema.current`.**
+   A project with no `inserts` must load exactly as it does today.
+3. **Hosted third-party Audio Units stay session-only.** Restoring them needs `stateBlob` work
+   that is out of scope. Do not pretend otherwise: when a hosted AU is dropped by a reconfigure,
+   set that track's `trackEffects` entry correctly and surface a plain status message such as
+   "Reverted <track> to no effect (hosted plug-ins are not restored yet)." Never leave the UI
+   claiming an effect that is not in the graph.
+4. Tests: an effect survives a round trip through `syncEngineToProject`; `trackEffects` never
+   names a track that does not exist; a built-in effect survives save then open; a v1 project
+   with no `inserts` still opens unchanged.
+
+## Step G3 — Workspace retention — PENDING
+
+Two opposite failures today. Clean quit calls `endSessionCleanly(clearMedia: false)`, so every
+take ever recorded accumulates forever in Application Support. Meanwhile `discardRecovery()`
+calls `endSessionCleanly(clearMedia: true)`, which deletes the ENTIRE Media directory, including
+takes belonging to other saved projects.
+
+1. **Prune on clean quit.** Delete only workspace media files not referenced by any clip in the
+   current project. Keep everything referenced.
+2. **Stop the catastrophic delete.** `discardRecovery()` must remove the recovery artifacts
+   (session lock, journal, autosave) and at most the single in-progress take named in the
+   journal. It must NOT remove the Media directory.
+3. Add `RecoveryManager.pruneMedia(keeping:)` taking the set of referenced filenames. Keep it
+   pure and testable against a temporary directory.
+4. Tests, all against a temp `baseDir`: prune keeps referenced files and removes unreferenced
+   ones; `discardRecovery` leaves unrelated takes on disk; prune on an empty set does not throw.
+
+Constraint for both steps: `swift build` clean, `swift run VerseCheck` green, app still bundles
+and launches.
