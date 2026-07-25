@@ -192,4 +192,161 @@ func runModelChecks(_ tk: TestKit) {
         try p.transposeNotes(in: empty.id, by: 12)
         tk.expectEqual(p.tracks[0].clips[1].midiNotes?.count, 0, "empty note list stays empty")
     }
+
+    // MARK: - Note-level helpers (Phase P1)
+
+    tk.suite("Model: addNote") {
+        var p = Project.newUntitled()
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 8, midiNotes: nil)
+        p.tracks[0].clips = [clip]
+
+        let id = try p.addNote(toClip: clip.id, pitch: 60, startBeat: 1, lengthBeats: 0.5, velocity: 100)
+        let notes = p.tracks[0].clips[0].midiNotes!
+        tk.expectEqual(notes.count, 1, "one note after add")
+        tk.expectEqual(notes[0].id, id, "returned id matches stored note")
+        tk.expectEqual(notes[0].pitch, 60, "pitch stored")
+        tk.expectEqual(notes[0].startBeat, 1, "startBeat stored")
+        tk.expectEqual(notes[0].lengthBeats, 0.5, "length stored")
+        tk.expectEqual(notes[0].velocity, 100, "velocity stored")
+
+        // Second note coexists; first untouched.
+        let id2 = try p.addNote(toClip: clip.id, pitch: 64, startBeat: 2, lengthBeats: 1, velocity: 80)
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?.count, 2, "two notes after second add")
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].id, id, "first note id stable")
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[1].id, id2, "second note returned")
+
+        // Sub-minimum positive length is floored to 1/32 beat.
+        let shortID = try p.addNote(toClip: clip.id, pitch: 67, startBeat: 0, lengthBeats: 0.01, velocity: 90)
+        let short = p.tracks[0].clips[0].midiNotes!.first { $0.id == shortID }!
+        tk.expectEqual(short.lengthBeats, Project.minimumNoteLengthBeats, "sub-minimum length floored to 1/32")
+
+        tk.expectThrows("reject pitch below 0") {
+            try p.addNote(toClip: clip.id, pitch: -1, startBeat: 0, lengthBeats: 1, velocity: 100)
+        }
+        tk.expectThrows("reject pitch above 127") {
+            try p.addNote(toClip: clip.id, pitch: 128, startBeat: 0, lengthBeats: 1, velocity: 100)
+        }
+        tk.expectThrows("reject negative startBeat") {
+            try p.addNote(toClip: clip.id, pitch: 60, startBeat: -0.25, lengthBeats: 1, velocity: 100)
+        }
+        tk.expectThrows("reject zero length") {
+            try p.addNote(toClip: clip.id, pitch: 60, startBeat: 0, lengthBeats: 0, velocity: 100)
+        }
+        tk.expectThrows("reject negative length") {
+            try p.addNote(toClip: clip.id, pitch: 60, startBeat: 0, lengthBeats: -1, velocity: 100)
+        }
+        tk.expectThrows("reject unknown clip on add") {
+            try p.addNote(toClip: UUID(), pitch: 60, startBeat: 0, lengthBeats: 1, velocity: 100)
+        }
+        // Rejection paths must not mutate existing notes.
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?.count, 3, "failed adds leave note count unchanged")
+    }
+
+    tk.suite("Model: deleteNote") {
+        var p = Project.newUntitled()
+        let keep = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        let drop = Note(startBeat: 1, lengthBeats: 1, pitch: 64, velocity: 90)
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 4,
+                        midiNotes: [keep, drop])
+        p.tracks[0].clips = [clip]
+
+        try p.deleteNote(id: drop.id, inClip: clip.id)
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?.count, 1, "one note remains")
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].id, keep.id, "kept note untouched")
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].pitch, 60, "kept pitch untouched")
+
+        tk.expectThrows("reject unknown note") {
+            try p.deleteNote(id: drop.id, inClip: clip.id)
+        }
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?.count, 1, "failed delete leaves notes")
+
+        tk.expectThrows("reject unknown clip on delete") {
+            try p.deleteNote(id: keep.id, inClip: UUID())
+        }
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].id, keep.id, "unknown clip leaves notes")
+
+        // nil midiNotes: note not found
+        let bare = Clip(kind: .midi, name: "bare", startBeat: 0, lengthBeats: 4, midiNotes: nil)
+        p.tracks[0].clips.append(bare)
+        tk.expectThrows("reject note on nil midiNotes") {
+            try p.deleteNote(id: keep.id, inClip: bare.id)
+        }
+    }
+
+    tk.suite("Model: moveNote") {
+        var p = Project.newUntitled()
+        let n1 = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        let n2 = Note(startBeat: 2, lengthBeats: 0.5, pitch: 67, velocity: 80)
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 8,
+                        midiNotes: [n1, n2])
+        p.tracks[0].clips = [clip]
+
+        try p.moveNote(id: n1.id, inClip: clip.id, toPitch: 72, toStartBeat: 3.5)
+        let moved = p.tracks[0].clips[0].midiNotes!.first { $0.id == n1.id }!
+        tk.expectEqual(moved.pitch, 72, "pitch updated")
+        tk.expectEqual(moved.startBeat, 3.5, "startBeat updated")
+        tk.expectEqual(moved.lengthBeats, 1, "length unchanged on move")
+        // Sibling note untouched.
+        let sibling = p.tracks[0].clips[0].midiNotes!.first { $0.id == n2.id }!
+        tk.expectEqual(sibling.pitch, 67, "sibling pitch untouched")
+        tk.expectEqual(sibling.startBeat, 2, "sibling start untouched")
+
+        tk.expectThrows("reject pitch below 0 on move") {
+            try p.moveNote(id: n1.id, inClip: clip.id, toPitch: -1, toStartBeat: 0)
+        }
+        tk.expectThrows("reject pitch above 127 on move") {
+            try p.moveNote(id: n1.id, inClip: clip.id, toPitch: 128, toStartBeat: 0)
+        }
+        tk.expectThrows("reject negative startBeat on move") {
+            try p.moveNote(id: n1.id, inClip: clip.id, toPitch: 60, toStartBeat: -1)
+        }
+        // Failed moves leave the note as last good values.
+        let afterFail = p.tracks[0].clips[0].midiNotes!.first { $0.id == n1.id }!
+        tk.expectEqual(afterFail.pitch, 72, "failed move leaves pitch")
+        tk.expectEqual(afterFail.startBeat, 3.5, "failed move leaves start")
+
+        tk.expectThrows("reject unknown note on move") {
+            try p.moveNote(id: UUID(), inClip: clip.id, toPitch: 60, toStartBeat: 0)
+        }
+        tk.expectThrows("reject unknown clip on move") {
+            try p.moveNote(id: n1.id, inClip: UUID(), toPitch: 60, toStartBeat: 0)
+        }
+    }
+
+    tk.suite("Model: resizeNote") {
+        var p = Project.newUntitled()
+        let n1 = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        let n2 = Note(startBeat: 2, lengthBeats: 2, pitch: 64, velocity: 90)
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 8,
+                        midiNotes: [n1, n2])
+        p.tracks[0].clips = [clip]
+
+        try p.resizeNote(id: n1.id, inClip: clip.id, toLengthBeats: 2.5)
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].lengthBeats, 2.5, "length updated")
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].pitch, 60, "pitch untouched on resize")
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].startBeat, 0, "start untouched on resize")
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[1].lengthBeats, 2, "sibling length untouched")
+
+        // Sub-minimum positive length floored to 1/32.
+        try p.resizeNote(id: n1.id, inClip: clip.id, toLengthBeats: 0.01)
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].lengthBeats, Project.minimumNoteLengthBeats,
+                       "sub-minimum resize floored to 1/32")
+
+        tk.expectThrows("reject zero length on resize") {
+            try p.resizeNote(id: n1.id, inClip: clip.id, toLengthBeats: 0)
+        }
+        tk.expectThrows("reject negative length on resize") {
+            try p.resizeNote(id: n1.id, inClip: clip.id, toLengthBeats: -0.5)
+        }
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].lengthBeats, Project.minimumNoteLengthBeats,
+                       "failed resize leaves length")
+
+        tk.expectThrows("reject unknown note on resize") {
+            try p.resizeNote(id: UUID(), inClip: clip.id, toLengthBeats: 1)
+        }
+        tk.expectThrows("reject unknown clip on resize") {
+            try p.resizeNote(id: n1.id, inClip: UUID(), toLengthBeats: 1)
+        }
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[1].lengthBeats, 2, "sibling still untouched after fails")
+    }
 }

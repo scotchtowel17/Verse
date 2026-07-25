@@ -385,4 +385,143 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         tk.expectEqual(store.engineEffect(for: loaded.tracks[0].id), .none,
                        "engine has no insert for empty inserts")
     }
+
+    // MARK: - Phase P2b / P3: piano roll layout + undo grouping
+
+    tk.suite("Piano roll layout: pitch range covers notes (~3 octaves, no scroll needed)") {
+        // Melody at C4–G4 (60–67): the live bug opened parked around C8/C9 with notes off-screen.
+        let notes = (60...67).map { Note(startBeat: Double($0 - 60), lengthBeats: 0.5,
+                                         pitch: $0, velocity: 100) }
+        let range = PianoRollLayout.displayPitchRange(notes: notes)
+        for n in notes {
+            tk.expect(range.contains(n.pitch), "pitch \(n.pitch) is inside display range")
+        }
+        let span = range.upperBound - range.lowerBound
+        tk.expect(span >= PianoRollLayout.minPitchSpan - 1,
+                  "range is at least ~3 octaves (got span \(span))")
+        tk.expect(range.upperBound <= 127 && range.lowerBound >= 0, "range stays in MIDI 0…127")
+        // Mean of 60…67 is ~63; window should sit around mid-keyboard, not C8/C9.
+        tk.expect(range.upperBound < 100, "window is not parked in the top octave")
+        tk.expect(range.lowerBound > 30, "window is not parked in the bottom octave")
+
+        let empty = PianoRollLayout.displayPitchRange(notes: [])
+        tk.expect(empty.contains(60), "empty clip centres on middle C")
+        tk.expect(empty.upperBound - empty.lowerBound >= PianoRollLayout.minPitchSpan - 1,
+                  "empty clip still shows ~3 octaves")
+    }
+
+    tk.suite("AppStore piano roll: add/delete each push one labeled undo entry") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 8, midiNotes: [])
+        store.project.tracks[0].clips = [clip]
+        store.openPianoRoll(clipID: clip.id)
+        tk.expect(store.showPianoRoll, "piano roll opens")
+        tk.expectEqual(store.pianoRollClipID, clip.id, "clip id stored")
+
+        let id = store.pianoRollAddNote(pitch: 60, startBeat: 0, lengthBeats: 0.25)
+        tk.expect(id != nil, "add returns note id")
+        tk.expectEqual(store.project.tracks[0].clips[0].midiNotes?.count, 1, "one note after add")
+        tk.expectEqual(undoDepth(of: store), 1, "add is exactly one undo entry")
+        tk.expectEqual(store.undoName, "Add Note", "add undo label")
+
+        store.pianoRollDeleteNote(id: id!)
+        tk.expectEqual(store.project.tracks[0].clips[0].midiNotes?.count, 0, "note deleted")
+        tk.expectEqual(undoDepth(of: store), 2, "delete adds a second entry")
+        tk.expectEqual(store.undoName, "Delete Note", "delete undo label")
+
+        store.undo()
+        tk.expectEqual(store.project.tracks[0].clips[0].midiNotes?.count, 1,
+                       "undo delete restores the note")
+        store.undo()
+        tk.expectEqual(store.project.tracks[0].clips[0].midiNotes?.count, 0,
+                       "undo add removes the note")
+    }
+
+    tk.suite("AppStore piano roll: drag move is one undo for many updates") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let note = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 8,
+                        midiNotes: [note])
+        store.project.tracks[0].clips = [clip]
+        store.openPianoRoll(clipID: clip.id)
+
+        // Snapshot once, then stream updates like a drag (the setVolume failure mode).
+        store.beginPianoRollGesture(name: "Move Note")
+        for i in 1...80 {
+            store.pianoRollMoveNote(id: note.id, toPitch: 60 + (i % 12),
+                                    toStartBeat: Double(i) * 0.05)
+        }
+        store.endPianoRollGesture()
+
+        tk.expectEqual(undoDepth(of: store), 1, "80 move updates are exactly one undo entry")
+        tk.expectEqual(store.undoName, "Move Note", "move undo label")
+        let after = store.project.tracks[0].clips[0].midiNotes![0]
+        tk.expect(after.pitch != 60 || after.startBeat != 0, "note actually moved")
+
+        store.undo()
+        let restored = store.project.tracks[0].clips[0].midiNotes![0]
+        tk.expectEqual(restored.pitch, 60, "one undo restores original pitch")
+        tk.expectEqual(restored.startBeat, 0, "one undo restores original start")
+    }
+
+    tk.suite("AppStore piano roll: drag resize is one undo; move without begin is no-op") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let note = Note(startBeat: 0, lengthBeats: 1, pitch: 64, velocity: 100)
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 8,
+                        midiNotes: [note])
+        store.project.tracks[0].clips = [clip]
+        store.openPianoRoll(clipID: clip.id)
+
+        // Without begin, continuous updates must not mutate (no silent undo-less edit).
+        store.pianoRollMoveNote(id: note.id, toPitch: 72, toStartBeat: 2)
+        store.pianoRollResizeNote(id: note.id, toLengthBeats: 3)
+        let untouched = store.project.tracks[0].clips[0].midiNotes![0]
+        tk.expectEqual(untouched.pitch, 64, "move without begin does not change pitch")
+        tk.expectEqual(untouched.startBeat, 0, "move without begin does not change start")
+        tk.expectEqual(untouched.lengthBeats, 1, "resize without begin does not change length")
+        tk.expectEqual(undoDepth(of: store), 0, "no-op updates push nothing")
+
+        store.beginPianoRollGesture(name: "Resize Note")
+        for i in 1...50 {
+            store.pianoRollResizeNote(id: note.id, toLengthBeats: 0.5 + Double(i) * 0.05)
+        }
+        // Sub-minimum positive values must stay visible (floored by the model).
+        store.pianoRollResizeNote(id: note.id, toLengthBeats: 0.01)
+        store.endPianoRollGesture()
+
+        tk.expectEqual(undoDepth(of: store), 1, "50 resize updates are exactly one undo entry")
+        tk.expectEqual(store.undoName, "Resize Note", "resize undo label")
+        let resized = store.project.tracks[0].clips[0].midiNotes![0]
+        tk.expectEqual(resized.lengthBeats, Project.minimumNoteLengthBeats,
+                       "final sub-minimum length floored so note stays visible")
+
+        store.undo()
+        tk.expectEqual(store.project.tracks[0].clips[0].midiNotes![0].lengthBeats, 1,
+                       "one undo restores original length")
+    }
+
+    tk.suite("AppStore piano roll: double begin does not double-snapshot") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let note = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 8,
+                        midiNotes: [note])
+        store.project.tracks[0].clips = [clip]
+        store.openPianoRoll(clipID: clip.id)
+
+        store.beginPianoRollGesture(name: "Move Note")
+        store.beginPianoRollGesture(name: "Move Note") // accidental second begin
+        store.pianoRollMoveNote(id: note.id, toPitch: 67, toStartBeat: 1)
+        store.endPianoRollGesture()
+
+        tk.expectEqual(undoDepth(of: store), 1, "double begin still one undo entry")
+        tk.expectEqual(store.undoName, "Move Note", "label from first begin")
+    }
 }

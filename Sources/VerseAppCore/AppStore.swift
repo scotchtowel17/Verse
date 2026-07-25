@@ -72,6 +72,10 @@ public final class AppStore {
     @ObservationIgnored lazy var installedEffects: [DiscoveredAU] = AudioUnitDiscovery.effects()
     var musicUnderstandingAvailable: Bool { Analysis.isMusicUnderstandingAvailable }
 
+    // Piano roll (Phase P): open clip + editing gestures.
+    public var showPianoRoll = false
+    public var pianoRollClipID: UUID?
+
     @ObservationIgnored let engine = VerseAudioEngine()
     @ObservationIgnored let recovery: RecoveryManager
     @ObservationIgnored let history = UndoStack<Project>()
@@ -79,6 +83,11 @@ public final class AppStore {
     @ObservationIgnored private var started = false
     @ObservationIgnored private var meterTimer: Timer?
     @ObservationIgnored private var autosaveTimer: Timer?
+    /// True between `beginPianoRollGesture` and `endPianoRollGesture`. Prevents a second
+    /// undo snapshot mid-drag if the view mis-fires begin.
+    @ObservationIgnored private var pianoRollGestureActive = false
+    /// Pitch currently sounding from a piano-roll audition (separate from keyboard holds).
+    @ObservationIgnored private var pianoRollAuditionPitch: Int?
 
     /// Captured takes stream here; this is the persistent crash-recovery workspace.
     @ObservationIgnored var workingMediaDir: URL { recovery.mediaDir }
@@ -152,6 +161,134 @@ public final class AppStore {
     /// Filenames under the workspace Media directory that clips still reference.
     func referencedMediaFilenames() -> Set<String> {
         Set(project.tracks.flatMap(\.clips).compactMap(\.mediaFile))
+    }
+
+    // MARK: - Piano roll
+
+    /// Open the piano roll for a MIDI clip. No-op (with status) if the clip is missing or audio.
+    public func openPianoRoll(clipID: UUID) {
+        guard let loc = project.clipLocation(id: clipID) else {
+            statusMessage = "That clip isn’t in this project."
+            return
+        }
+        let clip = project.tracks[loc.trackIndex].clips[loc.clipIndex]
+        guard clip.kind == .midi else {
+            statusMessage = "The piano roll is for MIDI clips, not audio takes."
+            return
+        }
+        // Prefer this clip’s track for audition so note sound matches the roll.
+        if project.tracks[loc.trackIndex].kind == .instrument {
+            activeTrackID = project.tracks[loc.trackIndex].id
+        }
+        pianoRollClipID = clipID
+        showPianoRoll = true
+    }
+
+    /// Track that owns the open piano-roll clip (for audition routing).
+    public var pianoRollTrackID: UUID? {
+        guard let clipID = pianoRollClipID,
+              let loc = project.clipLocation(id: clipID) else { return nil }
+        return project.tracks[loc.trackIndex].id
+    }
+
+    // MARK: Piano roll editing (one undo entry per completed gesture)
+
+    /// Snapshot undo once at the start of a continuous gesture (drag move / drag resize).
+    /// Mutate freely until `endPianoRollGesture()`. Do NOT call on every drag update.
+    public func beginPianoRollGesture(name: String) {
+        guard !pianoRollGestureActive else { return }
+        history.record(project, name: name)
+        pianoRollGestureActive = true
+    }
+
+    /// End a continuous gesture: clear the active flag and autosave once.
+    public func endPianoRollGesture() {
+        guard pianoRollGestureActive else { return }
+        pianoRollGestureActive = false
+        recovery.autosave(project)
+    }
+
+    /// Discrete add: one undo entry labeled "Add Note", then autosave.
+    @discardableResult
+    public func pianoRollAddNote(pitch: Int, startBeat: Double, lengthBeats: Double,
+                                 velocity: Int = 100) -> UUID? {
+        guard let clipID = pianoRollClipID else { return nil }
+        var working = project
+        let noteID: UUID
+        do {
+            noteID = try working.addNote(toClip: clipID, pitch: pitch, startBeat: startBeat,
+                                         lengthBeats: lengthBeats, velocity: velocity)
+        } catch let err as MutationError {
+            statusMessage = err.description
+            return nil
+        } catch {
+            statusMessage = "Couldn’t add that note."
+            return nil
+        }
+        history.record(project, name: "Add Note")
+        project = working
+        recovery.autosave(project)
+        return noteID
+    }
+
+    /// Discrete delete: one undo entry labeled "Delete Note", then autosave.
+    public func pianoRollDeleteNote(id noteID: UUID) {
+        guard let clipID = pianoRollClipID else { return }
+        var working = project
+        do {
+            try working.deleteNote(id: noteID, inClip: clipID)
+        } catch let err as MutationError {
+            statusMessage = err.description
+            return
+        } catch {
+            statusMessage = "Couldn’t delete that note."
+            return
+        }
+        history.record(project, name: "Delete Note")
+        project = working
+        recovery.autosave(project)
+    }
+
+    /// Continuous move update. Caller must `beginPianoRollGesture(name: "Move Note")` first.
+    /// Does not record undo and does not autosave (that is `endPianoRollGesture`).
+    /// No-ops if no gesture is active so a missed begin cannot mutate without undo.
+    public func pianoRollMoveNote(id noteID: UUID, toPitch pitch: Int, toStartBeat startBeat: Double) {
+        guard pianoRollGestureActive, let clipID = pianoRollClipID else { return }
+        do {
+            try project.moveNote(id: noteID, inClip: clipID, toPitch: pitch, toStartBeat: startBeat)
+        } catch {
+            // Out-of-range mid-drag is expected when the pointer leaves the grid; ignore.
+        }
+    }
+
+    /// Continuous resize update. Caller must `beginPianoRollGesture(name: "Resize Note")` first.
+    /// No-ops if no gesture is active so a missed begin cannot mutate without undo.
+    public func pianoRollResizeNote(id noteID: UUID, toLengthBeats lengthBeats: Double) {
+        guard pianoRollGestureActive, let clipID = pianoRollClipID else { return }
+        do {
+            try project.resizeNote(id: noteID, inClip: clipID, toLengthBeats: lengthBeats)
+        } catch {
+            // Zero/negative length mid-drag is floored by the model when still positive;
+            // true rejects are ignored so the drag can recover.
+        }
+    }
+
+    /// Audition a pitch on the roll’s track. Replaces any previous roll audition note.
+    public func pianoRollAuditionStart(_ pitch: Int) {
+        guard let tid = pianoRollTrackID ?? Optional(activeTrackID) else { return }
+        if let prev = pianoRollAuditionPitch, prev != pitch {
+            engine.noteOff(prev, trackID: tid)
+        }
+        pianoRollAuditionPitch = pitch
+        engine.noteOn(pitch, velocity: 96, trackID: tid)
+    }
+
+    /// Silence the roll’s audition note, if any.
+    public func pianoRollAuditionStop() {
+        guard let pitch = pianoRollAuditionPitch else { return }
+        let tid = pianoRollTrackID ?? activeTrackID
+        engine.noteOff(pitch, trackID: tid)
+        pianoRollAuditionPitch = nil
     }
 
     // MARK: - Playing notes
