@@ -121,7 +121,7 @@ stays as a deliberate exception.
 ## Deferred (not in this pass)
 
 - Coordinator extraction (revisit only above ~1,200 lines in `AppStore` and with test coverage)
-- Transport honoring `lengthBeats`, which would unblock `resizeClip`
+- Transport honouring `lengthBeats` is done (Step R1); `resizeClip` as an AI op remains deferred until a UI path needs it
 - Phase F: curated presets, licensed phrase library
 
 ## Step 8 — Edit menu undo/redo never updates (found by smoke test) — DONE
@@ -965,3 +965,73 @@ partial load). `RecoveryManager.detectRecovery` keeps the autosave on disk and s
 `projectLoadFailureMessage` so the UI can explain “needs a newer Verse” instead of
 pretending nothing was found. Current schema still opens; forward migration for older
 versions is unchanged.
+
+---
+
+# Phase R — Arrangement (lay a song out in time)
+
+You can now edit notes inside a clip, but there is no surface to position clips in time.
+`moveClip` exists as a model helper and an AI patch op with **no UI path at all**. That is the
+largest remaining gap for actually writing a song.
+
+## Step R1 — Transport must honour `lengthBeats` — DONE
+
+Prerequisite, and a correctness fix in its own right. Today `Clip.lengthBeats` is not consulted
+during playback at all:
+
+- Audio: duration comes from the file (`scheduleFile` plays the whole thing).
+- MIDI: notes are scheduled from `clip.startBeat + note.startBeat` with no clipping at the clip
+  boundary, so a note extending past the clip end still sounds in full.
+
+`lengthBeats` only affects `arrangementBeats`, which feeds the loop range. So a clip that looks
+8 beats long in the piano roll can sound for 30 seconds. The moment R2 lets a user drag a clip
+edge, that inconsistency becomes visible and confusing.
+
+1. **MIDI**: a note must not sound past the clip end. A note starting at or after `lengthBeats`
+   does not sound at all; a note crossing the boundary is truncated so its note-off fires at the
+   clip end.
+2. **Audio**: schedule only the portion of the file that falls inside the clip, using
+   `scheduleSegment` with a frame count derived from `lengthBeats` and the tempo, rather than
+   `scheduleFile`. If the file is shorter than the clip, it simply ends early; do not loop it.
+3. Keep the existing behaviour that negative-onset material is not scheduled.
+4. Tests via the existing offline render: audio stops at the clip boundary rather than playing
+   the whole file, a MIDI note crossing the boundary stops at it, and a note beyond the end
+   never sounds. Assert on rendered audio and scheduled events, not on wall-clock timing.
+
+**Resolution (R1):** `Transport` now plans MIDI and audio through pure helpers
+(`planMIDINotes`, `planAudioSegment`) that both `play()` and VerseCheck use. MIDI notes are
+dropped when they start at or after `lengthBeats` and truncated when they cross it; audio uses
+`scheduleSegment` with a frame count from `lengthBeats` × tempo (file shorter than clip ends
+early, no loop). Negative onsets still skip. No `resizeClip` AI op. Harness: R1 suites in
+`CheckTransport.swift` (planned events + offline render silence past the boundary).
+
+This also unblocks `resizeClip` as an AI op, which was cut precisely because length was inert.
+Do NOT re-add that op in this step; note it as newly unblocked.
+
+## Step R2 — Arrangement view — DONE
+
+1. New `Sources/VerseAppCore/Views/ArrangementView.swift`: one horizontal lane per track, with a
+   shared beat ruler above showing bars. Clips draw as blocks positioned by `startBeat` and
+   sized by `lengthBeats`, labelled with the clip name, and visually distinct for audio vs MIDI.
+2. **Drag a clip horizontally to move it in time**, snapped, reusing the same snap control the
+   piano roll uses (Off / 1/4 / 1/8 / 1/16). Clips may not start before beat 0.
+3. **Drag a clip's right edge to resize** it. Same proportional-hit-zone lesson as the piano
+   roll: on a short clip the resize zone must not swallow the move zone.
+4. Clicking a MIDI clip opens it in the piano roll. Keep the existing per-track roll button
+   working.
+5. The transport playhead draws across the arrangement during playback.
+6. **Undo grouping, same rule as everywhere else in this app**: exactly one entry per completed
+   gesture, snapshot on gesture begin, never per drag update. Labels "Move Clip", "Resize Clip".
+7. It must be reachable and obvious from the main window, and must behave sanely with zero clips.
+8. Edits route through the existing autosave path.
+
+Constraints: no new dependencies, no schema change, `swift build` clean, `swift run VerseCheck`
+green, app bundles.
+
+**Resolution (R2):** Arrangement timeline is embedded in the main window under the track list.
+`Project.resizeClip` floors length at `minimumClipLengthBeats` (1/32). AppStore continuous
+gestures snapshot once (`beginArrangementGesture` / `endArrangementGesture` + autosave);
+mid-drag updates no-op without begin. Resize hit zone is `min(10px, 30% of clip width)` via
+`ArrangementLayout` so short clips keep a move body. Pure click on a MIDI clip opens the piano
+roll. Harness: model resizeClip suite; AppStore move/resize undo grouping + double-begin;
+layout handle and contentBeats suites.

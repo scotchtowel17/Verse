@@ -112,6 +112,9 @@ public final class AppStore {
     /// True between `beginPianoRollGesture` and `endPianoRollGesture`. Prevents a second
     /// undo snapshot mid-drag if the view mis-fires begin.
     @ObservationIgnored private var pianoRollGestureActive = false
+    /// True between `beginArrangementGesture` and `endArrangementGesture`. Same double-begin
+    /// guard for clip move/resize on the arrangement timeline.
+    @ObservationIgnored private var arrangementGestureActive = false
     /// Pitch currently sounding from a piano-roll audition (separate from keyboard holds).
     @ObservationIgnored private var pianoRollAuditionPitch: Int?
 
@@ -366,6 +369,47 @@ public final class AppStore {
         let tid = pianoRollTrackID ?? activeTrackID
         engine.noteOff(pitch, trackID: tid)
         pianoRollAuditionPitch = nil
+    }
+
+    // MARK: Arrangement editing (one undo entry per completed gesture)
+
+    /// Snapshot undo once at the start of a continuous arrangement gesture (drag move /
+    /// drag resize). Mutate freely until `endArrangementGesture()`. Do NOT call on every
+    /// drag update.
+    public func beginArrangementGesture(name: String) {
+        guard !arrangementGestureActive else { return }
+        history.record(project, name: name)
+        arrangementGestureActive = true
+    }
+
+    /// End a continuous arrangement gesture: clear the active flag and autosave once.
+    public func endArrangementGesture() {
+        guard arrangementGestureActive else { return }
+        arrangementGestureActive = false
+        recovery.autosave(project)
+    }
+
+    /// Continuous clip-move update. Caller must `beginArrangementGesture(name: "Move Clip")`
+    /// first. Does not record undo and does not autosave. No-ops if no gesture is active.
+    public func arrangementMoveClip(id clipID: UUID, toStartBeat startBeat: Double) {
+        guard arrangementGestureActive else { return }
+        do {
+            try project.moveClip(id: clipID, toStartBeat: startBeat)
+        } catch {
+            // Negative start mid-drag is expected when the pointer leaves the grid; ignore.
+        }
+    }
+
+    /// Continuous clip-resize update. Caller must
+    /// `beginArrangementGesture(name: "Resize Clip")` first. No-ops if no gesture is active.
+    public func arrangementResizeClip(id clipID: UUID, toLengthBeats lengthBeats: Double) {
+        guard arrangementGestureActive else { return }
+        do {
+            try project.resizeClip(id: clipID, toLengthBeats: lengthBeats)
+        } catch {
+            // Zero/negative length mid-drag is floored by the model when still positive;
+            // true rejects are ignored so the drag can recover.
+        }
     }
 
     // MARK: - Playing notes
