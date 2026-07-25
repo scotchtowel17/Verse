@@ -120,4 +120,115 @@ func runEngineChecks(_ tk: TestKit) {
         }
         tk.expectEqual(fixed.allTrackIDs.count, 3, "graph has a node set per track")
     }
+
+    // MARK: - Step G5: Engine graph lifecycle
+
+    tk.suite("Engine G5: add and remove tracks repeatedly without throws") {
+        let engine = VerseAudioEngine()
+        engine.configure(with: Project.newUntitled())
+        var live: [UUID] = [engine.allTrackIDs[0]]
+
+        for i in 0..<12 {
+            let id = UUID()
+            if i % 2 == 0 {
+                tk.expect(engine.addInstrumentTrack(id: id, instrument: .grandPiano),
+                          "add instrument #\(i) succeeds")
+            } else {
+                tk.expect(engine.addAudioTrack(id: id), "add audio #\(i) succeeds")
+            }
+            live.append(id)
+            tk.expect(engine.trackExists(id), "track present after add #\(i)")
+
+            if live.count > 3 {
+                let doomed = live.removeFirst()
+                engine.removeTrack(id: doomed)
+                tk.expect(!engine.trackExists(doomed), "removed track gone after cycle #\(i)")
+            }
+        }
+        tk.expectEqual(engine.allTrackIDs.count, live.count, "node map size matches live tracks")
+        for id in live {
+            tk.expect(engine.trackExists(id), "surviving track still in graph")
+        }
+        // Tear down everything; must not throw or leave orphaned entries.
+        for id in live { engine.removeTrack(id: id) }
+        tk.expectEqual(engine.allTrackIDs.count, 0, "graph empty after removing all")
+    }
+
+    tk.suite("Engine G5: reconfigure many tracks leaves expected node set") {
+        var big = Project(title: "many")
+        big.tracks = (0..<8).map { i in
+            if i % 3 == 0 {
+                return Track(kind: .audio, name: "A\(i)")
+            }
+            return Track(kind: .instrument, name: "I\(i)", instrument: .grandPiano)
+        }
+        let engine = VerseAudioEngine()
+        engine.configure(with: Project.newUntitled())
+        tk.expectEqual(engine.allTrackIDs.count, 1, "seed configure has one track")
+
+        engine.reconfigure(with: big)
+        let expected = Set(big.tracks.map(\.id))
+        let actual = Set(engine.allTrackIDs)
+        tk.expectEqual(actual.count, 8, "exactly eight track node sets after reconfigure")
+        tk.expectEqual(actual, expected, "node ids match project track ids exactly")
+        for t in big.tracks {
+            tk.expect(engine.trackExists(t.id), "track “\(t.name)” present")
+            if t.kind == .instrument {
+                tk.expect(engine.samplerExists(for: t.id), "instrument track has sampler")
+                tk.expect(engine.playerNode(for: t.id) == nil, "instrument track has no player")
+            } else {
+                tk.expect(engine.playerNode(for: t.id) != nil, "audio track has player")
+                tk.expect(!engine.samplerExists(for: t.id), "audio track has no sampler")
+            }
+        }
+
+        // Second reconfigure to a smaller project must drop the rest.
+        let small = Project.newUntitled()
+        engine.reconfigure(with: small)
+        tk.expectEqual(Set(engine.allTrackIDs), Set([small.tracks[0].id]),
+                       "reconfigure to single track leaves only that id")
+    }
+
+    tk.suite("Engine G5: removeTrack on unknown id is a safe no-op") {
+        let project = Project.newUntitled()
+        let known = project.tracks[0].id
+        let engine = VerseAudioEngine()
+        engine.configure(with: project)
+        let before = Set(engine.allTrackIDs)
+        engine.removeTrack(id: UUID())
+        tk.expectEqual(Set(engine.allTrackIDs), before, "unknown remove leaves graph unchanged")
+        tk.expect(engine.trackExists(known), "known track still present after unknown remove")
+        // Double-remove of a real id: second call is also a no-op.
+        engine.removeTrack(id: known)
+        engine.removeTrack(id: known)
+        tk.expect(!engine.trackExists(known), "track gone after first remove")
+        tk.expectEqual(engine.allTrackIDs.count, 0, "second remove of same id is safe")
+    }
+
+    tk.suite("Engine G5: effects insert and remove; audio still flows") {
+        let trackID = UUID()
+        var project = Project(title: "fx-g5")
+        project.tracks = [Track(id: trackID, kind: .instrument, name: "Keys", instrument: .grandPiano)]
+        let engine = VerseAudioEngine()
+        engine.configure(with: project)
+
+        engine.setEffect(.reverb, trackID: trackID, amount: 50)
+        tk.expectEqual(engine.currentEffect(trackID: trackID), .reverb, "reverb inserted")
+        let withFX = VerseAudioEngine.stats(try engine.renderOffline(seconds: 0.5) { e in
+            e.noteOn(60, velocity: 110, trackID: trackID)
+        })
+        tk.expect(withFX.isAudible, "audio flows through reverb insert (peak=\(withFX.peak))")
+
+        // Swap to delay without tearing the graph down.
+        engine.setEffect(.delay, trackID: trackID, amount: 40)
+        tk.expectEqual(engine.currentEffect(trackID: trackID), .delay, "delay replaced reverb")
+
+        // Remove effect (.none) and confirm path still sounds.
+        engine.setEffect(.none, trackID: trackID)
+        tk.expectEqual(engine.currentEffect(trackID: trackID), .none, "effect removed")
+        let dry = VerseAudioEngine.stats(try engine.renderOffline(seconds: 0.5) { e in
+            e.noteOn(64, velocity: 110, trackID: trackID)
+        })
+        tk.expect(dry.isAudible, "audio still flows after effect removed (peak=\(dry.peak))")
+    }
 }

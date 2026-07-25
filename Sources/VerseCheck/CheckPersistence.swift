@@ -188,6 +188,187 @@ func runPersistenceChecks(_ tk: TestKit) {
         tk.expectEqual(loaded.tracks[0].name, "First", "first track kept its id and name")
         tk.expectEqual(loaded.tracks[1].name, "Second", "second track kept its name")
     }
+
+    // MARK: - Step G5: Persistence round trips
+
+    tk.suite("Persistence G5: save then read preserves model fields including inserts") {
+        let root = fm.temporaryDirectory.appendingPathComponent("verse-g5-fields-\(UUID().uuidString)")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let trackID = UUID()
+        let clipID = UUID()
+        let noteID = UUID()
+        let insert = AudioUnitRef(
+            type: "aufx", subtype: "reverb", manufacturer: "verse.builtin",
+            name: "Reverb", stateBlob: Data([0x01, 0x02, 0xAB]))
+        let note = Note(id: noteID, startBeat: 0.5, lengthBeats: 1.25, pitch: 64, velocity: 97,
+                        pitchBend: [0.0, 0.1, -0.05])
+        let midiClip = Clip(id: clipID, kind: .midi, name: "Phrase", startBeat: 2, lengthBeats: 8,
+                            midiNotes: [note])
+        let track = Track(id: trackID, kind: .instrument, name: "Lead",
+                          volume: 0.55, pan: -0.3, mute: true, solo: true,
+                          instrument: Instrument(sf2: "GeneralUserGS", program: 24, bankMSB: 121, bankLSB: 0),
+                          inserts: [insert], clips: [midiClip])
+        let project = Project(
+            title: "Field Sweep",
+            tempoBPM: 93.5,
+            key: KeySignature(tonic: .Fs, mode: .minor),
+            timeSignature: TimeSignature(num: 3, den: 4),
+            tracks: [track],
+            masterVolume: 0.7)
+        let fixedID = project.id
+        let fixedCreated = project.createdAt
+
+        let pkg = root.appendingPathComponent("Fields.verse")
+        try ProjectPackage.write(project, to: pkg, mediaSourceDir: nil)
+        let back = try ProjectPackage.read(pkg)
+
+        tk.expectEqual(back.schemaVersion, Schema.current, "schemaVersion preserved")
+        tk.expectEqual(back.id, fixedID, "project id preserved")
+        tk.expectEqual(back.title, "Field Sweep", "title preserved")
+        tk.expectEqual(back.tempoBPM, 93.5, "tempoBPM preserved")
+        tk.expectEqual(back.key?.tonic, .Fs, "key tonic preserved")
+        tk.expectEqual(back.key?.mode, .minor, "key mode preserved")
+        tk.expectEqual(back.timeSignature.num, 3, "time signature numerator preserved")
+        tk.expectEqual(back.timeSignature.den, 4, "time signature denominator preserved")
+        tk.expectEqual(back.masterVolume, 0.7, "masterVolume preserved")
+        // write() stamps modifiedAt; createdAt must stay put. ISO8601 encoding is whole-second.
+        tk.expectEqual(Int(back.createdAt.timeIntervalSince1970),
+                       Int(fixedCreated.timeIntervalSince1970),
+                       "createdAt preserved (to the second; ISO8601)")
+
+        tk.expectEqual(back.tracks.count, 1, "one track")
+        let t = back.tracks[0]
+        tk.expectEqual(t.id, trackID, "track id preserved")
+        tk.expectEqual(t.kind, .instrument, "track kind preserved")
+        tk.expectEqual(t.name, "Lead", "track name preserved")
+        tk.expectEqual(t.volume, 0.55, "volume preserved")
+        tk.expectEqual(t.pan, -0.3, "pan preserved")
+        tk.expect(t.mute, "mute preserved")
+        tk.expect(t.solo, "solo preserved")
+        tk.expectEqual(t.instrument?.program, 24, "instrument program preserved")
+        tk.expectEqual(t.instrument?.bankMSB, 121, "instrument bankMSB preserved")
+        tk.expectEqual(t.inserts.count, 1, "inserts count preserved")
+        tk.expectEqual(t.inserts[0].type, "aufx", "insert type preserved")
+        tk.expectEqual(t.inserts[0].subtype, "reverb", "insert subtype preserved")
+        tk.expectEqual(t.inserts[0].manufacturer, "verse.builtin", "insert manufacturer preserved")
+        tk.expectEqual(t.inserts[0].name, "Reverb", "insert name preserved")
+        tk.expectEqual(t.inserts[0].stateBlob, Data([0x01, 0x02, 0xAB]), "insert stateBlob preserved")
+        tk.expectEqual(t.clips.count, 1, "clip count preserved")
+        tk.expectEqual(t.clips[0].id, clipID, "clip id preserved")
+        tk.expectEqual(t.clips[0].kind, .midi, "clip kind preserved")
+        tk.expectEqual(t.clips[0].name, "Phrase", "clip name preserved")
+        tk.expectEqual(t.clips[0].startBeat, 2, "clip startBeat preserved")
+        tk.expectEqual(t.clips[0].lengthBeats, 8, "clip lengthBeats preserved")
+        tk.expectEqual(t.clips[0].midiNotes?.first?.id, noteID, "note id preserved")
+        tk.expectEqual(t.clips[0].midiNotes?.first?.pitch, 64, "note pitch preserved")
+        tk.expectEqual(t.clips[0].midiNotes?.first?.velocity, 97, "note velocity preserved")
+        tk.expectEqual(t.clips[0].midiNotes?.first?.startBeat, 0.5, "note startBeat preserved")
+        tk.expectEqual(t.clips[0].midiNotes?.first?.lengthBeats, 1.25, "note lengthBeats preserved")
+        tk.expectEqual(t.clips[0].midiNotes?.first?.pitchBend, [0.0, 0.1, -0.05],
+                       "note pitchBend preserved")
+    }
+
+    tk.suite("Persistence G5: package missing project.json yields readable error") {
+        let root = fm.temporaryDirectory.appendingPathComponent("verse-g5-missing-\(UUID().uuidString)")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        // Directory shaped like a .verse package but without project.json.
+        let pkg = root.appendingPathComponent("Broken.verse")
+        try fm.createDirectory(at: pkg, withIntermediateDirectories: true)
+        try fm.createDirectory(at: pkg.appendingPathComponent("Media"), withIntermediateDirectories: true)
+        try "not the project".write(to: pkg.appendingPathComponent("readme.txt"),
+                                    atomically: true, encoding: .utf8)
+
+        var sawExpected = false
+        var message = ""
+        do {
+            _ = try ProjectPackage.read(pkg)
+        } catch let err as ProjectPackage.PackageError {
+            if case .missingProjectJSON = err { sawExpected = true }
+            message = err.errorDescription ?? ""
+        } catch {
+            message = String(describing: error)
+        }
+        tk.expect(sawExpected, "throws PackageError.missingProjectJSON")
+        tk.expect(message.contains("missing") || message.contains("project"),
+                  "error message is readable: “\(message)”")
+    }
+
+    tk.suite("Persistence G5: unreadable media is reported as skipped, save still succeeds") {
+        let root = fm.temporaryDirectory.appendingPathComponent("verse-g5-skip-\(UUID().uuidString)")
+        let mediaSrc = root.appendingPathComponent("src-media")
+        try fm.createDirectory(at: mediaSrc, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let goodName = "good.caf"
+        let missingName = "missing-take.caf"
+        try writeSineCAF(to: mediaSrc.appendingPathComponent(goodName), seconds: 0.1)
+
+        var project = Project.newUntitled()
+        project.title = "Partial Media"
+        var audio = Track(kind: .audio, name: "Rec")
+        audio.clips = [
+            Clip(kind: .audio, name: "Good", startBeat: 0, lengthBeats: 2, mediaFile: goodName),
+            Clip(kind: .audio, name: "Gone", startBeat: 4, lengthBeats: 2, mediaFile: missingName)
+        ]
+        project.tracks.append(audio)
+
+        let pkg = root.appendingPathComponent("Partial.verse")
+        let skipped = try ProjectPackage.write(project, to: pkg, mediaSourceDir: mediaSrc)
+        tk.expectEqual(skipped, [missingName], "missing media name reported in skipped list")
+        tk.expect(fm.fileExists(atPath: pkg.appendingPathComponent("Media/\(goodName)").path),
+                  "readable media was still packaged")
+        tk.expect(!fm.fileExists(atPath: pkg.appendingPathComponent("Media/\(missingName)").path),
+                  "missing media was not silently invented")
+        let back = try ProjectPackage.read(pkg)
+        tk.expectEqual(back.title, "Partial Media", "project still saved when media skipped")
+        tk.expectEqual(back.tracks.last?.clips.count, 2, "clip references preserved even if media skipped")
+    }
+
+    tk.suite("Persistence G5: extractMedia reports copy failures") {
+        let root = fm.temporaryDirectory.appendingPathComponent("verse-g5-extract-\(UUID().uuidString)")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let mediaSrc = root.appendingPathComponent("src")
+        try fm.createDirectory(at: mediaSrc, withIntermediateDirectories: true)
+        let takeName = "take-block.caf"
+        try writeSineCAF(to: mediaSrc.appendingPathComponent(takeName), seconds: 0.1)
+
+        var project = Project.newUntitled()
+        var audio = Track(kind: .audio, name: "Rec")
+        audio.clips = [Clip(kind: .audio, name: "T", startBeat: 0, lengthBeats: 1, mediaFile: takeName)]
+        project.tracks.append(audio)
+        let pkg = root.appendingPathComponent("Extract.verse")
+        try ProjectPackage.write(project, to: pkg, mediaSourceDir: mediaSrc)
+
+        let work = root.appendingPathComponent("work-media", isDirectory: true)
+        try fm.createDirectory(at: work, withIntermediateDirectories: true)
+        // Force a copy failure: leave an immutable file at the destination path so
+        // extractMedia's try? removeItem cannot clear it and copyItem throws.
+        var blocker = work.appendingPathComponent(takeName)
+        try Data([0x00]).write(to: blocker)
+        var values = URLResourceValues()
+        values.isUserImmutable = true
+        try blocker.setResourceValues(values)
+        defer {
+            var clear = URLResourceValues()
+            clear.isUserImmutable = false
+            try? blocker.setResourceValues(clear)
+        }
+
+        let failed = try ProjectPackage.extractMedia(from: pkg, to: work)
+        tk.expect(failed.contains(takeName), "failed extract reports the take name, not silent success")
+        // Control: clean destination gets a successful (empty failed) extract.
+        let clean = root.appendingPathComponent("work-clean", isDirectory: true)
+        let cleanFailed = try ProjectPackage.extractMedia(from: pkg, to: clean)
+        tk.expect(cleanFailed.isEmpty, "unblocked extract reports no failures")
+        tk.expect(fm.fileExists(atPath: clean.appendingPathComponent(takeName).path),
+                  "unblocked extract places the take on disk")
+    }
 }
 
 // MARK: - SIGKILL crash-injection modes (driven by scripts/crash-recovery-test.sh)
