@@ -488,7 +488,7 @@ Get rendering and layout right before any editing.
    and show a useful range (about 3 octaves) rather than all 128 pitches at once.
 6. Opens for a selected MIDI clip. Add a way to reach it from the track row.
 
-## Step P3 — Editing interactions — PENDING
+## Step P3 — Editing interactions — DONE
 
 Standard piano-roll interactions, chosen because they are what every DAW does and therefore
 what muscle memory expects:
@@ -519,7 +519,7 @@ again until the next gesture starts. Label entries plainly: "Add Note", "Move No
 Constraints: no new dependencies, no schema change, `swift build` clean, `swift run VerseCheck`
 green, app bundles and launches. Do not weaken any existing safety behavior.
 
-## Step P2b — Piano roll view corrections (found by running it) — PENDING
+## Step P2b — Piano roll view corrections (found by running it) — DONE
 
 The read-only roll renders, but opening it on a real clip shows an EMPTY grid while the header
 says "6 notes". Verified live with a 6-note melody at pitches 60-67:
@@ -535,7 +535,7 @@ says "6 notes". Verified live with a 6-note melody at pitches 60-67:
 4. **The sheet is cramped.** Give the roll a substantially larger default size and let it
    resize; a piano roll is the primary editing surface, not a dialog.
 
-## Step P3 — Editing interactions — PENDING
+## Step P3 — Editing interactions — DONE
 
 See the Phase P section above for the full interaction list and the undo-grouping requirement.
 Implement it now, on top of the P2b corrections.
