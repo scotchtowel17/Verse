@@ -551,3 +551,24 @@ Also required:
 - A note can never be resized to zero length and become invisible.
 - Edits route through the same autosave path as every other mutation.
 - Remove the "Read-only preview; drawing notes comes next" banner once editing works.
+
+## Step P5 — Short notes cannot be moved (found by running it) — PENDING
+
+Verified live: the resize hit zone is a fixed pixel width taken from the right edge of a note.
+On a note only 1/16 long, that zone covers essentially the whole block, so dragging it always
+resizes and it can never be moved. Since 1/16 is the default snap and a newly added note is
+exactly one snap unit long, **every note the user draws is unmovable until they lengthen it.**
+
+Fix: make the resize zone proportional and bounded, for example
+`min(fixedEdgeWidth, noteWidth * 0.3)`, so the middle of even the shortest note always moves.
+Consider a cursor change over the resize zone so the two behaviours are discoverable.
+
+## Step P4 — Piano roll integration — PENDING
+
+1. A track with no MIDI clip needs an obvious way to create an empty clip and start drawing.
+   Today the roll can only be opened for a clip that already exists, so a brand-new project
+   has no path into the editor at all.
+2. Confirm edits route through the same autosave path as every other mutation.
+3. A patch applied while the roll is open must be reflected in the roll.
+4. Draw the transport playhead over the grid during playback if it is cheap. If it is not,
+   say so and defer rather than half-building it.
