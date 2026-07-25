@@ -123,3 +123,55 @@ stays as a deliberate exception.
 - Coordinator extraction (revisit only above ~1,200 lines in `AppStore` and with test coverage)
 - Transport honoring `lengthBeats`, which would unblock `resizeClip`
 - Phase F: curated presets, licensed phrase library
+
+## Step 8 — Edit menu undo/redo never updates (found by smoke test) — DONE
+
+Live defect found by running the app: after adding a track, Edit shows a greyed-out "Undo"
+with no label, and Cmd-Z does nothing. The undo stack itself is correct (Step 3 tests pass);
+the menu is what is broken, and it predates Step 3.
+
+Root cause: `.commands { }` lives in `App.body`, which does NOT participate in `@Observable`
+change tracking. `store.canUndo` / `store.undoName` are read once when the scene is built
+(both empty at launch) and never re-read, so the item stays permanently disabled.
+
+Fix: move the observable reads into a **View** body, which does track observation.
+
+1. Add `struct UndoRedoCommands: Commands` holding the `AppStore`.
+2. Inside it, `CommandGroup(replacing: .undoRedo) { UndoRedoMenuContent(store: store) }`.
+3. `private struct UndoRedoMenuContent: View` reads `store.undoName`, `store.canUndo`,
+   `store.redoName`, `store.canRedo` in its `body` and renders the two buttons with their
+   keyboard shortcuts and `.disabled(...)`.
+4. Use it from `VerseApp.commands`.
+5. Audit the other command groups for the same latent bug and note anything that reads
+   observable state at scene-build time.
+
+Acceptance: after adding a track, Edit reads "Undo Add Track" and is enabled; Cmd-Z removes
+the track; after undo, Edit reads "Redo Add Track". Verified by running the app, not by tests.
+
+### Step 8, attempt 2 (attempt 1 verified FAILED in a live run)
+
+Wrapping the buttons in a `Commands` struct that holds the store did NOT fix it. Verified by
+running the app: after adding a track, Edit still shows a greyed, unlabeled "Undo" and Cmd-Z
+does nothing. `.commands` does not re-evaluate from `@Observable` state at all, no matter how
+the reads are nested, because the menu is built once per scene.
+
+The supported SwiftUI mechanism for driving menu state from window content is `FocusedValue`.
+
+1. New file `Sources/Verse/UndoFocus.swift`:
+   - `struct UndoMenuState: Equatable { var canUndo: Bool; var undoName: String?;
+     var canRedo: Bool; var redoName: String? }`
+   - `struct UndoMenuStateKey: FocusedValueKey { typealias Value = UndoMenuState }`
+   - `extension FocusedValues { var undoMenuState: UndoMenuState? { get/set } }`
+2. `ContentView` publishes it:
+   `.focusedSceneValue(\.undoMenuState, UndoMenuState(canUndo: store.canUndo,
+   undoName: store.undoName, canRedo: store.canRedo, redoName: store.redoName))`
+   ContentView is a View, so it re-evaluates on observation and re-publishes.
+3. The undo/redo `Commands` struct reads `@FocusedValue(\.undoMenuState) private var undoState`
+   and drives BOTH the label and `.disabled(...)` from it. The button actions may still call
+   `store.undo()` / `store.redo()` directly; only label and enablement need to be reactive.
+
+Fallback if `FocusedValue` still does not refresh in a live run: remove `.disabled(...)`
+entirely and use static "Undo" / "Redo" labels. `AppStore.undo()` already guards internally,
+so an always-enabled item is a safe no-op when the stack is empty. A working Cmd-Z with a
+generic label beats a permanently dead menu item. Say clearly in your report which path you
+took and why.
