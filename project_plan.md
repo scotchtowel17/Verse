@@ -449,3 +449,72 @@ questions and gets its own phase.
 
 Constraints: no new dependencies, no schema change, `swift build` clean, `swift run VerseCheck`
 green, app bundles and launches.
+
+---
+
+# Phase P — Piano roll (manual note editing)
+
+The owner's most important feature, and it does not exist. Notes can only enter a project via
+hum-to-MIDI or a Claude patch. There is no way to add, move, lengthen, or delete a single note
+by hand. `PianoKeyboardView` is the on-screen keyboard for PLAYING notes; it is not an editor.
+
+Target: notes drawn as horizontal blocks on a pitch-by-time grid that can be clicked, dragged,
+lengthened, shortened, and deleted. Must feel obvious to a non-programmer songwriter.
+
+## Step P1 — Note-level model helpers — PENDING
+
+Pure helpers on `Project` in `VerseModel`, alongside the existing clip helpers. Schema stays v1.
+
+1. `addNote(toClip:pitch:startBeat:lengthBeats:velocity:) -> UUID` — rejects pitch outside
+   0-127, `startBeat < 0`, `lengthBeats <= 0`.
+2. `deleteNote(id:inClip:)`.
+3. `moveNote(id:inClip:toPitch:toStartBeat:)` — same validation as add.
+4. `resizeNote(id:inClip:toLengthBeats:)` — rejects `<= 0`; enforce a sensible minimum
+   (one 1/32 beat) so a note can never become zero-length and invisible.
+5. Reuse `MutationError` and add cases as needed. Every rejection carries a readable message.
+6. Tests for each, including every rejection path and that editing one note leaves others
+   untouched.
+
+## Step P2 — Piano roll view, read-only first — PENDING
+
+Get rendering and layout right before any editing.
+
+1. New `Sources/VerseAppCore/Views/PianoRollView.swift`.
+2. Vertical axis is pitch with a piano-key gutter on the left (black/white keys aligned to the
+   grid rows). Horizontal axis is beats, with bar lines heavier than beat lines.
+3. Notes render as rounded horizontal blocks positioned by `startBeat`/`lengthBeats`/`pitch`.
+4. A snap control offering 1/4, 1/8, 1/16 (match the existing quantize grids).
+5. Scroll both axes; default the vertical scroll so the clip's existing notes are centered,
+   and show a useful range (about 3 octaves) rather than all 128 pitches at once.
+6. Opens for a selected MIDI clip. Add a way to reach it from the track row.
+
+## Step P3 — Editing interactions — PENDING
+
+Standard piano-roll interactions, chosen because they are what every DAW does and therefore
+what muscle memory expects:
+
+- Click empty grid: add a note at that pitch and snapped beat, length = current snap value.
+- Drag a note body: move it in pitch and time, snapped.
+- Drag a note's right edge: lengthen or shorten, snapped, floored at the minimum.
+- Click a note: select it. Delete or Backspace removes the selection.
+- Clicking or dragging a note auditions that pitch through the engine so the user hears it.
+
+**Undo grouping is the critical detail and it repeats a lesson already learned in this repo.**
+A drag emits a continuous stream of updates. Recording undo per update would flood and flush
+the 100-entry stack, exactly as `setVolume`/`setPan` would have. Record **one** undo entry per
+completed gesture: snapshot on drag begin, mutate freely during the drag, and do not record
+again until the next gesture starts. Label entries plainly: "Add Note", "Move Note",
+"Resize Note", "Delete Note".
+
+## Step P4 — Integration — PENDING
+
+1. Reachable in an obvious way from the track row for MIDI clips, and for a track with no clip
+   yet, an obvious way to create an empty clip and start drawing.
+2. Edits go through the same autosave path as every other mutation.
+3. Verify the piano roll and the Claude patch flow do not fight: a patch that adds or
+   quantizes notes must be reflected when the roll is open.
+4. Transport playhead drawn over the grid during playback if it is cheap to do; if it costs
+   more than a little, say so and defer it rather than half-building it.
+
+Constraints: no new dependencies, no schema change, `swift build` clean, `swift run VerseCheck`
+green, app bundles and launches. Do not weaken any existing safety behavior.
