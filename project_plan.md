@@ -766,3 +766,39 @@ is before any throw.
 never touch `inputNode` without a live tap. Verse.app still has the usage string and attempts
 the real HAL path. Regression suite: `Recording I1b: startRecording refuses mic when process
 cannot open input`.
+
+## Step I2 — MuseScore General as the preferred bank — PENDING
+
+Verified before writing this step, not assumed:
+
+- Licence: **MIT**, confirmed at
+  `https://ftp.osuosl.org/pub/musescore/soundfont/MuseScore_General/MuseScore_General_License.md`
+  Copyright Michael Cowgill (2014-16) and Frank Wen (2000-2002, 2008). No restriction on
+  redistribution or commercial use beyond retaining the notice. MIT is already on the
+  licence-gate allowlist.
+- File: `MuseScore_General.sf2`, 215,614,036 bytes.
+  SHA-256 `ee51d2c4b1525e70f19a45909c4fd7a2e26d91d115fa89dbf5a6bc413d8b9bf3`
+- Loads correctly in `AVAudioUnitSampler`: Grand Piano, Slap Bass, Strings, Trumpet,
+  Standard Kit and TR-808 Kit all loaded (6/6), including bank 120 drum kits.
+- It uses the same GM program/bank numbering, so the existing 70-preset manifest works
+  unchanged against either bank.
+- The `.sf3` variant is Ogg-compressed and will NOT load. Use `.sf2` only.
+
+1. `SoundBank` gains a second logical bank, `MuseScoreGeneral`. Preference order when
+   resolving an instrument: the bank named on the instrument if that file is present, else the
+   other bundled bank, else the sampler's built-in voice. Absence is normal and never an error.
+2. **New** instruments default to the MuseScore General bank name so new songs get the better
+   sound. **Existing saved projects keep whatever bank name they stored**, so a song that was
+   written against GeneralUser GS still loads GeneralUser GS and does not silently change
+   character. No schema change: `Instrument.sf2` is already a logical bank name.
+3. `scripts/fetch-artifacts.sh` fetches it behind an explicit opt-in flag (it is ~7x the size of
+   the current bank), verifying the SHA-256 above and refusing to keep an unverified file.
+4. `scripts/make-app.sh` bundles it **only if already present**. It must NOT auto-fetch it.
+   CI runs make-app.sh on every push and already downloads the 31 MB bank; adding a 206 MB
+   download per run would make CI slow and flaky.
+5. Add a `THIRD-PARTY-LICENSES.md` entry with `SPDX-License-Identifier: MIT`, both copyright
+   holders, the source URL, the byte count and the SHA-256, so the licence gate sees it.
+6. Add `MuseScore_General.sf2` to `.gitignore`. Do not commit a 206 MB binary.
+7. The header badge must name whichever bank is actually in use, so it never claims a sound
+   the app is not producing.
+8. Tests must pass with the file ABSENT (that is the CI case) and must not assume either bank.
