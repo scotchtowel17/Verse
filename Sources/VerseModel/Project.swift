@@ -202,6 +202,7 @@ public enum MutationError: Error, Equatable, CustomStringConvertible {
     case clipNotFound
     case negativeStartBeat
     case invalidQuantizeGrid(Double)
+    case pitchOutOfRange(pitch: Int, semitones: Int)
 
     public var description: String {
         switch self {
@@ -211,6 +212,8 @@ public enum MutationError: Error, Equatable, CustomStringConvertible {
             return "A clip can’t start before beat 0."
         case .invalidQuantizeGrid(let g):
             return "Quantize grid must be 1/4, 1/8, or 1/16 beat (got \(g))."
+        case .pitchOutOfRange(let pitch, let semitones):
+            return "Transposing pitch \(pitch) by \(semitones) semitones would leave the MIDI range 0–127."
         }
     }
 }
@@ -272,6 +275,25 @@ public extension Project {
         for i in notes.indices {
             let raw = (notes[i].startBeat / gridBeats).rounded() * gridBeats
             notes[i].startBeat = min(max(0, raw), clipEnd)
+        }
+        tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes = notes
+    }
+
+    /// Shift every note pitch in a clip by `semitones`. **Rejects** (does not clamp) if any
+    /// resulting pitch would leave the MIDI range 0–127. Empty note lists succeed as a no-op.
+    mutating func transposeNotes(in clipID: UUID, by semitones: Int) throws {
+        guard let loc = clipLocation(id: clipID) else { throw MutationError.clipNotFound }
+        guard var notes = tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes, !notes.isEmpty else {
+            return
+        }
+        for n in notes {
+            let next = n.pitch + semitones
+            if !(0...127).contains(next) {
+                throw MutationError.pitchOutOfRange(pitch: n.pitch, semitones: semitones)
+            }
+        }
+        for i in notes.indices {
+            notes[i].pitch += semitones
         }
         tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes = notes
     }

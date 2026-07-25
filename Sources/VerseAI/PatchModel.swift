@@ -25,6 +25,12 @@ public enum TypedOp {
     case addMidiClip(track: TrackRef, tempClipId: String, startBeat: Double, lengthBeats: Double)
     case addNotes(track: TrackRef, clip: ClipRef, notes: [Note])
     case deleteClip(track: TrackRef, clip: ClipRef)
+    /// Snap note starts to grid. `gridBeats` is 1 (1/4), 0.5 (1/8), or 0.25 (1/16).
+    case quantizeNotes(track: TrackRef, clip: ClipRef, gridBeats: Double)
+    /// Shift all note pitches by `semitones`. Out-of-range results are rejected, never clamped.
+    case transposeNotes(track: TrackRef, clip: ClipRef, semitones: Int)
+    /// Move a clip’s arrangement start. Works for MIDI and audio clips.
+    case moveClip(track: TrackRef, clip: ClipRef, startBeat: Double)
 }
 
 public struct PatchError: Error, Equatable, CustomStringConvertible {
@@ -45,7 +51,8 @@ public struct PatchErrors: Error {
 
 public let versePatchOps: Set<String> = [
     "setTempo", "setKey", "setTimeSignature", "createTrack", "renameTrack",
-    "setInstrument", "setTrackMix", "addMidiClip", "addNotes", "deleteClip"
+    "setInstrument", "setTrackMix", "addMidiClip", "addNotes", "deleteClip",
+    "quantizeNotes", "transposeNotes", "moveClip"
 ]
 
 // MARK: - JSON coercion helpers (tolerant of NSNumber/Int/Double)

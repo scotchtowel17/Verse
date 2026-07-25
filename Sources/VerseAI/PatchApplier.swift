@@ -77,6 +77,30 @@ public enum PatchApplier {
                     throw PatchError(opIndex: opIndex, "Track no longer exists in project.")
                 }
                 project.tracks[ti].clips.removeAll { $0.id == clipUUID }
+            case .quantizeNotes(_, let clipRef, let gridBeats):
+                let (_, clipUUID) = try resolveClipLocation(
+                    clipRef, tempClip: tempClip, opIndex: opIndex)
+                do {
+                    try project.quantizeNotes(in: clipUUID, to: gridBeats)
+                } catch let err as MutationError {
+                    throw PatchError(opIndex: opIndex, err.description)
+                }
+            case .transposeNotes(_, let clipRef, let semitones):
+                let (_, clipUUID) = try resolveClipLocation(
+                    clipRef, tempClip: tempClip, opIndex: opIndex)
+                do {
+                    try project.transposeNotes(in: clipUUID, by: semitones)
+                } catch let err as MutationError {
+                    throw PatchError(opIndex: opIndex, err.description)
+                }
+            case .moveClip(_, let clipRef, let startBeat):
+                let (_, clipUUID) = try resolveClipLocation(
+                    clipRef, tempClip: tempClip, opIndex: opIndex)
+                do {
+                    try project.moveClip(id: clipUUID, toStartBeat: startBeat)
+                } catch let err as MutationError {
+                    throw PatchError(opIndex: opIndex, err.description)
+                }
             }
         }
         project.modifiedAt = Date()

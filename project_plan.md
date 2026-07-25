@@ -94,7 +94,7 @@ Pure helpers on `Project` / `Track` in `VerseModel`. Schema stays v1.
    sheet is up (a SwiftUI sheet does not disable `CommandGroup` menu items on its own).
 5. Tests for the renderer: it never emits `parsed.summary`, and it names the right tracks.
 
-## Step 7 — E AI expansion — PENDING
+## Step 7 — E AI expansion — DONE
 
 Add ops to `versePatchOps`, `TypedOp`, `RequestBuilder.capabilityOps`, validator, applier,
 and the preview renderer.

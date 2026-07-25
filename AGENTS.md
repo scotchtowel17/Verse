@@ -13,8 +13,9 @@ No external dependencies. Build with `swift build`. Test with `swift run VerseCh
 4. **Continuous UI gestures (volume/pan sliders) must never destroy the undo stack.**
 5. **Preserve exact current user-visible behavior** unless the step explicitly changes it.
 6. **No new external dependencies. Ever.**
-7. **No em-dashes in code comments, strings, or documentation.** Use commas, colons,
-   periods, or parentheses.
+7. **No em-dashes in code comments or documentation you write.** Use commas, colons,
+   periods, or parentheses. Existing user-facing product copy is the owner's voice: leave it
+   alone unless a step explicitly asks you to change it.
 
 ## Architecture
 

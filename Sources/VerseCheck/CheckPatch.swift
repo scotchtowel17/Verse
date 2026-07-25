@@ -417,4 +417,194 @@ func runPatchChecks(_ tk: TestKit) {
         tk.expectEqual(project.tempoBPM, 142, "tempo applied")
         tk.expectEqual(project.tracks[0].name, "Synth", "rename applied")
     }
+
+    // ── E AI expansion: quantizeNotes, transposeNotes, moveClip.
+    tk.suite("verse-patch — quantizeNotes snaps note starts") {
+        var project = Project.newUntitled()
+        project.tracks[0].name = "Piano"
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [
+                Note(startBeat: 0.3, lengthBeats: 0.5, pitch: 60, velocity: 100),
+                Note(startBeat: 1.1, lengthBeats: 0.25, pitch: 62, velocity: 100),
+            ])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"quantizeNotes\",\"track\":\"T1\",\"clip\":\"T1C1\",\"gridBeats\":0.25}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "quantizeNotes applies")
+        let notes = project.tracks[0].clips[0].midiNotes!
+        tk.expectEqual(notes[0].startBeat, 0.25, "0.3 snaps to 0.25")
+        tk.expectEqual(notes[1].startBeat, 1.0, "1.1 snaps to 1.0")
+        tk.expectEqual(notes[0].lengthBeats, 0.5, "lengths untouched")
+    }
+
+    tk.suite("verse-patch — quantizeNotes rejects audio clips") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .audio, name: "Take", startBeat: 0, lengthBeats: 4, mediaFile: "take.wav")
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"quantizeNotes\",\"track\":\"T1\",\"clip\":\"T1C1\",\"gridBeats\":0.25}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "audio quantize rejected")
+        let joined = outcome.errors.map { $0.description }.joined(separator: " | ")
+        tk.expect(joined.localizedCaseInsensitiveContains("midi"), "error says MIDI-only")
+        tk.expect(joined.localizedCaseInsensitiveContains("audio"), "error mentions audio")
+    }
+
+    tk.suite("verse-patch — quantizeNotes rejects bad grid") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4,
+                 midiNotes: [Note(startBeat: 0.3, lengthBeats: 1, pitch: 60, velocity: 100)])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"quantizeNotes\",\"track\":\"T1\",\"clip\":\"T1C1\",\"gridBeats\":0.333}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "unsupported grid rejected")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?[0].startBeat, 0.3, "notes unchanged")
+    }
+
+    tk.suite("verse-patch — quantizeNotes accepts grid string 1/16") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4,
+                 midiNotes: [Note(startBeat: 0.3, lengthBeats: 1, pitch: 60, velocity: 100)])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"quantizeNotes\",\"track\":\"T1\",\"clip\":\"T1C1\",\"grid\":\"1/16\"}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "string grid 1/16 applies")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?[0].startBeat, 0.25, "snapped on 1/16")
+    }
+
+    tk.suite("verse-patch — transposeNotes shifts pitches") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [
+                Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100),
+                Note(startBeat: 1, lengthBeats: 1, pitch: 64, velocity: 90),
+            ])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"transposeNotes\",\"track\":\"T1\",\"clip\":\"T1C1\",\"semitones\":-2}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "transposeNotes applies")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?[0].pitch, 58, "60 → 58")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?[1].pitch, 62, "64 → 62")
+    }
+
+    tk.suite("verse-patch — transposeNotes rejects out-of-range pitches") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [
+                Note(startBeat: 0, lengthBeats: 1, pitch: 120, velocity: 100),
+            ])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"transposeNotes\",\"track\":\"T1\",\"clip\":\"T1C1\",\"semitones\":12}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "out-of-range transpose rejected (not clamped)")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?[0].pitch, 120, "pitch unchanged")
+        let joined = outcome.errors.map { $0.description }.joined(separator: " | ")
+        tk.expect(joined.contains("0–127") || joined.contains("0-127") || joined.contains("MIDI"),
+                  "error mentions MIDI range")
+    }
+
+    tk.suite("verse-patch — transposeNotes rejects audio clips") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .audio, name: "Take", startBeat: 0, lengthBeats: 4, mediaFile: "take.wav")
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"transposeNotes\",\"track\":\"T1\",\"clip\":\"T1C1\",\"semitones\":3}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "audio transpose rejected")
+        let joined = outcome.errors.map { $0.description }.joined(separator: " | ")
+        tk.expect(joined.localizedCaseInsensitiveContains("midi"), "error says MIDI-only")
+    }
+
+    tk.suite("verse-patch — moveClip updates startBeat") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4,
+                 midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"moveClip\",\"track\":\"T1\",\"clip\":\"T1C1\",\"startBeat\":8}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "moveClip applies")
+        tk.expectEqual(project.tracks[0].clips[0].startBeat, 8, "startBeat is 8")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.count, 1, "notes preserved")
+    }
+
+    tk.suite("verse-patch — moveClip works on audio clips") {
+        var project = Project.newUntitled()
+        project.tracks.append(Track(kind: .audio, name: "Recordings"))
+        project.tracks[1].clips = [
+            Clip(kind: .audio, name: "Take 1", startBeat: 0, lengthBeats: 4, mediaFile: "take.wav")
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"moveClip\",\"track\":\"T2\",\"clip\":\"T2C1\",\"startBeat\":16}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "moveClip on audio applies")
+        tk.expectEqual(project.tracks[1].clips[0].startBeat, 16, "audio clip startBeat is 16")
+    }
+
+    tk.suite("verse-patch — moveClip rejects negative startBeat") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 4, lengthBeats: 4, midiNotes: [])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"moveClip\",\"track\":\"T1\",\"clip\":\"T1C1\",\"startBeat\":-1}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "negative startBeat rejected")
+        tk.expectEqual(project.tracks[0].clips[0].startBeat, 4, "startBeat unchanged")
+    }
+
+    tk.suite("preview renderer — describes expansion ops") {
+        var project = Project.newUntitled()
+        project.tracks[0].name = "Keys"
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Hook", startBeat: 0, lengthBeats: 4, midiNotes: [
+                Note(startBeat: 0.3, lengthBeats: 1, pitch: 60, velocity: 100),
+            ])
+        ]
+        let opsJSON = "[" +
+            "{\"op\":\"quantizeNotes\",\"track\":\"T1\",\"clip\":\"T1C1\",\"gridBeats\":0.25}," +
+            "{\"op\":\"transposeNotes\",\"track\":\"T1\",\"clip\":\"T1C1\",\"semitones\":5}," +
+            "{\"op\":\"moveClip\",\"track\":\"T1\",\"clip\":\"T1C1\",\"startBeat\":8}" +
+            "]"
+        let reply = patchWithFingerprint(project, opsJSON: opsJSON, summary: "POISON_SUMMARY_EXPANSION")
+        switch Copilot.preview(reply: reply, project: project) {
+        case .failure(let outcome):
+            tk.expect(false, "preview should succeed (got \(outcome.userMessage))")
+        case .success(let prep):
+            let text = prep.description
+            tk.expect(!text.contains("POISON_SUMMARY_EXPANSION"), "summary never in approval text")
+            tk.expect(text.localizedCaseInsensitiveContains("quantize"), "mentions quantize")
+            tk.expect(text.localizedCaseInsensitiveContains("1/16"), "names the 1/16 grid")
+            tk.expect(text.localizedCaseInsensitiveContains("transpose"), "mentions transpose")
+            tk.expect(text.contains("5"), "names the semitone amount")
+            tk.expect(text.localizedCaseInsensitiveContains("move"), "mentions move")
+            tk.expect(text.contains("8"), "names the destination beat")
+            tk.expect(text.contains("Keys"), "names the track")
+            tk.expect(text.contains("Hook"), "names the clip")
+            // Preview must not mutate.
+            tk.expectEqual(project.tracks[0].clips[0].startBeat, 0, "preview leaves startBeat")
+            tk.expectEqual(project.tracks[0].clips[0].midiNotes?[0].pitch, 60, "preview leaves pitch")
+        }
+    }
+
+    tk.suite("request builder — capabilityOps lists expansion ops") {
+        let project = Project.newUntitled()
+        let req = Copilot.buildRequest(project: project, userPrompt: "Tighten the groove")
+        tk.expect(req.contains("quantizeNotes"), "lists quantizeNotes")
+        tk.expect(req.contains("transposeNotes"), "lists transposeNotes")
+        tk.expect(req.contains("moveClip"), "lists moveClip")
+        tk.expect(!req.contains("resizeClip"), "does not list resizeClip")
+        tk.expect(!req.contains("setClipGain"), "does not list setClipGain")
+        tk.expect(!req.contains("addHarmony"), "does not list addHarmony")
+    }
 }

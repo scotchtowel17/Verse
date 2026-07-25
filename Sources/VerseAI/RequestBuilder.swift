@@ -8,7 +8,8 @@ public enum RequestBuilder {
 
     public static let capabilityOps = [
         "createTrack", "setInstrument", "addMidiClip", "addNotes", "setTempo", "setKey",
-        "setTimeSignature", "setTrackMix", "deleteClip", "renameTrack"
+        "setTimeSignature", "setTrackMix", "deleteClip", "renameTrack",
+        "quantizeNotes", "transposeNotes", "moveClip"
     ]
 
     public static func buildJSON(project: Project, userPrompt: String, appVersion: String = "0.1.0") -> String {

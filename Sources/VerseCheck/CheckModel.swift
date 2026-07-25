@@ -136,4 +136,44 @@ func runModelChecks(_ tk: TestKit) {
         try p.quantizeNotes(in: emptyClip.id, to: 0.25)
         tk.expectEqual(p.tracks[0].clips[1].midiNotes?.count, 0, "empty note list stays empty")
     }
+
+    tk.suite("Model: transposeNotes") {
+        var p = Project.newUntitled()
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 4,
+                        midiNotes: [
+                            Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100),
+                            Note(startBeat: 1, lengthBeats: 1, pitch: 64, velocity: 90),
+                        ])
+        p.tracks[0].clips = [clip]
+        try p.transposeNotes(in: clip.id, by: 2)
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].pitch, 62, "C becomes D")
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[1].pitch, 66, "E becomes F#")
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].startBeat, 0, "starts untouched")
+
+        // Reject rather than clamp when a pitch would leave 0–127.
+        p.tracks[0].clips[0].midiNotes = [
+            Note(startBeat: 0, lengthBeats: 1, pitch: 126, velocity: 100),
+        ]
+        tk.expectThrows("reject pitch above 127") {
+            try p.transposeNotes(in: clip.id, by: 2)
+        }
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].pitch, 126, "failed transpose leaves pitches unchanged")
+
+        p.tracks[0].clips[0].midiNotes = [
+            Note(startBeat: 0, lengthBeats: 1, pitch: 1, velocity: 100),
+        ]
+        tk.expectThrows("reject pitch below 0") {
+            try p.transposeNotes(in: clip.id, by: -2)
+        }
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].pitch, 1, "failed down-transpose leaves pitches unchanged")
+
+        tk.expectThrows("reject unknown clip on transpose") {
+            try p.transposeNotes(in: UUID(), by: 1)
+        }
+
+        let empty = Clip(kind: .midi, name: "empty", startBeat: 0, lengthBeats: 4, midiNotes: [])
+        p.tracks[0].clips.append(empty)
+        try p.transposeNotes(in: empty.id, by: 12)
+        tk.expectEqual(p.tracks[0].clips[1].midiNotes?.count, 0, "empty note list stays empty")
+    }
 }

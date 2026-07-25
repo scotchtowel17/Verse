@@ -65,6 +65,30 @@ public enum PatchPreviewRenderer {
             case .deleteClip(let ref, let clipRef):
                 lines.append(deleteClipLine(track: ref, clip: clipRef,
                                             project: project, temps: tempTrackNames))
+
+            case .quantizeNotes(let ref, let clipRef, let gridBeats):
+                let track = trackLabel(ref, project: project, temps: tempTrackNames)
+                let clip = clipLabel(clipRef, project: project)
+                lines.append("Quantize notes in \(clip) on \(track) to \(gridLabel(gridBeats))")
+
+            case .transposeNotes(let ref, let clipRef, let semitones):
+                let track = trackLabel(ref, project: project, temps: tempTrackNames)
+                let clip = clipLabel(clipRef, project: project)
+                let direction: String
+                if semitones > 0 {
+                    direction = "up \(semitones) semitone\(semitones == 1 ? "" : "s")"
+                } else if semitones < 0 {
+                    let n = abs(semitones)
+                    direction = "down \(n) semitone\(n == 1 ? "" : "s")"
+                } else {
+                    direction = "by 0 semitones"
+                }
+                lines.append("Transpose notes in \(clip) on \(track) \(direction)")
+
+            case .moveClip(let ref, let clipRef, let startBeat):
+                let track = trackLabel(ref, project: project, temps: tempTrackNames)
+                let clip = clipLabel(clipRef, project: project)
+                lines.append("Move \(clip) on \(track) to beat \(formatNumber(startBeat))")
             }
         }
 
@@ -107,6 +131,28 @@ public enum PatchPreviewRenderer {
             if let c = t.clips.first(where: { $0.id == id }) { return c }
         }
         return nil
+    }
+
+    private static func clipLabel(_ ref: ClipRef, project: Project) -> String {
+        switch ref {
+        case .temp(let id):
+            return "clip \(quote(id))"
+        case .existing(_, let clipID):
+            guard let clip = findClip(clipID, in: project) else {
+                return "clip"
+            }
+            let name = clip.name.isEmpty ? "unnamed clip" : clip.name
+            return "clip \(quote(name))"
+        }
+    }
+
+    private static func gridLabel(_ gridBeats: Double) -> String {
+        switch gridBeats {
+        case 1.0: return "1/4 note"
+        case 0.5: return "1/8 note"
+        case 0.25: return "1/16 note"
+        default: return "\(formatNumber(gridBeats))-beat grid"
+        }
     }
 
     /// Positional handle plus display name: `Track 1 “Piano”`.
