@@ -11,7 +11,10 @@ struct TransportBar: View {
                     .font(.title2)
             }
             .keyboardShortcut(.space, modifiers: [])
-            .help(store.isPlaying ? "Stop (Space)" : "Play (Space)")
+            .disabled(store.copilotPreviewBlocksTransport)
+            .help(store.copilotPreviewBlocksTransport
+                  ? "Unavailable while reviewing Claude changes"
+                  : (store.isPlaying ? "Stop (Space)" : "Play (Space)"))
 
             Button { store.toggleRecording() } label: {
                 Image(systemName: store.isRecording ? "stop.circle.fill" : "record.circle")
@@ -19,7 +22,10 @@ struct TransportBar: View {
                     .foregroundStyle(store.isRecording ? .red : .primary)
             }
             .keyboardShortcut("r", modifiers: [.command])
-            .help(store.isRecording ? "Stop recording" : "Record (⌘R)")
+            .disabled(store.copilotPreviewBlocksTransport)
+            .help(store.copilotPreviewBlocksTransport
+                  ? "Unavailable while reviewing Claude changes"
+                  : (store.isRecording ? "Stop recording" : "Record (⌘R)"))
 
             Divider().frame(height: 22)
 

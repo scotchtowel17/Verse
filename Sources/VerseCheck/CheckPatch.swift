@@ -292,4 +292,129 @@ func runPatchChecks(_ tk: TestKit) {
         tk.expectEqual(deadOutcome.status, .rejected, "fingerprint from deleted-clip layout is rejected")
         tk.expectEqual(projectEmpty.tempoBPM, 70, "nothing applied with deleted-clip fingerprint")
     }
+
+    // ── D mandatory preview: renderer is TypedOp-only; never Claude's summary.
+    tk.suite("preview renderer — never emits parsed.summary") {
+        var project = Project.newUntitled()
+        project.tracks[0].name = "Piano"
+        let poison = "POISON_SUMMARY_MUST_NEVER_APPEAR_IN_APPROVAL"
+        let reply = patchWithFingerprint(project,
+            opsJSON: "[{\"op\":\"setTempo\",\"bpm\":99}]",
+            summary: poison)
+        switch Copilot.preview(reply: reply, project: project) {
+        case .failure(let outcome):
+            tk.expect(false, "preview should succeed (got \(outcome.status))")
+        case .success(let prep):
+            tk.expect(!prep.description.contains(poison),
+                      "approval text must not contain Claude’s summary")
+            for line in prep.lines {
+                tk.expect(!line.contains(poison), "no rendered line may contain Claude’s summary")
+            }
+            tk.expectEqual(prep.claudeSummary, poison,
+                           "Claude summary is kept separately for a “Claude says:” label")
+            tk.expect(prep.description.contains("99"), "renderer mentions the tempo value")
+            tk.expect(prep.description.contains("BPM"), "renderer mentions BPM")
+            // Preview must not mutate the project.
+            tk.expectEqual(project.tempoBPM, 120, "preview leaves project unchanged")
+        }
+    }
+
+    tk.suite("preview renderer — names the right tracks") {
+        var project = Project.newUntitled()
+        project.tracks[0].name = "Piano"
+        project.tracks.append(Track(kind: .instrument, name: "Bass", instrument: .grandPiano))
+        project.tracks.append(Track(kind: .audio, name: "Recordings"))
+        project.tracks[2].clips = [
+            Clip(kind: .audio, name: "Take 1", startBeat: 0, lengthBeats: 4,
+                 mediaFile: "take-abc.wav")
+        ]
+        // Rename T2 (Bass), mix on T1 (Piano), delete audio clip on T3 (Recordings),
+        // and add many notes on a new MIDI clip on Bass.
+        let opsJSON = "[" +
+            "{\"op\":\"renameTrack\",\"track\":\"T2\",\"name\":\"Low End\"}," +
+            "{\"op\":\"setTrackMix\",\"track\":\"T1\",\"volume\":0.5}," +
+            "{\"op\":\"deleteClip\",\"track\":\"T3\",\"clip\":\"T3C1\"}," +
+            "{\"op\":\"addMidiClip\",\"track\":\"T2\",\"tempClipId\":\"c1\",\"startBeat\":0,\"lengthBeats\":8}," +
+            "{\"op\":\"addNotes\",\"track\":\"T2\",\"clip\":\"c1\",\"notes\":[" +
+            (0..<64).map { i in
+                "{\"startBeat\":\(Double(i) * 0.25),\"lengthBeats\":0.25,\"pitch\":36,\"velocity\":100}"
+            }.joined(separator: ",") +
+            "]}]"
+        let reply = patchWithFingerprint(project, opsJSON: opsJSON,
+                                         summary: "Totally wrong story about lead guitar")
+        switch Copilot.preview(reply: reply, project: project) {
+        case .failure(let outcome):
+            tk.expect(false, "preview should succeed (got \(outcome.userMessage))")
+        case .success(let prep):
+            let text = prep.description
+            tk.expect(!text.contains("Totally wrong story about lead guitar"),
+                      "Claude summary is never approval text")
+            tk.expect(text.contains("Bass"), "names the Bass track for rename")
+            tk.expect(text.contains("Low End"), "names the new track name")
+            tk.expect(text.contains("Piano"), "names the Piano track for mix")
+            tk.expect(text.contains("Recordings"), "names the Recordings track for delete")
+            tk.expect(text.contains("take-abc.wav"), "deleteClip on audio names the take")
+            tk.expect(text.contains("Take 1"), "deleteClip names the clip")
+            tk.expect(text.contains("64 notes") || text.contains("add 64 note"),
+                      "groups large note additions into a count")
+            tk.expect(!text.contains("pitch"), "does not dump individual note pitches")
+            // Still not applied.
+            tk.expectEqual(project.tracks[1].name, "Bass", "preview does not rename")
+            tk.expectEqual(project.tracks[2].clips.count, 1, "preview does not delete")
+        }
+    }
+
+    tk.suite("preview renderer — includes clamp notices") {
+        var project = Project.newUntitled()
+        project.tracks[0].name = "Piano"
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"setTrackMix\",\"track\":\"T1\",\"volume\":2.0,\"pan\":-9}]")
+        switch Copilot.preview(reply: reply, project: project) {
+        case .failure:
+            tk.expect(false, "preview should succeed with clamps")
+        case .success(let prep):
+            tk.expect(prep.lines.contains { $0.localizedCaseInsensitiveContains("clamp") },
+                      "clamp notices appear in rendered lines")
+            tk.expect(prep.description.contains("Piano"), "still names the track")
+        }
+    }
+
+    tk.suite("commit — re-checks fingerprint after structural change") {
+        var project = Project.newUntitled()
+        let reply = patchWithFingerprint(project,
+            opsJSON: "[{\"op\":\"setTempo\",\"bpm\":150}]")
+        guard case .success(let prep) = Copilot.preview(reply: reply, project: project) else {
+            tk.expect(false, "preview should succeed before commit test")
+            return
+        }
+        // Structural change while the sheet would be open: add a clip.
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Intruder", startBeat: 0, lengthBeats: 2, midiNotes: [])
+        ]
+        let outcome = Copilot.commit(prep, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "commit rejects after structural drift")
+        tk.expectEqual(project.tempoBPM, 120, "tempo not applied on stale fingerprint")
+        let joined = outcome.errors.map { $0.description }.joined(separator: " | ")
+        tk.expect(joined.contains("Your project changed since you copied this request. Copy a fresh one."),
+                  "commit uses the mismatch message")
+    }
+
+    tk.suite("commit — applies after clean preview") {
+        var project = Project.newUntitled()
+        project.tracks[0].name = "Lead"
+        let reply = patchWithFingerprint(project,
+            opsJSON: "[{\"op\":\"setTempo\",\"bpm\":142},{\"op\":\"renameTrack\",\"track\":\"T1\",\"name\":\"Synth\"}]",
+            summary: "SHOULD_NOT_BE_APPROVAL_TEXT")
+        guard case .success(let prep) = Copilot.preview(reply: reply, project: project) else {
+            tk.expect(false, "preview should succeed")
+            return
+        }
+        tk.expect(!prep.description.contains("SHOULD_NOT_BE_APPROVAL_TEXT"),
+                  "approval text ignores summary before commit")
+        tk.expect(prep.description.contains("Lead"), "renderer named the track before rename")
+        let outcome = Copilot.commit(prep, to: &project)
+        tk.expectEqual(outcome.status, .applied, "commit applies when fingerprint still matches")
+        tk.expectEqual(project.tempoBPM, 142, "tempo applied")
+        tk.expectEqual(project.tracks[0].name, "Synth", "rename applied")
+    }
 }

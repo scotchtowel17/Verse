@@ -52,6 +52,11 @@ final class AppStore {
     var copilotPrompt = ""
     var copilotReply = ""
     var copilotMessage: String?
+    /// Mandatory preview sheet is up: transport/record must stay disabled (SwiftUI sheets do
+    /// not disable CommandGroup / keyboard shortcuts on their own).
+    var showCopilotPreview = false
+    /// Validated preview waiting for Apply / Cancel. Built only from TypedOp values.
+    var pendingCopilotPreview: Copilot.Preview?
 
     // Analysis + AU hosting state (M6)
     var showTools = false
@@ -158,9 +163,14 @@ final class AppStore {
 
     // MARK: - Recording → clips
 
-    func toggleRecording() { isRecording ? stopRecording() : startRecording() }
+    func toggleRecording() {
+        // Copilot preview sheet does not disable menu/keyboard shortcuts on its own.
+        guard !copilotPreviewBlocksTransport else { return }
+        isRecording ? stopRecording() : startRecording()
+    }
 
     func startRecording() {
+        guard !copilotPreviewBlocksTransport else { return }
         recordError = nil
         let url = recovery.newTakeURL()
         do {

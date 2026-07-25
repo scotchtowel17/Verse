@@ -80,7 +80,7 @@ Pure helpers on `Project` / `Track` in `VerseModel`. Schema stays v1.
 4. Do NOT add `resizeClip` (see Step 7). Do NOT add `gain`, `color`, or `locked`.
 5. Tests for each, including the rejection cases and note-id regeneration.
 
-## Step 6 — D mandatory preview — PENDING
+## Step 6 — D mandatory preview — DONE
 
 1. Split `Copilot.apply` into `preview(reply:project:) -> Result<Success, ...>` and
    `commit(ops:to:)`. Keep `apply` as a thin wrapper if anything still needs it.

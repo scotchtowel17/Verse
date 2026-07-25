@@ -7,9 +7,14 @@ import VerseEngine
 extension AppStore {
     // MARK: Transport (M4)
 
-    func togglePlay() { isPlaying ? stopPlayback() : startPlayback() }
+    func togglePlay() {
+        // Copilot preview sheet does not disable menu/keyboard shortcuts on its own.
+        guard !copilotPreviewBlocksTransport else { return }
+        isPlaying ? stopPlayback() : startPlayback()
+    }
 
     func startPlayback() {
+        guard !copilotPreviewBlocksTransport else { return }
         transport.metronomeEnabled = metronomeOn
         let end = arrangementBeats
         let loop: ClosedRange<Double>? = loopOn ? 0...max(4, end) : nil
