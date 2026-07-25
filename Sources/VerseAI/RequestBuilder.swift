@@ -8,7 +8,8 @@ public enum RequestBuilder {
 
     public static let capabilityOps = [
         "createTrack", "setInstrument", "addMidiClip", "addNotes", "setTempo", "setKey",
-        "setTimeSignature", "setTrackMix", "deleteClip", "renameTrack"
+        "setTimeSignature", "setTrackMix", "deleteClip", "renameTrack",
+        "quantizeNotes", "transposeNotes", "moveClip"
     ]
 
     public static func buildJSON(project: Project, userPrompt: String, appVersion: String = "0.1.0") -> String {
@@ -16,7 +17,7 @@ public enum RequestBuilder {
         for (ti, t) in project.tracks.enumerated() {
             var clips: [[String: Any]] = []
             for (ci, c) in t.clips.enumerated() {
-                var clipDict: [String: Any] = [
+                let clipDict: [String: Any] = [
                     "id": "T\(ti + 1)C\(ci + 1)",
                     "kind": c.kind.rawValue,
                     "name": c.name,
@@ -55,6 +56,7 @@ public enum RequestBuilder {
                 "generatedAt": ISO8601DateFormatter().string(from: Date()),
                 "appVersion": appVersion,
                 "userPrompt": userPrompt,
+                "fingerprint": project.structuralFingerprint,
                 "project": projectDict,
                 "capabilities": ["ops": capabilityOps]
             ]
@@ -73,7 +75,8 @@ public enum RequestBuilder {
         "versePatch" object (schema "verse-patch", version 1) whose "ops" implement my request. \
         Allowed ops: \(capabilityOps.joined(separator: ", ")). Use the track ids (T1, T2, …) and \
         clip ids (T1C1, T2C3, …) below. Mint your own tempId / tempClipId for new tracks/clips. \
-        My request: "\(userPrompt)".
+        Copy the fingerprint value from the verseRequest into your versePatch verbatim as \
+        "fingerprint": "<value>". My request: "\(userPrompt)".
         """
     }
 }

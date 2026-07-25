@@ -34,6 +34,12 @@ struct ContentView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .focusedSceneValue(\.undoMenuState, UndoMenuState(
+            canUndo: store.canUndo,
+            undoName: store.undoName,
+            canRedo: store.canRedo,
+            redoName: store.redoName
+        ))
         .alert("Recover unsaved work?",
                isPresented: Binding(get: { store.pendingRecovery != nil },
                                     set: { if !$0 { store.dismissRecovery() } })) {

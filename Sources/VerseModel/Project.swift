@@ -165,6 +165,138 @@ public struct Project: Codable, Sendable, Identifiable {
     public func track(id: UUID) -> Track? { tracks.first { $0.id == id } }
     public func trackIndex(id: UUID) -> Int? { tracks.firstIndex { $0.id == id } }
     public var anySolo: Bool { tracks.contains { $0.solo } }
+
+    /// 8-hex-character digest over ordered track UUIDs and, per track, ordered clip UUIDs.
+    ///
+    /// Structural input only: tempo, title, key, names, mix, notes, and timestamps do not
+    /// affect the value. Handles (T1, T2C1, …) are positional over this same order, so a
+    /// matching fingerprint means the handles in a patch still mean what they meant when
+    /// the request was copied.
+    public var structuralFingerprint: String {
+        // FNV-1a 32-bit over UUID strings (Foundation only; deterministic across runs).
+        var hash: UInt32 = 2_166_136_261
+        let prime: UInt32 = 16_777_619
+        func feed(_ s: String) {
+            for byte in s.utf8 {
+                hash ^= UInt32(byte)
+                hash = hash &* prime
+            }
+        }
+        for track in tracks {
+            feed(track.id.uuidString)
+            feed(">")
+            for clip in track.clips {
+                feed(clip.id.uuidString)
+                feed(",")
+            }
+            feed(";")
+        }
+        return String(format: "%08x", hash)
+    }
+}
+
+// MARK: - Mutation helpers (schema stays v1)
+
+/// Readable failures from pure project/track mutations. Callers must not treat a throw as success.
+public enum MutationError: Error, Equatable, CustomStringConvertible {
+    case clipNotFound
+    case negativeStartBeat
+    case invalidQuantizeGrid(Double)
+    case pitchOutOfRange(pitch: Int, semitones: Int)
+
+    public var description: String {
+        switch self {
+        case .clipNotFound:
+            return "That clip isn’t in this project."
+        case .negativeStartBeat:
+            return "A clip can’t start before beat 0."
+        case .invalidQuantizeGrid(let g):
+            return "Quantize grid must be 1/4, 1/8, or 1/16 beat (got \(g))."
+        case .pitchOutOfRange(let pitch, let semitones):
+            return "Transposing pitch \(pitch) by \(semitones) semitones would leave the MIDI range 0–127."
+        }
+    }
+}
+
+public extension Project {
+    /// Locate a clip by id across all tracks. Returns track index and clip index, or nil.
+    func clipLocation(id: UUID) -> (trackIndex: Int, clipIndex: Int)? {
+        for (ti, track) in tracks.enumerated() {
+            if let ci = track.clips.firstIndex(where: { $0.id == id }) {
+                return (ti, ci)
+            }
+        }
+        return nil
+    }
+
+    /// Move a clip’s arrangement start. Rejects `startBeat < 0` because the transport drops
+    /// negative-onset MIDI notes and clamps audio, so a negative start is silently partly
+    /// inaudible.
+    mutating func moveClip(id: UUID, toStartBeat startBeat: Double) throws {
+        guard startBeat >= 0 else { throw MutationError.negativeStartBeat }
+        guard let loc = clipLocation(id: id) else { throw MutationError.clipNotFound }
+        tracks[loc.trackIndex].clips[loc.clipIndex].startBeat = startBeat
+    }
+
+    /// Duplicate a clip. The copy gets a fresh clip UUID and every contained `Note` gets a
+    /// fresh UUID. The copy is placed at `startBeat + lengthBeats` of the original.
+    @discardableResult
+    mutating func duplicateClip(id: UUID) throws -> Clip {
+        guard let loc = clipLocation(id: id) else { throw MutationError.clipNotFound }
+        let original = tracks[loc.trackIndex].clips[loc.clipIndex]
+        var copy = original
+        copy.id = UUID()
+        copy.startBeat = original.startBeat + original.lengthBeats
+        if let notes = original.midiNotes {
+            copy.midiNotes = notes.map { note in
+                var n = note
+                n.id = UUID()
+                return n
+            }
+        }
+        tracks[loc.trackIndex].clips.append(copy)
+        return copy
+    }
+
+    /// Quantize note **starts** in a clip to the nearest grid point.
+    ///
+    /// - Supported grids (in beats): `1` (1/4), `0.5` (1/8), `0.25` (1/16).
+    /// - Only start times move; lengths are untouched.
+    /// - Starts are never moved past the clip end (`lengthBeats`); they clamp to that bound.
+    /// - Starts are never moved before beat 0 within the clip.
+    mutating func quantizeNotes(in clipID: UUID, to gridBeats: Double) throws {
+        let allowed: Set<Double> = [1.0, 0.5, 0.25]
+        guard allowed.contains(gridBeats) else { throw MutationError.invalidQuantizeGrid(gridBeats) }
+        guard let loc = clipLocation(id: clipID) else { throw MutationError.clipNotFound }
+        let clipEnd = tracks[loc.trackIndex].clips[loc.clipIndex].lengthBeats
+        guard var notes = tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes, !notes.isEmpty else {
+            return
+        }
+        for i in notes.indices {
+            let raw = (notes[i].startBeat / gridBeats).rounded() * gridBeats
+            notes[i].startBeat = min(max(0, raw), clipEnd)
+        }
+        tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes = notes
+    }
+
+    /// Shift every note pitch in a clip by `semitones`. **Rejects** (does not clamp) if any
+    /// resulting pitch would leave the MIDI range 0–127. Empty note lists succeed as a no-op.
+    mutating func transposeNotes(in clipID: UUID, by semitones: Int) throws {
+        guard let loc = clipLocation(id: clipID) else { throw MutationError.clipNotFound }
+        guard var notes = tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes, !notes.isEmpty else {
+            return
+        }
+        for n in notes {
+            let next = n.pitch + semitones
+            if !(0...127).contains(next) {
+                throw MutationError.pitchOutOfRange(pitch: n.pitch, semitones: semitones)
+            }
+        }
+        for i in notes.indices {
+            notes[i].pitch += semitones
+        }
+        tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes = notes
+    }
 }
 
 // MARK: - Codable JSON helpers

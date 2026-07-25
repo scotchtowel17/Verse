@@ -15,6 +15,7 @@ public enum PatchParser {
         public let schema: String?
         public let version: Int?
         public let summary: String?
+        public let fingerprint: String?
         public let ops: [[String: Any]]
     }
 
@@ -56,6 +57,7 @@ public enum PatchParser {
             schema: patch["schema"] as? String,
             version: (patch["version"] as? Int) ?? (patch["version"] as? NSNumber)?.intValue,
             summary: patch["summary"] as? String,
+            fingerprint: patch["fingerprint"] as? String,
             ops: ops)
     }
 
