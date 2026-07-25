@@ -598,3 +598,104 @@ The math already supports this: `PianoRollView.snap(_:)` has `guard snapBeats > 
    the remembered grid length, not the 1/32 minimum; the minimum guard still holds with snap Off.
 
 Do not add a modifier-key snap override in this step; the request was a toggle.
+
+---
+
+# Phase M — MIDI input (Akai MPK mini and any class-compliant controller)
+
+Owner has an Akai MPK mini (Special Edition Black): 25 velocity-sensitive keys, 8 pads,
+8 knobs, arpeggiator, octave up/down. Verse currently has **no MIDI input whatsoever** —
+zero CoreMIDI usage anywhere in the codebase. This is a new subsystem.
+
+Note: the device was NOT attached while this was built, so nothing here is verified against
+the real hardware. Everything must therefore be verified against a virtual MIDI source, and
+any claim about the physical controller must be stated as unverified.
+
+## Step M1 — MIDI input engine — DONE
+
+1. New `Sources/VerseMIDI/` target (CoreMIDI is an Apple system framework; add
+   `.linkedFramework("CoreMIDI")` if SwiftPM needs it). It must import no UI.
+2. Create a MIDI client and an input port, enumerate sources, and connect to them.
+   Handle **hot-plug**: sources appearing or disappearing while the app runs must be picked up
+   (observe `MIDIClientCreateWithBlock` notifications or re-scan on change).
+3. Decode at minimum: note on, note off, and control change, with channel and velocity.
+   **Treat note-on with velocity 0 as note-off** — most controllers including the MPK mini
+   send that, and missing it leaves permanently stuck notes.
+4. **Threading is the correctness risk.** CoreMIDI delivers on a high-priority MIDI thread.
+   `VerseAudioEngine` is documented main-thread-only. Every dispatch into the engine must hop
+   to the main actor. Never call the engine from the MIDI callback thread.
+5. Expose a small, testable surface: a parse function from raw MIDI bytes to a typed event
+   (pure, unit-testable) plus a delegate/callback for live events.
+6. Publish the list of connected source names so the UI can show what is attached.
+
+## Step M2 — Play the active instrument from the controller — DONE
+
+1. `AppStore` subscribes to MIDI events and routes note on/off to the active instrument track
+   with the incoming **velocity** (do not flatten to a constant).
+2. Incoming notes light up the on-screen keyboard using the existing `heldNotes` set, so the
+   two input paths look identical to the user.
+3. Show connected device names in the header area, in plain language: "Akai MPK mini connected"
+   when present, and something honest when nothing is attached. Never claim a device that is
+   not there.
+4. Panic / all-notes-off must clear notes originating from MIDI too.
+5. The app must launch and work normally with **no** MIDI device attached, and must not block,
+   hang, or prompt at startup.
+
+## Step M3 — Record MIDI input into a clip — DONE
+
+The real songwriting payoff: play the controller during playback and capture it.
+
+1. While the transport is playing and recording is armed, incoming note on/off are captured as
+   `Note` values with correct `startBeat` and `lengthBeats` derived from the transport position.
+2. Captured notes land in a MIDI clip on the armed instrument track, creating the clip if none
+   exists, and appear in the piano roll afterwards.
+3. One undo entry for the whole captured take, labelled "Record MIDI".
+4. A note still held when recording stops is closed out at the stop position rather than left
+   with zero or infinite length.
+
+## Testing without the hardware
+
+The physical MPK mini is unavailable. Test end-to-end against a **virtual MIDI source** created
+in the harness (`MIDISourceCreate` plus `MIDIReceived`), which exercises real CoreMIDI delivery,
+the thread hop, and decoding. Cover at minimum: note on, note off, note-on-velocity-0 as
+note-off, velocity preserved, and a stuck-note check. State clearly in the report that the
+physical device is unverified.
+
+## Step M2b — MIDI hot-plug is broken (found by running it) — DONE
+
+Verified live against a virtual CoreMIDI source named "MPK mini TEST":
+
+- A source that exists **before** Verse launches is found correctly. The header reads
+  "MPK mini TEST connected" and played notes light up the on-screen keyboard, so the whole
+  path (CoreMIDI to parser to main actor to engine to UI) is sound.
+- A source that appears **after** Verse is already running is never noticed. The header stays
+  on "No MIDI controller connected" and notes are ignored.
+
+This is the common real-world case: the owner will open Verse and then plug in the MPK mini.
+M1 item 2 required hot-plug and it does not work.
+
+Fix: react to CoreMIDI setup changes. Use the notification block passed to
+`MIDIClientCreateWithBlock` and handle `kMIDIMsgSetupChanged` (and/or object added/removed) by
+re-enumerating sources and connecting any new ones, disconnecting any that vanished. Update the
+published device-name list so the header follows. Do not leak connections when a source is
+re-added, and do not connect the same source twice.
+
+Test: with the harness's virtual source, create it AFTER the input engine has started and
+assert it becomes connected and delivers events; then dispose it and assert it is dropped from
+the connected list.
+
+## Step M4 — Record arm has no visible state — PENDING
+
+Found while testing M3 by hand. Clicking the transport record button produces no visual change:
+the button looks identical armed and unarmed, so there is no way to tell whether a take is
+being captured. For a non-programmer this is the difference between "I recorded that" and
+"I lost that". MIDI capture itself is covered by tests but could not be confirmed by hand
+because the armed state could not be established or observed.
+
+1. Give the record button a clear armed appearance (colour/fill), and a distinct appearance
+   again while actually capturing during playback.
+2. Surface a plain-language status while armed, for example "Armed. Press play to record what
+   you play." and while capturing, "Recording what you play…".
+3. If arming fails (no audio input, for instance) say so; never leave the control looking armed
+   when it is not, and never leave it looking unarmed when it is.
+4. Confirm by hand afterwards that arm plus play plus incoming MIDI produces a clip.

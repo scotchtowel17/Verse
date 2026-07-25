@@ -23,5 +23,6 @@ runAppStoreChecks(tk)
 runAnalysisChecks(tk)
 runPluginChecks(tk)
 runHumToMIDIChecks(tk)
+runMIDIChecks(tk)
 
 tk.finish()

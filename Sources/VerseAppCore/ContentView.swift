@@ -74,6 +74,13 @@ public struct ContentView: View {
                 Text(status).font(.caption).foregroundStyle(.tertiary).lineLimit(1)
             }
             Spacer()
+            Label(store.midiConnectionStatus, systemImage: store.midiSourceNames.isEmpty
+                  ? "pianokeys"
+                  : "pianokeys.inverse")
+                .font(.caption)
+                .foregroundStyle(store.midiSourceNames.isEmpty ? .tertiary : .secondary)
+                .lineLimit(1)
+                .help(store.midiConnectionStatus)
             Button { store.showTools = true } label: { Label("Tune & Tools", systemImage: "slider.horizontal.3") }
                 .help("Analyze a take, tap tempo, pick key, host Audio Units")
             Button { store.showCopilot = true } label: { Label("Ask Claude", systemImage: "sparkles") }
