@@ -35,6 +35,10 @@ public final class VerseAudioEngine {
     /// has a different `processingFormat` (sample-rate / channel change), or `scheduleFile`
     /// raises an uncatchable AVAudioEngine exception.
     var auditionFormat: AVAudioFormat?
+    /// Set when a background `inputNode` bind timed out while still inside CoreAudio.
+    /// That stuck thread holds the engine lock, so further `avEngine` calls (including
+    /// `stop`) would deadlock. Skip locking engine ops and let the process drop the instance.
+    var inputNodeBindAbandoned = false
 
     public init() {}
 
@@ -54,6 +58,10 @@ public final class VerseAudioEngine {
 
     public func start() throws {
         guard !isRunning else { return }
+        // A prior timed-out input bind may still hold the engine lock; do not re-enter.
+        guard !inputNodeBindAbandoned else {
+            throw RecordingError.inputBindTimedOut
+        }
         avEngine.prepare()
         try avEngine.start()
         isRunning = true
@@ -62,7 +70,11 @@ public final class VerseAudioEngine {
 
     public func stop() {
         guard isRunning else { return }
-        avEngine.stop()
+        // If an input-node bind was abandoned mid-flight, a stuck CoreAudio thread still
+        // holds the AVAudioEngine lock. Calling stop would hang the main actor forever.
+        if !inputNodeBindAbandoned {
+            avEngine.stop()
+        }
         isRunning = false
     }
 

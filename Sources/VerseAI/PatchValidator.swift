@@ -278,7 +278,10 @@ public enum PatchValidator {
                 let trackHandle = JSONCoerce.string(op["track"]) ?? ""
                 let clipHandle = JSONCoerce.string(op["clip"]) ?? ""
                 guard let clip = resolveClip(op["clip"], track: ref, trackHandle: trackHandle, op: i) else { continue }
+                // Invalidate so later ops on this handle fail validation (not apply).
                 clipNotePitches.removeValue(forKey: clipHandle)
+                clipHandles.removeValue(forKey: clipHandle)
+                tempClips.remove(clipHandle)
                 typed.append(.deleteClip(track: ref, clip: clip))
 
             case "quantizeNotes":

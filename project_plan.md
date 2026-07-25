@@ -802,3 +802,166 @@ Verified before writing this step, not assumed:
 7. The header badge must name whichever bank is actually in use, so it never claims a sound
    the app is not producing.
 8. Tests must pass with the file ABSENT (that is the CI case) and must not assume either bank.
+
+---
+
+# Phase H — Battle hardening (remote, no screen required)
+
+## Step H1 — Record can freeze the whole app — DONE
+
+**Real, user-facing, and structurally invisible to CI.** Proven with `sample` on a hung process:
+
+```
+AppStore.startRecording()                       AppStore.swift:621
+  VerseAudioEngine.startRecording(to:)          +Recording.swift:25
+    -[AVAudioEngine inputNode]
+      AVAudioEngineImpl::UpdateInputNode
+        AVAudioIOUnit_OSX::EnableInputDevice
+          BindToDeviceInternal
+            -[AUHALOutputUnit setDeviceID:error:]   <- blocked indefinitely
+```
+
+`let input = avEngine.inputNode` blocks forever when the input device cannot be bound (no
+permission, contended device, unentitled binary). `startRecording` runs on the main actor, so
+**pressing Record freezes the entire app**. The existing
+`guard fmt.channelCount > 0` was meant to catch "no input" but runs AFTER the blocking call.
+
+CI cannot catch this: the runner has no audio device, so it takes a different path. This is why
+the earlier mic guard was reverted. That revert was my mistake; the instinct was right and only
+the assertion was wrong.
+
+1. Before touching `avEngine.inputNode`, do a **non-blocking** pre-check:
+   - Query the HAL for a default input device
+     (`AudioObjectGetPropertyData` / `kAudioHardwarePropertyDefaultInputDevice`). If it is
+     `kAudioObjectUnknown`, throw `noInputAvailable`.
+   - Check microphone authorization non-blockingly
+     (`AVCaptureDevice.authorizationStatus(for: .audio)`). If denied or restricted, throw a
+     distinct, readable error such as "Verse doesn't have permission to use the microphone."
+2. Only after both pass may `avEngine.inputNode` be touched.
+3. Recording must never be able to hang the main actor. If binding can still be slow, that work
+   belongs off the main actor with a bounded wait and a readable failure.
+4. **Test the property, not the environment.** The reverted test asserted
+   `startRecording` must throw `noInputAvailable`, which is false on a machine that has a mic,
+   and that is why it failed CI. The correct assertion is that `startRecording` **returns**
+   (throws or succeeds) within a bounded time and never hangs. That holds on every machine.
+
+## Step H2 — Fuzz and property tests — DONE
+
+Everything below is headless and needs no screen or hardware. Use a seeded, deterministic
+pseudo-random generator so failures reproduce; never `Date()` or unseeded randomness.
+
+Harness: `Sources/VerseCheck/CheckFuzz.swift` (`SeededRNG` + suites), wired from `main.swift`
+via `runFuzzChecks`. Defect write-ups are under **H2 defects found** below.
+
+1. **`PatchParser` fuzz.** DONE. Fixed adversarial corpus + 200 trials seed `0xA11CE001`.
+   Property holds: always `ParsedPatch` or `ParseError`.
+2. **`PatchValidator` property test.** DONE. Multi-error collection, reject mutates nothing,
+   accepted ops apply. **H2-VAL-1** closed in H3 (`deleteClip` invalidates the handle).
+3. **MIDI parser fuzz.** DONE. No-crash + every emitted event in 0…127 (including hostile
+   high-bit / real-time mid-data). **H2-MIDI-1** closed in H3. Seeds `0xD1D1F002`, `0xC0FFEE01`.
+4. **Model round-trip property test.** DONE. 80 seeded trials (`0xA011D7A1`) plus dense
+   control case (`0xC017A01D`): encode → decode → re-encode byte-identical; fingerprint stable.
+5. **Migration hostility.** DONE. 17 malformed/truncated/wrong-type `project.json` inputs all
+   throw a non-empty error; missing package `project.json` is readable `PackageError`.
+   Future `schemaVersion` found **H2-MIG-1** (FIXED in H4).
+6. **Scale.** DONE. Seed `0x5CA1E7E57`: 50 tracks × 400 notes = 20,000 notes. Save/load
+   (JSON + `.verse` package), fingerprint, and `PianoRollLayout` all succeed; layout covers
+   global and per-track pitch ranges. Timings printed (no flaky wall-clock upper bound).
+
+Report anything these find as a defect write-up, not a silent fix.
+
+## H2 defects found — DO NOT silent-fix
+
+Found by the Step H2 fuzz/property harness on 2026-07-25.
+Production code was left unchanged for open defects; tests document them and assert the
+properties that still hold. Close each write-up when the fix lands and rewrite the
+matching suite in `Sources/VerseCheck/CheckFuzz.swift`.
+
+### H2-VAL-1 — `deleteClip` does not invalidate the clip handle for later ops — CLOSED (H3)
+
+**Surface:** `PatchValidator` then `PatchApplier`.
+
+**Was:** A patch that deletes a clip and then operates on the same positional handle
+validated successfully, then threw on apply.
+
+**Fix (H3):** On accepted `deleteClip`, remove the handle from `clipHandles` and
+`tempClips` (and `clipNotePitches` as before) so later ops report “Unknown clip”
+and the whole patch is rejected at validation. There is no `deleteTrack` patch op,
+so track-handle invalidation does not apply.
+
+Harness: suite `H3 VAL-1 fix — deleteClip then use same handle is rejected at validation`.
+
+### H2-MIDI-1 — parser emits note/CC fields outside 0…127 on hostile streams — CLOSED (H3)
+
+**Surface:** `MIDIParser.parse`.
+
+**Was:** High-bit or real-time bytes in data slots produced note/CC fields 128…255.
+
+**Fix (H3):** Channel-message data collection only accepts bytes with bit 7 clear.
+Real-time (0xF8–0xFF) is skipped mid-message; any other status abandons the
+incomplete message. Truncated or malformed input yields no event rather than an
+out-of-range one. Velocity-0 still means note-off.
+
+Harness: suite `H3 MIDI-1 fix — high-bit / real-time mid-data stay in 0…127`; random
+and structured fuzz assert the 0…127 range property (not only no-crash).
+
+### H2-MIG-1 — future `schemaVersion` loads without error and drops unknown fields — FIXED
+
+**Surface:** `Migration.migrateRawIfNeeded` then `Project.fromJSON`.
+
+**Found by:** suite `H2 migration hostility — future schemaVersion`.
+
+**What happened:** A valid v1-shaped `project.json` with `"schemaVersion": 99` and an
+extra key (`futureOnlyField`) was accepted. `migrateRawIfNeeded` returned the bytes
+unchanged whenever `version >= Schema.current` (so 99 skipped the step loop). Codable
+then decoded the known v1 fields and **silently dropped** unknown keys. Re-encoding
+wrote `schemaVersion: 99` without `futureOnlyField`.
+
+**Fix (H4):** `Migration.migrateRawIfNeeded` throws
+`MigrationError.unsupportedFutureVersion` when `schemaVersion > Schema.current`, with a
+plain-language message (e.g. “This song was saved with a newer version of Verse
+(schema 99). Open it in an updated Verse.”). `Project.fromJSON` and
+`ProjectPackage.read` both fail open via that path. `RecoveryManager` surfaces the
+same message in `projectLoadFailureMessage` instead of treating the autosave as
+missing garbage.
+
+### H2 status (all items)
+
+| Item | Result |
+|------|--------|
+| 1 PatchParser fuzz | Pass: always `ParsedPatch` or `ParseError` on fixed corpus + 200 seeded trials |
+| 2 PatchValidator property | Pass; **H2-VAL-1** closed in H3 |
+| 3 MIDI parser fuzz | Pass: every emitted event in 0…127; **H2-MIDI-1** closed in H3 |
+| 4 Model round-trip | Pass: 80/80 seeded + dense control encode→decode→re-encode identical |
+| 5 Migration hostility | Pass on malformed/truncated/wrong-type; **H2-MIG-1** FIXED in H4 |
+| 6 Scale | Pass: 50 tracks / 20k notes save, load, fingerprint, piano-roll layout |
+
+Scale timings from a green local run (illustrative; not pass/fail):
+`build≈0.04s encode≈0.04s decode≈0.06s fingerprint≈0.0003s packageWrite≈0.05s packageRead≈0.06s layout20k≈0.007s` (~4.4 MB JSON).
+
+## Step H3 — Fix the two defects the fuzzer found — DONE
+
+**H2-VAL-1 (serious: breaks the pipeline's core invariant).** Fixed: when `deleteClip`
+is accepted, the validator removes that handle from `clipHandles` and `tempClips` so any
+later op referencing it is **rejected at validation** with “Unknown clip”, not at apply.
+There is no patch-level `deleteTrack` op. Multi-error collection is preserved.
+
+**H2-MIDI-1.** Fixed: never treat a byte with bit 7 set as data. Skip real-time bytes
+(0xF8–0xFF) transparently mid-message. Truncated or malformed messages yield no event
+rather than an out-of-range one. Velocity-0-means-note-off is unchanged.
+
+Fuzz assertions tightened: every emitted event carries pitch, velocity, and controller
+values within 0–127 (fixed adversarial, seeded random, and structured+noise suites).
+
+## Step H4 — Fix H2-MIG-1: a newer schema loads and silently loses data — DONE
+
+Found by the migration-hostility fuzz, and previously raised in the first objective review of
+this codebase as a non-blocking recommendation that was never actioned.
+
+**Fixed:** `Migration.migrateRawIfNeeded` rejects `schemaVersion > Schema.current` with
+`MigrationError.unsupportedFutureVersion` and a plain-language
+`LocalizedError` message. `Project.fromJSON` and `ProjectPackage.read` fail open (no
+partial load). `RecoveryManager.detectRecovery` keeps the autosave on disk and sets
+`projectLoadFailureMessage` so the UI can explain “needs a newer Verse” instead of
+pretending nothing was found. Current schema still opens; forward migration for older
+versions is unchanged.

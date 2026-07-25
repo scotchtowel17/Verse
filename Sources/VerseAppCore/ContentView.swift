@@ -41,13 +41,25 @@ public struct ContentView: View {
             canRedo: store.canRedo,
             redoName: store.redoName
         ))
-        .alert("Recover unsaved work?",
+        .alert(store.pendingRecovery?.projectLoadFailureMessage == nil
+               ? "Recover unsaved work?"
+               : "Couldn’t restore all unsaved work",
                isPresented: Binding(get: { store.pendingRecovery != nil },
                                     set: { if !$0 { store.dismissRecovery() } })) {
-            Button("Recover") { store.applyRecovery() }
+            Button(store.pendingRecovery?.project != nil
+                   || store.pendingRecovery?.inProgressTakeURL != nil
+                   ? "Recover" : "OK") { store.applyRecovery() }
             Button("Discard", role: .destructive) { store.dismissRecovery() }
         } message: {
-            Text("Verse found work from a session that didn’t close normally — your last edits and any in-progress recording can be restored.")
+            if let fail = store.pendingRecovery?.projectLoadFailureMessage {
+                if store.pendingRecovery?.inProgressTakeURL != nil {
+                    Text("\(fail) An in-progress recording can still be restored.")
+                } else {
+                    Text(fail)
+                }
+            } else {
+                Text("Verse found work from a session that didn’t close normally — your last edits and any in-progress recording can be restored.")
+            }
         }
         .sheet(isPresented: Binding(get: { store.showCopilot }, set: { store.showCopilot = $0 })) {
             CopilotPanel()
