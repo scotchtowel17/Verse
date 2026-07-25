@@ -51,9 +51,17 @@ public enum Copilot {
                            errors: pe.errors, parseMessage: nil)
         case .success(let success):
             let cmd = PatchCommand(name: success.summary ?? "Apply Claude patch", ops: success.ops)
-            try? cmd.apply(to: &project)   // validated → never throws
-            return Outcome(status: .applied, summary: success.summary, opCount: success.ops.count,
-                           clamps: success.clamps, errors: [], parseMessage: nil)
+            do {
+                try cmd.apply(to: &project)
+                return Outcome(status: .applied, summary: success.summary, opCount: success.ops.count,
+                               clamps: success.clamps, errors: [], parseMessage: nil)
+            } catch let e as PatchError {
+                return Outcome(status: .rejected, summary: success.summary, opCount: 0, clamps: [],
+                               errors: [e], parseMessage: nil)
+            } catch {
+                return Outcome(status: .rejected, summary: success.summary, opCount: 0, clamps: [],
+                               errors: [PatchError(opIndex: nil, error.localizedDescription)], parseMessage: nil)
+            }
         }
     }
 
