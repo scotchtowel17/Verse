@@ -59,24 +59,30 @@ private func runTransportChecksOnMain(_ tk: TestKit) {
         // lead (0.12) + endSeconds (4 beats * 0.5s = 2.0) + tail (0.8) ≈ 2.92s
         let expectedTotal = 0.12 + 2.0 + 0.8
         var didAutoStop = false
-        transport.onStop = { didAutoStop = true }
-
+        // Record WHEN auto-stop fired. Measuring total pump time instead would just measure
+        // how long the test waited (and how loaded the machine is), not what the code did.
+        var stopElapsed: Double?
         let t0 = Date()
+        transport.onStop = { didAutoStop = true; stopElapsed = Date().timeIntervalSince(t0) }
+
         transport.play(project: project, mediaDir: dir)
         tk.expectEqual(transport.state, .playing, "transport is playing after play()")
 
         // Wait past the expected end with margin; do not wait long enough that a pure-audio
         // end (0.12+0.1+0.8 ≈ 1.02s) could be confused if we only checked "eventually stopped".
         pumpMain(for: expectedTotal + 0.6)
-        let elapsed = Date().timeIntervalSince(t0)
 
         tk.expect(didAutoStop, "onStop fired from arrangement auto-stop")
         tk.expectEqual(transport.state, .stopped, "state is stopped after arrangement end")
-        // Must not finish as early as audio-only (~1.0s). MIDI end at 2.0s + lead + tail ≈ 2.9s.
-        tk.expect(elapsed >= expectedTotal - 0.35,
-                  "auto-stop waited for MIDI end (elapsed \(String(format: "%.2f", elapsed))s, floor \(String(format: "%.2f", expectedTotal - 0.35))s)")
-        tk.expect(elapsed <= expectedTotal + 0.8,
-                  "auto-stop not far past expected total (elapsed \(String(format: "%.2f", elapsed))s)")
+        // The load-bearing assertion: auto-stop must NOT fire at the audio-only end
+        // (0.12 + 0.1 + 0.8 ≈ 1.02s). It has to wait for the longer MIDI tail (≈ 2.92s).
+        // Only a lower bound is asserted. An upper bound here would measure machine load
+        // rather than behavior, and is what made this suite flaky on CI.
+        if let stopElapsed {
+            tk.expect(stopElapsed >= expectedTotal - 0.35,
+                      "auto-stop waited for MIDI end, not the short audio clip "
+                      + "(fired at \(String(format: "%.2f", stopElapsed))s, floor \(String(format: "%.2f", expectedTotal - 0.35))s)")
+        }
         engine.stop()
     }
 

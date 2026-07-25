@@ -62,6 +62,13 @@ When a step adds behavior, add assertions to the matching `Check*.swift` file. T
 
 Never mark a step complete on a build alone. Build success is not test success.
 
+**No wall-clock upper bounds in tests.** CI runners are loaded and slow, so an assertion like
+"this finished within N seconds" measures machine load, not behavior, and will fail randomly.
+If timing matters, record when the event actually fired (in its callback) and assert only the
+bound that carries meaning, which is almost always the lower one: "it waited for X rather than
+finishing early at Y." A flaky test is worse than no test, because it teaches everyone to
+ignore red.
+
 ## Out of scope (do not do these unprompted)
 
 - Coordinator/service-object extraction from `AppStore`
