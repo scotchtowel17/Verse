@@ -299,3 +299,31 @@ because each is a few lines, but do not claim they were observed.
 6. Tests where practical: audition across two different formats does not throw; `removeTrack`
    after `installMeterTaps` leaves no tap installed; `RecoveryManager` still works with an
    injected base dir; a project with duplicate track ids opens with a clear outcome.
+
+## Step G5 — Test coverage for the engine, persistence, and recording layer — PENDING
+
+The structural finding behind all of Phase G: 35 of ~70 suites cover `VerseAI`, while the
+engine got 4, recording 2, and persistence 3. Every G-phase defect lived in the thin half.
+Close the gap so this class of bug is caught by the harness rather than by review.
+
+Add suites in `Sources/VerseCheck/`. Prefer real behavior over mocks; the engine can be built
+and rendered offline (see the existing `renderOffline` usage in `CheckMultitrack.swift`), and
+`RecoveryManager` and `ProjectPackage` take injectable directories.
+
+1. **Engine graph lifecycle** (`CheckEngine.swift`): add/remove tracks repeatedly without leaks
+   or throws; `reconfigure` on a project with many tracks leaves exactly the expected node set;
+   `removeTrack` on an unknown id is a safe no-op; effects insert and remove cleanly and audio
+   still flows through afterwards.
+2. **Persistence round trips** (`CheckPersistence.swift`): save then read preserves every model
+   field including `inserts`; a package missing `project.json` produces the readable error; a
+   package whose media is unreadable reports the skipped names rather than failing the save;
+   `extractMedia` reports failures instead of silently presenting an unplayable take.
+3. **Recording** (`CheckRecording.swift`): `TakeRecorder` start/append/stop produces a readable
+   file of the expected frame count; `stop()` twice is safe; `durationSeconds` is correct
+   before and after stop; a zero-frame take reports no URL.
+4. **Transport** (new `CheckTransport.swift`): scheduling a project with both audio and MIDI
+   clips computes the arrangement end correctly; `stop()` cancels pending work so no note fires
+   afterwards; a clip with a negative `startBeat` does not schedule a negative onset.
+
+Do not change production behavior in this step. If a test reveals a real bug, STOP, write the
+bug up in this file under a new heading, and report it rather than silently fixing it.
