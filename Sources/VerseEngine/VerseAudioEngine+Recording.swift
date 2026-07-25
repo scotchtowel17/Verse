@@ -102,11 +102,21 @@ public extension VerseAudioEngine {
 
     func playFile(url: URL) throws {
         let file = try AVAudioFile(forReading: url)
-        if auditionPlayer == nil {
+        let format = file.processingFormat
+        if let player = auditionPlayer {
+            // Mismatched format on a reused connection raises an uncatchable engine exception.
+            if let connected = auditionFormat, !connected.isEqual(format) {
+                player.stop()
+                avEngine.disconnectNodeOutput(player)
+                avEngine.connect(player, to: avEngine.mainMixerNode, format: format)
+                auditionFormat = format
+            }
+        } else {
             let p = AVAudioPlayerNode()
             avEngine.attach(p)
-            avEngine.connect(p, to: avEngine.mainMixerNode, format: file.processingFormat)
+            avEngine.connect(p, to: avEngine.mainMixerNode, format: format)
             auditionPlayer = p
+            auditionFormat = format
         }
         guard let player = auditionPlayer else { return }
         player.stop()

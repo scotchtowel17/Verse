@@ -269,7 +269,7 @@ takes belonging to other saved projects.
 Constraint for both steps: `swift build` clean, `swift run VerseCheck` green, app still bundles
 and launches.
 
-## Step G4 — Crash-shape hardening — PENDING
+## Step G4 — Crash-shape hardening — DONE
 
 Four small independent fixes from the same review. Two are unreproduced crash shapes; fix them
 because each is a few lines, but do not claim they were observed.

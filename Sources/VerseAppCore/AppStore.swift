@@ -376,6 +376,8 @@ public final class AppStore {
     /// `Track.inserts`. Hosted third-party Audio Units are session-only and are not restored;
     /// the UI is told so it never claims an effect that is not in the graph.
     public func syncEngineToProject() {
+        // Re-key any duplicate track ids before reconfigure so no track is left silent.
+        let rekeyed = project.ensureUniqueTrackIDs()
         var droppedHostedNames: [String] = []
         for track in project.tracks {
             // Hosted insert: graph has a unit that is not a recognized built-in.
@@ -392,7 +394,10 @@ public final class AppStore {
             activeTrackID = project.tracks.first(where: { $0.kind == .instrument })?.id
                 ?? project.tracks.first?.id ?? activeTrackID
         }
-        if !droppedHostedNames.isEmpty {
+        if rekeyed > 0 {
+            let n = rekeyed == 1 ? "1 duplicate track id" : "\(rekeyed) duplicate track ids"
+            statusMessage = "Fixed \(n) so every track can play."
+        } else if !droppedHostedNames.isEmpty {
             if droppedHostedNames.count == 1 {
                 statusMessage = "Reverted \(droppedHostedNames[0]) to no effect (hosted plug-ins are not restored yet)."
             } else {

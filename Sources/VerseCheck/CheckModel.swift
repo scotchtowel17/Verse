@@ -41,6 +41,22 @@ func runModelChecks(_ tk: TestKit) {
         tk.expectEqual(Tonic.allCases.count, 12, "twelve tonics")
     }
 
+    tk.suite("Model G4: ensureUniqueTrackIDs") {
+        let shared = UUID()
+        var p = Project(title: "dups")
+        p.tracks = [
+            Track(id: shared, kind: .instrument, name: "Keep", instrument: .grandPiano),
+            Track(id: shared, kind: .instrument, name: "Dup", instrument: .grandPiano),
+            Track(kind: .audio, name: "Unique")
+        ]
+        let alreadyUnique = p.ensureUniqueTrackIDs()
+        tk.expectEqual(alreadyUnique, 1, "one duplicate re-keyed")
+        tk.expectEqual(p.tracks[0].id, shared, "first occurrence keeps its id")
+        tk.expect(p.tracks[1].id != shared, "duplicate got a new id")
+        tk.expectEqual(Set(p.tracks.map(\.id)).count, 3, "all ids unique")
+        tk.expectEqual(p.ensureUniqueTrackIDs(), 0, "second call is a no-op")
+    }
+
     tk.suite("Model: moveClip") {
         var p = Project.newUntitled()
         let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 4,

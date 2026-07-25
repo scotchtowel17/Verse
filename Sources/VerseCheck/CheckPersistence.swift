@@ -147,6 +147,47 @@ func runPersistenceChecks(_ tk: TestKit) {
                   "recovery artifacts cleared")
         try? fm.removeItem(at: base)
     }
+
+    // MARK: - Step G4
+
+    tk.suite("Recovery G4: injected baseDir still works (no Application Support required)") {
+        let base = fm.temporaryDirectory.appendingPathComponent("verse-g4-rec-\(UUID().uuidString)")
+        let rec = RecoveryManager(baseDir: base)
+        tk.expect(rec.mediaDir.path.hasPrefix(base.path), "mediaDir under injected base")
+        rec.beginSession()
+        var p = Project.newUntitled(); p.title = "g4"
+        rec.autosave(p)
+        let relaunch = RecoveryManager(baseDir: base)
+        let info = relaunch.detectRecovery()
+        tk.expect(info != nil, "recovery works with injected baseDir")
+        tk.expectEqual(info?.project?.title, "g4", "autosave recovered from injected baseDir")
+        relaunch.endSessionCleanly()
+        try? fm.removeItem(at: base)
+    }
+
+    tk.suite("Persistence G4: package with duplicate track ids opens with unique ids") {
+        let root = fm.temporaryDirectory.appendingPathComponent("verse-dup-\(UUID().uuidString)")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let shared = UUID()
+        var project = Project(title: "Dup Tracks")
+        project.tracks = [
+            Track(id: shared, kind: .instrument, name: "First", instrument: .grandPiano),
+            Track(id: shared, kind: .instrument, name: "Second", instrument: .grandPiano)
+        ]
+        let pkg = root.appendingPathComponent("Dup.verse")
+        try ProjectPackage.write(project, to: pkg, mediaSourceDir: nil)
+
+        // Raw read still has the duplicate (package did not rewrite ids).
+        var loaded = try ProjectPackage.read(pkg)
+        tk.expectEqual(loaded.tracks[0].id, loaded.tracks[1].id, "package preserved duplicate ids")
+        let n = loaded.ensureUniqueTrackIDs()
+        tk.expectEqual(n, 1, "one track re-keyed on open path")
+        tk.expect(loaded.tracks[0].id != loaded.tracks[1].id, "ids distinct after ensureUniqueTrackIDs")
+        tk.expectEqual(loaded.tracks[0].name, "First", "first track kept its id and name")
+        tk.expectEqual(loaded.tracks[1].name, "Second", "second track kept its name")
+    }
 }
 
 // MARK: - SIGKILL crash-injection modes (driven by scripts/crash-recovery-test.sh)

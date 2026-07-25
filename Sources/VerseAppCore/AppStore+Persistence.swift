@@ -11,6 +11,7 @@ extension AppStore {
     func applyRecovery() {
         guard let info = pendingRecovery else { return }
         if let recovered = info.project { project = recovered }
+        let rekeyed = project.ensureUniqueTrackIDs()
         activeTrackID = project.tracks.first(where: { $0.kind == .instrument })?.id ?? activeTrackID
         engine.reconfigure(with: project)
         restoreEffectsFromProject()
@@ -19,7 +20,12 @@ extension AppStore {
         }
         rebuildTakesFromModel()
         history.clear()
-        statusMessage = "Recovered your unsaved work."
+        if rekeyed > 0 {
+            let n = rekeyed == 1 ? "1 duplicate track id" : "\(rekeyed) duplicate track ids"
+            statusMessage = "Recovered your unsaved work. Fixed \(n) so every track can play."
+        } else {
+            statusMessage = "Recovered your unsaved work."
+        }
         pendingRecovery = nil
     }
 
@@ -55,7 +61,8 @@ extension AppStore {
 
     func openPackage(_ url: URL) {
         do {
-            let loaded = try ProjectPackage.read(url)
+            var loaded = try ProjectPackage.read(url)
+            let rekeyed = loaded.ensureUniqueTrackIDs()
             let failedMedia = (try? ProjectPackage.extractMedia(from: url, to: workingMediaDir)) ?? []
             project = loaded
             currentPackageURL = url
@@ -65,9 +72,17 @@ extension AppStore {
             restoreEffectsFromProject()
             rebuildTakesFromModel()
             history.clear()
-            statusMessage = failedMedia.isEmpty
-                ? "Opened “\(documentName)”."
-                : "Opened “\(documentName)” — \(failedMedia.count) audio file(s) couldn’t be loaded."
+            var parts: [String] = []
+            if failedMedia.isEmpty {
+                parts.append("Opened “\(documentName)”.")
+            } else {
+                parts.append("Opened “\(documentName)” — \(failedMedia.count) audio file(s) couldn’t be loaded.")
+            }
+            if rekeyed > 0 {
+                let n = rekeyed == 1 ? "1 duplicate track id" : "\(rekeyed) duplicate track ids"
+                parts.append("Fixed \(n) so every track can play.")
+            }
+            statusMessage = parts.joined(separator: " ")
         } catch {
             statusMessage = "Couldn’t open: \(error.localizedDescription)"
         }

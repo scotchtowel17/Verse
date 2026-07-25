@@ -166,6 +166,24 @@ public struct Project: Codable, Sendable, Identifiable {
     public func trackIndex(id: UUID) -> Int? { tracks.firstIndex { $0.id == id } }
     public var anySolo: Bool { tracks.contains { $0.solo } }
 
+    /// Give every track a unique id. Corrupted or hand-edited packages can repeat UUIDs;
+    /// the engine then refuses the second `add*Track` and that track is visible but silent.
+    /// Keeps the first occurrence of each id; later duplicates get a fresh UUID.
+    /// - Returns: how many tracks were re-keyed (0 means already unique).
+    @discardableResult
+    public mutating func ensureUniqueTrackIDs() -> Int {
+        var seen = Set<UUID>()
+        var rekeyed = 0
+        for i in tracks.indices {
+            if seen.contains(tracks[i].id) {
+                tracks[i].id = UUID()
+                rekeyed += 1
+            }
+            seen.insert(tracks[i].id)
+        }
+        return rekeyed
+    }
+
     /// 8-hex-character digest over ordered track UUIDs and, per track, ordered clip UUIDs.
     ///
     /// Structural input only: tempo, title, key, names, mix, notes, and timestamps do not
