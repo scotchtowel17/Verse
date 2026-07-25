@@ -1036,7 +1036,7 @@ mid-drag updates no-op without begin. Resize hit zone is `min(10px, 30% of clip 
 roll. Harness: model resizeClip suite; AppStore move/resize undo grouping + double-begin;
 layout handle and contentBeats suites.
 
-## Step R3 — Arrangement view issues found by looking at it — PENDING
+## Step R3 — Arrangement view issues found by looking at it — DONE
 
 All three found by opening the app once. Layout maths and gesture/undo behaviour are correct:
 clips render at the right beats, drag-to-move and edge-resize both work, undo reads
@@ -1057,3 +1057,11 @@ clips render at the right beats, drag-to-move and edge-resize both work, undo re
 
 Do not change the interaction model or the undo behaviour; these are layout and affordance
 fixes only.
+
+**Resolution (R3):** Track list ScrollView has `minHeight` 72 (one full row) and layout priority
+so it no longer collapses; arrangement expands into leftover height (`maxHeight: .infinity`) and
+the empty `Spacer` was removed. Window min height raised to 640 so both regions fit. Timeline
+content is left-pinned via GeometryReader min frame (macOS ScrollView no longer centres short
+grids). Clip move/resize gesture bookkeeping moved to a reference-type `GestureSession` so
+mid-gesture writes do not re-render and cancel pure click; one click still opens the piano roll.
+Move/resize undo grouping unchanged.
