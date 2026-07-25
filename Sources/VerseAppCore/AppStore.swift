@@ -11,6 +11,7 @@ import VerseAI
 import VerseAnalysis
 import VersePlugins
 import VerseAudioToMIDI
+import VerseMIDI
 
 /// Top-level observable application state. Owns the project model, the audio engine, and the
 /// crash-recovery workspace. Runs on the main actor; the engine's realtime work happens on
@@ -23,7 +24,8 @@ import VerseAudioToMIDI
 public final class AppStore {
     public var project: Project
     public var activeTrackID: UUID
-    var heldNotes: Set<Int> = []
+    /// Pitches currently held from keyboard, click, or MIDI input (drives on-screen keyboard).
+    public var heldNotes: Set<Int> = []
     var engineError: String?
     var baseOctaveC: Int = 60
 
@@ -76,6 +78,17 @@ public final class AppStore {
     public var showPianoRoll = false
     public var pianoRollClipID: UUID?
 
+    // MIDI input (Phase M): connected CoreMIDI source display names, sorted.
+    public var midiSourceNames: [String] = []
+    /// Plain-language status for the header: device name(s) or an honest “none” message.
+    public var midiConnectionStatus: String {
+        switch midiSourceNames.count {
+        case 0: return "No MIDI controller connected"
+        case 1: return "\(midiSourceNames[0]) connected"
+        default: return "\(midiSourceNames.joined(separator: ", ")) connected"
+        }
+    }
+
     @ObservationIgnored let engine = VerseAudioEngine()
     @ObservationIgnored let recovery: RecoveryManager
     @ObservationIgnored let history = UndoStack<Project>()
@@ -83,6 +96,7 @@ public final class AppStore {
     @ObservationIgnored private var started = false
     @ObservationIgnored private var meterTimer: Timer?
     @ObservationIgnored private var autosaveTimer: Timer?
+    @ObservationIgnored private var midiInput: MIDIInput?
     /// True between `beginPianoRollGesture` and `endPianoRollGesture`. Prevents a second
     /// undo snapshot mid-drag if the view mis-fires begin.
     @ObservationIgnored private var pianoRollGestureActive = false
@@ -110,6 +124,8 @@ public final class AppStore {
         // Detect recovery BEFORE marking a new session live.
         self.pendingRecovery = recovery.detectRecovery()
         recovery.beginSession()
+        // MIDI is optional: failure must not block launch or prompt.
+        startMIDIInput()
     }
 
     var activeTrack: Track? { project.track(id: activeTrackID) }
@@ -329,15 +345,66 @@ public final class AppStore {
 
     // MARK: - Playing notes
 
-    func noteOn(_ pitch: Int) {
+    /// Play a note on the active instrument track. Velocity defaults match the on-screen
+    /// keyboard; MIDI input passes the controller velocity through.
+    func noteOn(_ pitch: Int, velocity: Int = 96) {
         guard heldNotes.insert(pitch).inserted else { return }
-        engine.noteOn(pitch, velocity: 96, trackID: activeTrackID)
+        engine.noteOn(pitch, velocity: velocity, trackID: activeTrackID)
     }
     func noteOff(_ pitch: Int) {
         guard heldNotes.remove(pitch) != nil else { return }
         engine.noteOff(pitch, trackID: activeTrackID)
     }
     public func panic() { engine.allNotesOff(); heldNotes.removeAll() }
+
+    // MARK: - MIDI input (Phase M)
+
+    /// Open CoreMIDI and route note events to the active instrument. Never throws to the UI;
+    /// a missing or failed MIDI stack leaves the app playable with keyboard only.
+    private func startMIDIInput() {
+        do {
+            let input = try MIDIInput(clientName: "Verse")
+            input.onSourcesChanged = { [weak self] names in
+                MainActor.assumeIsolated {
+                    self?.midiSourceNames = names
+                }
+            }
+            input.onEvents = { [weak self] events in
+                // MIDIInput already hops to the main queue before this fires.
+                MainActor.assumeIsolated {
+                    self?.handleMIDIEvents(events)
+                }
+            }
+            midiSourceNames = input.sourceNames
+            midiInput = input
+        } catch {
+            midiInput = nil
+            midiSourceNames = []
+            // Honest, non-blocking: audio keyboard still works.
+            print("[Verse] MIDI input unavailable: \(error.localizedDescription)")
+        }
+    }
+
+    /// Route decoded MIDI to the active instrument and `heldNotes` (same path as the
+    /// on-screen keyboard). Control changes are accepted by the parser but not mapped yet.
+    public func handleMIDIEvents(_ events: [MIDIEvent]) {
+        for event in events {
+            switch event {
+            case .noteOn(_, let note, let velocity):
+                noteOn(Int(note), velocity: Int(velocity))
+            case .noteOff(_, let note, _):
+                noteOff(Int(note))
+            case .controlChange:
+                break
+            }
+        }
+    }
+
+    /// Re-scan CoreMIDI sources (tests and rare recovery). No-op if MIDI never started.
+    public func rescanMIDISources() {
+        midiInput?.rescanSources()
+        midiSourceNames = midiInput?.sourceNames ?? []
+    }
 
     // MARK: - Instrument selection
 

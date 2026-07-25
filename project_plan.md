@@ -611,7 +611,7 @@ Note: the device was NOT attached while this was built, so nothing here is verif
 the real hardware. Everything must therefore be verified against a virtual MIDI source, and
 any claim about the physical controller must be stated as unverified.
 
-## Step M1 — MIDI input engine — PENDING
+## Step M1 — MIDI input engine — DONE
 
 1. New `Sources/VerseMIDI/` target (CoreMIDI is an Apple system framework; add
    `.linkedFramework("CoreMIDI")` if SwiftPM needs it). It must import no UI.
@@ -628,7 +628,7 @@ any claim about the physical controller must be stated as unverified.
    (pure, unit-testable) plus a delegate/callback for live events.
 6. Publish the list of connected source names so the UI can show what is attached.
 
-## Step M2 — Play the active instrument from the controller — PENDING
+## Step M2 — Play the active instrument from the controller — DONE
 
 1. `AppStore` subscribes to MIDI events and routes note on/off to the active instrument track
    with the incoming **velocity** (do not flatten to a constant).
@@ -660,3 +660,26 @@ in the harness (`MIDISourceCreate` plus `MIDIReceived`), which exercises real Co
 the thread hop, and decoding. Cover at minimum: note on, note off, note-on-velocity-0 as
 note-off, velocity preserved, and a stuck-note check. State clearly in the report that the
 physical device is unverified.
+
+## Step M2b — MIDI hot-plug is broken (found by running it) — PENDING
+
+Verified live against a virtual CoreMIDI source named "MPK mini TEST":
+
+- A source that exists **before** Verse launches is found correctly. The header reads
+  "MPK mini TEST connected" and played notes light up the on-screen keyboard, so the whole
+  path (CoreMIDI to parser to main actor to engine to UI) is sound.
+- A source that appears **after** Verse is already running is never noticed. The header stays
+  on "No MIDI controller connected" and notes are ignored.
+
+This is the common real-world case: the owner will open Verse and then plug in the MPK mini.
+M1 item 2 required hot-plug and it does not work.
+
+Fix: react to CoreMIDI setup changes. Use the notification block passed to
+`MIDIClientCreateWithBlock` and handle `kMIDIMsgSetupChanged` (and/or object added/removed) by
+re-enumerating sources and connecting any new ones, disconnecting any that vanished. Update the
+published device-name list so the header follows. Do not leak connections when a source is
+re-added, and do not connect the same source twice.
+
+Test: with the harness's virtual source, create it AFTER the input engine has started and
+assert it becomes connected and delivers events; then dispose it and assert it is dropped from
+the connected list.

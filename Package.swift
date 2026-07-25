@@ -77,12 +77,21 @@ let package = Package(
             swiftSettings: swift5
         ),
 
+        // ── MIDI: CoreMIDI input (note on/off, CC), pure parser + live port. No UI.
+        .target(
+            name: "VerseMIDI",
+            dependencies: [],
+            swiftSettings: swift5,
+            linkerSettings: [.linkedFramework("CoreMIDI")]
+        ),
+
         // ── App core: AppStore + SwiftUI views. Library so VerseCheck can import and test it.
         //    The Verse executable is a thin @main shim that imports this module.
         .target(
             name: "VerseAppCore",
             dependencies: ["VerseModel", "VerseEngine", "VersePersistence", "VerseCommands",
-                           "VerseAI", "VerseAnalysis", "VersePlugins", "VerseAudioToMIDI"],
+                           "VerseAI", "VerseAnalysis", "VersePlugins", "VerseAudioToMIDI",
+                           "VerseMIDI"],
             swiftSettings: swift5
         ),
 
@@ -99,7 +108,7 @@ let package = Package(
             name: "VerseCheck",
             dependencies: ["VerseModel", "VerseEngine", "VersePersistence", "VerseCommands",
                            "VerseAI", "VerseAnalysis", "VersePlugins", "VerseAudioToMIDI",
-                           "VerseAppCore"],
+                           "VerseMIDI", "VerseAppCore"],
             swiftSettings: swift5
         ),
     ]
