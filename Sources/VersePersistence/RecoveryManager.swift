@@ -85,6 +85,9 @@ public final class RecoveryManager {
     }
 
     /// Remove the lock + recovery state. After this, the next launch offers no recovery.
+    ///
+    /// Prefer `pruneMedia(keeping:)` over `clearMedia: true`. Wiping the whole Media directory
+    /// can delete takes that still belong to other saved projects sharing this workspace.
     public func endSessionCleanly(clearMedia: Bool = false) {
         try? FileManager.default.removeItem(at: sessionLockURL)
         try? FileManager.default.removeItem(at: journalURL)
@@ -93,9 +96,40 @@ public final class RecoveryManager {
         try? FileManager.default.createDirectory(at: mediaDir, withIntermediateDirectories: true)
     }
 
-    /// Discard recovery offer (user declined) but keep a fresh workspace.
+    /// Discard recovery offer (user declined). Removes session lock, journal, and autosave,
+    /// and at most the single in-progress take named in the journal. Never deletes the Media
+    /// directory or unrelated takes from other projects.
     public func discardRecovery() {
-        endSessionCleanly(clearMedia: true)
+        var orphanTake: String?
+        if let jdata = try? Data(contentsOf: journalURL),
+           let journal = try? JSONDecoder().decode(Journal.self, from: jdata),
+           journal.recording, let name = journal.takeFilename {
+            orphanTake = name
+        }
+        endSessionCleanly(clearMedia: false)
+        if let name = orphanTake {
+            try? FileManager.default.removeItem(at: mediaDir.appendingPathComponent(name))
+        }
+    }
+
+    /// Delete workspace media files whose names are not in `referenced`. Keeps every
+    /// referenced file. Safe when `referenced` is empty (removes all files under Media/,
+    /// does not throw). Pure against a temp `baseDir` for tests.
+    public func pruneMedia(keeping referenced: Set<String>) {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(
+            at: mediaDir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            try? fm.createDirectory(at: mediaDir, withIntermediateDirectories: true)
+            return
+        }
+        for url in items {
+            guard !referenced.contains(url.lastPathComponent) else { continue }
+            try? fm.removeItem(at: url)
+        }
+        try? fm.createDirectory(at: mediaDir, withIntermediateDirectories: true)
     }
 
     // MARK: - Autosave + journaling

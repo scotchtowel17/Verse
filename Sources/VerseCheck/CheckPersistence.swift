@@ -81,6 +81,72 @@ func runPersistenceChecks(_ tk: TestKit) {
                   "clean shutdown clears recovery state")
         try? fm.removeItem(at: base)
     }
+
+    // MARK: - Step G3: Workspace retention
+
+    tk.suite("Recovery: pruneMedia keeps referenced, removes unreferenced") {
+        let base = fm.temporaryDirectory.appendingPathComponent("verse-prune-\(UUID().uuidString)")
+        let rec = RecoveryManager(baseDir: base)
+        let keepName = "keep-me.caf"
+        let dropName = "orphan.caf"
+        try writeSineCAF(to: rec.mediaDir.appendingPathComponent(keepName), seconds: 0.1)
+        try writeSineCAF(to: rec.mediaDir.appendingPathComponent(dropName), seconds: 0.1)
+        tk.expect(fm.fileExists(atPath: rec.mediaDir.appendingPathComponent(keepName).path),
+                  "keep file present before prune")
+        tk.expect(fm.fileExists(atPath: rec.mediaDir.appendingPathComponent(dropName).path),
+                  "orphan file present before prune")
+
+        rec.pruneMedia(keeping: [keepName])
+        tk.expect(fm.fileExists(atPath: rec.mediaDir.appendingPathComponent(keepName).path),
+                  "referenced take kept")
+        tk.expect(!fm.fileExists(atPath: rec.mediaDir.appendingPathComponent(dropName).path),
+                  "unreferenced take removed")
+        tk.expect(fm.fileExists(atPath: rec.mediaDir.path), "Media directory still exists")
+        try? fm.removeItem(at: base)
+    }
+
+    tk.suite("Recovery: pruneMedia on empty set does not throw") {
+        let base = fm.temporaryDirectory.appendingPathComponent("verse-prune-empty-\(UUID().uuidString)")
+        let rec = RecoveryManager(baseDir: base)
+        try writeSineCAF(to: rec.mediaDir.appendingPathComponent("temp.caf"), seconds: 0.1)
+        // Empty set: nothing is referenced, so every file may go. Must not throw.
+        rec.pruneMedia(keeping: [])
+        tk.expect(fm.fileExists(atPath: rec.mediaDir.path), "Media directory still exists after empty prune")
+        let left = (try? fm.contentsOfDirectory(atPath: rec.mediaDir.path)) ?? []
+        tk.expect(left.isEmpty, "empty keep-set removes all media files")
+        // Second call on already-empty dir must also be safe.
+        rec.pruneMedia(keeping: [])
+        tk.expect(true, "second empty prune did not throw")
+        try? fm.removeItem(at: base)
+    }
+
+    tk.suite("Recovery: discardRecovery leaves unrelated takes on disk") {
+        let base = fm.temporaryDirectory.appendingPathComponent("verse-discard-\(UUID().uuidString)")
+        let rec = RecoveryManager(baseDir: base)
+        rec.beginSession()
+
+        // Unrelated take that belongs to another (or saved) project, not the journal.
+        let otherName = "other-project-take.caf"
+        try writeSineCAF(to: rec.mediaDir.appendingPathComponent(otherName), seconds: 0.1)
+
+        // In-progress take named in the journal (the only file discard may remove).
+        let orphanURL = rec.newTakeURL()
+        try writeSineCAF(to: orphanURL, seconds: 0.1)
+        rec.noteRecordingStarted(takeFilename: orphanURL.lastPathComponent)
+        var edited = Project.newUntitled(); edited.title = "discard me"
+        rec.autosave(edited)
+
+        rec.discardRecovery()
+        tk.expect(fm.fileExists(atPath: rec.mediaDir.appendingPathComponent(otherName).path),
+                  "unrelated take still on disk after discardRecovery")
+        tk.expect(!fm.fileExists(atPath: orphanURL.path),
+                  "journaled in-progress take removed by discardRecovery")
+        tk.expect(fm.fileExists(atPath: rec.mediaDir.path),
+                  "Media directory was not wiped")
+        tk.expect(RecoveryManager(baseDir: base).detectRecovery() == nil,
+                  "recovery artifacts cleared")
+        try? fm.removeItem(at: base)
+    }
 }
 
 // MARK: - SIGKILL crash-injection modes (driven by scripts/crash-recovery-test.sh)

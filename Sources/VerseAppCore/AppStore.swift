@@ -46,6 +46,12 @@ public final class AppStore {
     var loopOn = false
     var trackLevels: [UUID: Float] = [:]
     var trackEffects: [UUID: VerseAudioEngine.BuiltInEffect] = [:]
+    /// True when every effects-map key names a track that still exists on the project.
+    /// Used by VerseCheck (Step G1); the UI uses `effect(for:)` instead.
+    public var effectMapOnlyNamesLiveTracks: Bool {
+        let live = Set(project.tracks.map(\.id))
+        return trackEffects.keys.allSatisfy { live.contains($0) }
+    }
 
     // Claude copilot state
     public var showCopilot = false
@@ -134,8 +140,18 @@ public final class AppStore {
     private func observeTermination() {
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
                                                object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.recovery.endSessionCleanly(clearMedia: false) }
+            MainActor.assumeIsolated {
+                // Prune orphan takes only; keep every media file still referenced by a clip.
+                guard let self else { return }
+                self.recovery.pruneMedia(keeping: self.referencedMediaFilenames())
+                self.recovery.endSessionCleanly(clearMedia: false)
+            }
         }
+    }
+
+    /// Filenames under the workspace Media directory that clips still reference.
+    func referencedMediaFilenames() -> Set<String> {
+        Set(project.tracks.flatMap(\.clips).compactMap(\.mediaFile))
     }
 
     // MARK: - Playing notes
@@ -309,7 +325,13 @@ public final class AppStore {
                 await MainActor.run {
                     do {
                         try self.engine.insertHostedUnit(unit, trackID: tid)
+                        // Hosted AUs are session-only; clear any persisted built-in marker so a
+                        // later reconfigure does not resurrect the old built-in as if it were still chosen.
                         self.trackEffects[tid] = VerseAudioEngine.BuiltInEffect.none
+                        if let i = self.project.trackIndex(id: tid) {
+                            self.project.tracks[i].inserts = Self.insertsReplacingBuiltIn(
+                                .none, in: self.project.tracks[i].inserts)
+                        }
                         self.statusMessage = "Inserted “\(au.name)” on \(self.project.track(id: tid)?.name ?? "track")."
                     } catch {
                         self.statusMessage = "Couldn’t insert \(au.name): \(error.localizedDescription)"
@@ -349,13 +371,50 @@ public final class AppStore {
     }
 
     /// Rebuild the engine graph + mixer from the current project (after a patch/undo/redo).
-    func syncEngineToProject() {
+    ///
+    /// `engine.reconfigure` tears down every effect node. Built-in effects are restored from
+    /// `Track.inserts`. Hosted third-party Audio Units are session-only and are not restored;
+    /// the UI is told so it never claims an effect that is not in the graph.
+    public func syncEngineToProject() {
+        var droppedHostedNames: [String] = []
+        for track in project.tracks {
+            // Hosted insert: graph has a unit that is not a recognized built-in.
+            if engine.hasInsert(trackID: track.id),
+               engine.currentEffect(trackID: track.id) == .none {
+                droppedHostedNames.append(track.name)
+            }
+        }
         engine.reconfigure(with: project)
         applyEffectiveMix()
+        restoreEffectsFromProject()
         rebuildTakesFromModel()
         if project.track(id: activeTrackID) == nil {
             activeTrackID = project.tracks.first(where: { $0.kind == .instrument })?.id
                 ?? project.tracks.first?.id ?? activeTrackID
         }
+        if !droppedHostedNames.isEmpty {
+            if droppedHostedNames.count == 1 {
+                statusMessage = "Reverted \(droppedHostedNames[0]) to no effect (hosted plug-ins are not restored yet)."
+            } else {
+                let list = droppedHostedNames.joined(separator: ", ")
+                statusMessage = "Reverted \(list) to no effect (hosted plug-ins are not restored yet)."
+            }
+        }
+    }
+
+    /// Rebuild `trackEffects` and re-insert built-in effect nodes from `Track.inserts`.
+    /// Drops map entries whose track no longer exists. Safe after reconfigure/open.
+    public func restoreEffectsFromProject() {
+        let liveIDs = Set(project.tracks.map(\.id))
+        var next: [UUID: VerseAudioEngine.BuiltInEffect] = [:]
+        for track in project.tracks {
+            let kind = Self.builtInEffect(fromInserts: track.inserts)
+            if kind != .none {
+                next[track.id] = kind
+                engine.setEffect(kind, trackID: track.id)
+            }
+        }
+        // Only keep live tracks; never leave a map entry naming a deleted track.
+        trackEffects = next.filter { liveIDs.contains($0.key) }
     }
 }

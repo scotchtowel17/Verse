@@ -1,6 +1,7 @@
 import Foundation
 import VerseModel
 import VerseEngine
+import VersePersistence
 import VerseAppCore
 
 /// AppStore undo-contract checks (Steps 3 and 6). Requires VerseAppCore so the app target
@@ -200,5 +201,92 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         tk.expect(store.project.tracks[0].clips.isEmpty, "clip removed by single undo")
         tk.expectEqual(store.redoName, "Apply Claude Patch", "redoName after undoing patch")
         tk.expect(!store.canUndo, "no further undo after undoing the single group")
+    }
+
+    // MARK: - Step G1: Effects truth
+
+    tk.suite("AppStore effects: survive syncEngineToProject reconfigure") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.startEngineIfNeeded()
+        let tid = store.activeTrackID
+        store.setEffect(.reverb, tid)
+        tk.expectEqual(store.effect(for: tid), .reverb, "picker state is reverb before sync")
+        tk.expectEqual(store.engineEffect(for: tid), .reverb, "engine node is reverb before sync")
+        tk.expectEqual(
+            AppStore.builtInEffect(fromInserts: store.project.track(id: tid)?.inserts ?? []),
+            .reverb, "built-in reverb written into Track.inserts")
+
+        // reconfigure tears down effect nodes; restore must re-apply from inserts.
+        store.syncEngineToProject()
+        tk.expectEqual(store.effect(for: tid), .reverb, "picker still shows reverb after sync")
+        tk.expectEqual(store.engineEffect(for: tid), .reverb,
+                       "engine still has reverb after reconfigure")
+        tk.expect(store.effectMapOnlyNamesLiveTracks, "effects map only names live tracks after sync")
+    }
+
+    tk.suite("AppStore effects: map drops deleted tracks") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.startEngineIfNeeded()
+        store.addInstrumentTrack()
+        let doomed = store.activeTrackID
+        store.setEffect(.delay, doomed)
+        tk.expectEqual(store.effect(for: doomed), .delay, "delay set on second track")
+        store.deleteTrack(doomed)
+        tk.expectEqual(store.effect(for: doomed), .none, "deleted track reports no effect")
+        tk.expect(store.effectMapOnlyNamesLiveTracks,
+                  "effects map never names a track that does not exist")
+        store.syncEngineToProject()
+        tk.expect(store.effectMapOnlyNamesLiveTracks,
+                  "effects map still clean after syncEngineToProject")
+    }
+
+    tk.suite("AppStore effects: built-in survives save then open") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.startEngineIfNeeded()
+        let tid = store.activeTrackID
+        store.setEffect(.distortion, tid)
+        let pkg = dir.appendingPathComponent("fx.verse")
+        try ProjectPackage.write(store.project, to: pkg, mediaSourceDir: nil)
+
+        let loaded = try ProjectPackage.read(pkg)
+        tk.expectEqual(AppStore.builtInEffect(fromInserts: loaded.tracks[0].inserts), .distortion,
+                       "inserts round-trip through package as distortion")
+
+        // Simulate open: assign project and sync (reconfigure + restore effects).
+        store.project = loaded
+        store.syncEngineToProject()
+        let openedID = store.project.tracks[0].id
+        tk.expectEqual(store.effect(for: openedID), .distortion, "picker restored after open")
+        tk.expectEqual(store.engineEffect(for: openedID), .distortion,
+                       "engine node restored after open")
+    }
+
+    tk.suite("AppStore effects: v1 project with no inserts opens unchanged") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        var bare = Project.newUntitled()
+        bare.title = "No FX"
+        tk.expect(bare.tracks[0].inserts.isEmpty, "seed track has empty inserts")
+        let pkg = dir.appendingPathComponent("bare.verse")
+        try ProjectPackage.write(bare, to: pkg, mediaSourceDir: nil)
+
+        let loaded = try ProjectPackage.read(pkg)
+        tk.expectEqual(loaded.title, "No FX", "title unchanged")
+        tk.expect(loaded.tracks[0].inserts.isEmpty, "inserts still empty after open")
+        tk.expectEqual(loaded.schemaVersion, Schema.current, "schema stays at current (no bump)")
+
+        store.project = loaded
+        store.syncEngineToProject()
+        tk.expectEqual(store.effect(for: loaded.tracks[0].id), .none,
+                       "no effect claimed for empty inserts")
+        tk.expectEqual(store.engineEffect(for: loaded.tracks[0].id), .none,
+                       "engine has no insert for empty inserts")
     }
 }
