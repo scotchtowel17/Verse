@@ -29,6 +29,22 @@ public enum PatchValidator {
         if let v = parsed.version, v != 1 {
             errors.append(PatchError(opIndex: nil, "Unsupported patch version \(v) (this app supports version 1)."))
         }
+        // Project fingerprint: handles are positional; refuse a patch that was built against a
+        // different track/clip layout (or that left the code out entirely).
+        let liveFingerprint = project.structuralFingerprint
+        if let fp = parsed.fingerprint {
+            let trimmed = fp.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                errors.append(PatchError(opIndex: nil,
+                    "Claude left out the project code. Ask it to include the fingerprint field exactly."))
+            } else if trimmed != liveFingerprint {
+                errors.append(PatchError(opIndex: nil,
+                    "Your project changed since you copied this request. Copy a fresh one."))
+            }
+        } else {
+            errors.append(PatchError(opIndex: nil,
+                "Claude left out the project code. Ask it to include the fingerprint field exactly."))
+        }
 
         // Existing track handles: positional T1…Tn.
         var trackHandles: [String: UUID] = [:]

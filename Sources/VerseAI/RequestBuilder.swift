@@ -55,6 +55,7 @@ public enum RequestBuilder {
                 "generatedAt": ISO8601DateFormatter().string(from: Date()),
                 "appVersion": appVersion,
                 "userPrompt": userPrompt,
+                "fingerprint": project.structuralFingerprint,
                 "project": projectDict,
                 "capabilities": ["ops": capabilityOps]
             ]
@@ -73,7 +74,8 @@ public enum RequestBuilder {
         "versePatch" object (schema "verse-patch", version 1) whose "ops" implement my request. \
         Allowed ops: \(capabilityOps.joined(separator: ", ")). Use the track ids (T1, T2, …) and \
         clip ids (T1C1, T2C3, …) below. Mint your own tempId / tempClipId for new tracks/clips. \
-        My request: "\(userPrompt)".
+        Copy the fingerprint value from the verseRequest into your versePatch verbatim as \
+        "fingerprint": "<value>". My request: "\(userPrompt)".
         """
     }
 }

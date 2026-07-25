@@ -26,7 +26,7 @@ Close the defects found in the A3 review.
    existing clip removes it; a clip handle naming the wrong track is rejected; an unresolvable
    reference surfaces a rejection rather than a silent success.
 
-## Step 2 — A1 project fingerprint — PENDING
+## Step 2 — A1 project fingerprint — DONE
 
 Close the staleness hole. Handles are positional; without this they can silently resolve to
 the wrong track or clip if the project changes between "Copy request" and "Apply".

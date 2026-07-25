@@ -165,6 +165,34 @@ public struct Project: Codable, Sendable, Identifiable {
     public func track(id: UUID) -> Track? { tracks.first { $0.id == id } }
     public func trackIndex(id: UUID) -> Int? { tracks.firstIndex { $0.id == id } }
     public var anySolo: Bool { tracks.contains { $0.solo } }
+
+    /// 8-hex-character digest over ordered track UUIDs and, per track, ordered clip UUIDs.
+    ///
+    /// Structural input only: tempo, title, key, names, mix, notes, and timestamps do not
+    /// affect the value. Handles (T1, T2C1, …) are positional over this same order, so a
+    /// matching fingerprint means the handles in a patch still mean what they meant when
+    /// the request was copied.
+    public var structuralFingerprint: String {
+        // FNV-1a 32-bit over UUID strings (Foundation only; deterministic across runs).
+        var hash: UInt32 = 2_166_136_261
+        let prime: UInt32 = 16_777_619
+        func feed(_ s: String) {
+            for byte in s.utf8 {
+                hash ^= UInt32(byte)
+                hash = hash &* prime
+            }
+        }
+        for track in tracks {
+            feed(track.id.uuidString)
+            feed(">")
+            for clip in track.clips {
+                feed(clip.id.uuidString)
+                feed(",")
+            }
+            feed(";")
+        }
+        return String(format: "%08x", hash)
+    }
 }
 
 // MARK: - Codable JSON helpers
