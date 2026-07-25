@@ -136,12 +136,13 @@ public final class VerseAudioEngine {
         trackNodes[id] = nil
     }
 
-    /// Load a sound-bank instrument (GeneralUser GS SF2). Falls back silently to the sampler's
-    /// built-in default voice if the SF2 isn't bundled or a preset triplet doesn't exist —
-    /// so the "hear sound" path never blocks (Build Contract §9).
+    /// Load a sound-bank instrument from the resolved SF2 (named bank if present, else the
+    /// other bundled bank). Falls back silently to the sampler's built-in default voice if
+    /// no SF2 is available or a preset triplet doesn't exist — so the "hear sound" path
+    /// never blocks (Build Contract §9).
     public func loadInstrument(id: UUID, instrument: Instrument) {
         guard let sampler = trackNodes[id]?.sampler else { return }
-        guard instrument.sf2 == SoundBank.generalUserGS, let url = SoundBank.generalUserGSURL else {
+        guard let url = SoundBank.resolveURL(for: instrument) else {
             return // default voice
         }
         do {

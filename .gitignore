@@ -6,7 +6,8 @@ build/
 .swiftpm/
 Package.resolved.bak
 # Bundled artifacts are fetched by scripts/fetch-artifacts.sh and checksummed; do not commit
-# the large binaries themselves.
+# the large binaries themselves. Includes GeneralUserGS.sf2 and MuseScore_General.sf2.
 Sources/VerseEngine/Resources/*.sf2
+Sources/VerseEngine/Resources/MuseScore_General.sf2
 Sources/VerseAudioToMIDI/Resources/*.mlpackage
 Sources/VerseAudioToMIDI/Resources/*.mlmodelc

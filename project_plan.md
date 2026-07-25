@@ -767,7 +767,7 @@ never touch `inputNode` without a live tap. Verse.app still has the usage string
 the real HAL path. Regression suite: `Recording I1b: startRecording refuses mic when process
 cannot open input`.
 
-## Step I2 — MuseScore General as the preferred bank — PENDING
+## Step I2 — MuseScore General as the preferred bank — DONE
 
 Verified before writing this step, not assumed:
 

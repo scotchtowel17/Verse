@@ -17,7 +17,7 @@ final class Metronome {
         guard !attached else { return }
         engine.avEngine.attach(sampler)
         engine.avEngine.connect(sampler, to: engine.avEngine.mainMixerNode, format: nil)
-        if let url = SoundBank.generalUserGSURL {
+        if let url = SoundBank.anyAvailableURL {
             try? sampler.loadSoundBankInstrument(at: url, program: 0, bankMSB: 120, bankLSB: 0) // drum kit
         }
         attached = true

@@ -42,6 +42,21 @@ Allowlist: `MIT`, `Apache-2.0`, `BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `0BSD`, `
 - File: `GeneralUser-GS.sf2` (32 MB), fetched from `mrbumpy409/GeneralUser-GS@main`.
 - SHA-256: `9575028c7a1f589f5770fccc8cff2734566af40cd26ed836944e9a5152688cfe`
 
+### MuseScore General (SoundFont, SF2)
+- Source: https://ftp.osuosl.org/pub/musescore/soundfont/MuseScore_General/
+- License text: https://ftp.osuosl.org/pub/musescore/soundfont/MuseScore_General/MuseScore_General_License.md
+- Version: 0.2
+- Copyright: Michael Cowgill (2014-16) and Frank Wen (2000-2002, 2008)
+- Use: preferred higher-quality instrument bank loaded by `AVAudioUnitSampler` when present.
+  New instruments store the logical name `MuseScoreGeneral`; if the file is absent, Verse
+  falls back to GeneralUser GS then the sampler built-in voice. Absence is normal (CI never
+  downloads this file).
+- SPDX-License-Identifier: MIT
+- File: `MuseScore_General.sf2`, 215,614,036 bytes
+- SHA-256: `ee51d2c4b1525e70f19a45909c4fd7a2e26d91d115fa89dbf5a6bc413d8b9bf3`
+- Fetch: `scripts/fetch-artifacts.sh --with-musescore` only. `scripts/make-app.sh` bundles it
+  when already present and verified; it never auto-fetches this file.
+
 ### Basic Pitch CoreML model (hum→MIDI)
 - Source: https://github.com/spotify/basic-pitch (official TF model; re-convert with coremltools),
   OR community `.mlpackage` from https://github.com/john-rocky/CoreML-Models (~272 KB).
