@@ -34,8 +34,18 @@ public final class AppStore {
     var monitoring = false
     var masterLevel: Float = 0
     var inputLevel: Float = 0
-    var recordError: String?
+    public var recordError: String?
     var takes: [Take] = []
+
+    /// Plain-language arm/capture status for the transport. Nil when not armed.
+    /// Distinct from `recordError`, which only reports a failed arm attempt.
+    public var recordArmStatus: String? {
+        guard isRecording else { return nil }
+        if isPlaying {
+            return "Recording what you play…"
+        }
+        return "Armed. Press play to record what you play."
+    }
 
     // Persistence state
     var currentPackageURL: URL?

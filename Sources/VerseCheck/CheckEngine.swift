@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import VerseModel
 import VerseEngine
 
@@ -44,10 +45,10 @@ func runEngineChecks(_ tk: TestKit) {
     }
 
     tk.suite("Engine: curated presets available") {
-        tk.expect(SoundBank.presets.count >= 20, "curated list is browse-worthy (≥20)")
-        tk.expect(SoundBank.presets.count <= 40, "curated list stays scannable")
-        let required = ["Keys", "Guitar", "Bass", "Strings", "Brass", "Woodwind",
-                        "Synth Lead", "Pad", "Drums"]
+        tk.expect(SoundBank.presets.count >= 55, "curated list is browse-worthy (≥55 after I1)")
+        tk.expect(SoundBank.presets.count <= 90, "curated list stays scannable with category grouping")
+        let required = ["Keys", "Organ", "Guitar", "Bass", "Strings", "Brass", "Woodwind",
+                        "Synth Lead", "Pad", "Ethnic", "Percussion", "Sound Effects", "Drums"]
         for cat in required {
             tk.expect(SoundBank.presets.contains { $0.category == cat },
                       "category \(cat) is offered")
@@ -55,7 +56,43 @@ func runEngineChecks(_ tk: TestKit) {
         // Seed instrument matches Grand Piano by program+bank, not by track name.
         let grand = SoundBank.preset(matching: .grandPiano)
         tk.expectEqual(grand?.name, "Grand Piano", "grandPiano instrument maps to Grand Piano preset")
-        tk.expect(SoundBank.presetCategories.count >= 9, "categories ordered for grouped picker")
+        tk.expect(SoundBank.presetCategories.count >= 12, "categories ordered for grouped picker")
+        let drums = SoundBank.presets.filter { $0.category == "Drums" }
+        tk.expect(drums.count >= 8, "multiple drum kits exposed (not just one)")
+        tk.expect(drums.allSatisfy { $0.bankMSB == 120 }, "drum kits use percussion bank 120")
+    }
+
+    // MARK: - Step I1: drum kits must actually load from the SF2
+
+    tk.suite("Engine I1: every curated drum kit loads from GeneralUser GS") {
+        let kits = SoundBank.presets.filter { $0.category == "Drums" }
+        tk.expect(!kits.isEmpty, "at least one drum kit in curated list")
+        guard let url = SoundBank.generalUserGSURL else {
+            // SF2 is optional for CI without artifacts: still require the list, but skip load.
+            print("   ↳ SF2 not bundled; skipping load verification for \(kits.count) kits")
+            return
+        }
+        let engine = AVAudioEngine()
+        let sampler = AVAudioUnitSampler()
+        engine.attach(sampler)
+        engine.connect(sampler, to: engine.mainMixerNode, format: nil)
+        try engine.start()
+        defer { engine.stop() }
+        var loaded: [String] = []
+        for kit in kits {
+            do {
+                try sampler.loadSoundBankInstrument(
+                    at: url,
+                    program: UInt8(clamping: kit.program),
+                    bankMSB: UInt8(clamping: kit.bankMSB),
+                    bankLSB: UInt8(clamping: kit.bankLSB))
+                loaded.append(kit.name)
+                tk.expect(true, "\(kit.name) (program \(kit.program)) loads")
+            } catch {
+                tk.expect(false, "\(kit.name) (program \(kit.program)) loads: \(error)")
+            }
+        }
+        print("   ↳ loaded drum kits: \(loaded.joined(separator: ", "))")
     }
 
     // MARK: - Step G4: Crash-shape hardening

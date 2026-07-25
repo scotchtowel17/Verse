@@ -746,3 +746,39 @@ the licence-gate allowlist.
 ## Step M4 — Record arm has no visible state (see Phase M) — PENDING
 
 Implement M4 as already specified above in the Phase M section.
+
+## Step I1b — VerseCheck hangs after the I1/M4 changes — PENDING
+
+The I1 + M4 run was interrupted by a 10-minute cap and left the tree in a state where
+`swift run VerseCheck` **hangs indefinitely**. Established so far:
+
+- Reproducible on a cleaned environment (no stray Verse, VerseCheck, or virtual-MIDI processes),
+  so it is a genuine regression, not machine state.
+- The run completes ~624 lines of output, finishes the suite
+  "AppStore F2: renaming a track leaves instrument selection intact", prints a partial header
+  for the next suite, and then stops forever.
+- The next suite is "AppStore F2: selectPreset preserves user-chosen track name", which calls
+  `store.selectPreset(...)` -> `engine.loadInstrument(...)` -> SF2 load.
+- `SoundBank.swift` changed only as data (29 to 70 presets, 9 drum kits) with no logic change.
+- `AppStore.swift` changed only by adding the computed `recordArmStatus` and widening
+  `recordError` to public. Neither should block.
+- "Warm Pad" is still present, so the suite is NOT falling through to `presets.last`
+  (which is now "SFX Kit").
+
+Leading hypothesis, unproven: resource exhaustion across the many `makeTestStore()` instances.
+Each `AppStore` can start a CoreMIDI client (`startMIDIInput`, added in Phase M). `MIDIInput`
+does have a `deinit` that calls `MIDIPortDispose`/`MIDIClientDispose`, but if stores are not
+released promptly, or if a client is created per store in a tight loop, CoreMIDI may block.
+A second candidate is `AVAudioUnitSampler.loadSoundBankInstrument` blocking on a particular
+program in the expanded list.
+
+Task:
+1. Find the actual cause. Bisect if needed: the fastest discriminator is to run the harness with
+   the new drum-kit load suite removed, and separately with MIDI startup disabled in test stores.
+2. Fix it properly. If test stores should not start CoreMIDI, make that explicit and documented
+   rather than incidental. If a specific preset hangs the sampler, drop it from the manifest and
+   say which one, because a preset that hangs the sampler would also hang the app when a user
+   picks it.
+3. `swift run VerseCheck` must complete in a reasonable time and exit 0.
+4. Report the true root cause. Do not paper over it with a timeout or by deleting the suite that
+   exposed it.

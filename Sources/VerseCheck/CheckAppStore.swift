@@ -169,17 +169,46 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
             tk.expect(false, "active track exists")
             return
         }
-        // Program 12 (Marimba) is not in the curated list.
-        let custom = Instrument(sf2: SoundBank.generalUserGS, program: 12, bankMSB: 121, bankLSB: 0)
+        // Program 9 (Glockenspiel) is deliberately not in the curated list.
+        let custom = Instrument(sf2: SoundBank.generalUserGS, program: 9, bankMSB: 121, bankLSB: 0)
         store.project.tracks[idx].instrument = custom
         let track = store.project.tracks[idx]
-        tk.expect(SoundBank.preset(matching: custom) == nil, "Marimba is off-list")
-        tk.expectEqual(SoundBank.displayName(for: custom), "Custom (program 12)",
+        tk.expect(SoundBank.preset(matching: custom) == nil, "Glockenspiel is off-list")
+        tk.expectEqual(SoundBank.displayName(for: custom), "Custom (program 9)",
                        "honest custom label")
         tk.expectEqual(store.presetSelectionKey(for: track), SoundBank.selectionKey(for: custom),
                        "selection key is program+bank even when custom")
-        tk.expectEqual(store.currentPresetName, "Custom (program 12)",
+        tk.expectEqual(store.currentPresetName, "Custom (program 9)",
                        "currentPresetName uses custom label")
+    }
+
+    // MARK: - Step M4: record arm has visible state
+
+    tk.suite("AppStore M4: recordArmStatus armed vs capturing vs off") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.startEngineIfNeeded()
+        tk.expect(store.recordArmStatus == nil, "no status when unarmed")
+        tk.expect(!store.isRecording, "not recording at start")
+
+        store.startRecording()
+        tk.expect(store.isRecording, "armed after startRecording")
+        tk.expectEqual(store.recordArmStatus,
+                       "Armed. Press play to record what you play.",
+                       "armed status before play")
+        tk.expect(!store.isPlaying, "not playing yet")
+
+        store.startPlayback()
+        tk.expect(store.isPlaying, "playing after startPlayback")
+        tk.expectEqual(store.recordArmStatus,
+                       "Recording what you play…",
+                       "capturing status while armed and playing")
+
+        store.stopRecording()
+        tk.expect(!store.isRecording, "disarmed after stopRecording")
+        tk.expect(store.recordArmStatus == nil, "no status after disarm")
+        store.stopPlayback()
     }
 
     tk.suite("AppStore F2: default names auto-update; Instrument N is default") {
