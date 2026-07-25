@@ -1,8 +1,47 @@
 import Foundation
 import AVFoundation
 import VerseEngine
+import VerseModel
 
 func runRecordingChecks(_ tk: TestKit) {
+    // MARK: - Step H1: startRecording must never hang
+
+    tk.suite("Recording H1: startRecording returns without hanging") {
+        // Real bug: `avEngine.inputNode` can block forever inside CoreAudio
+        // (`setDeviceID:` / BindToDeviceInternal). Record runs on the main actor, so a hang
+        // freezes the whole app and freezes VerseCheck.
+        //
+        // Assert the PROPERTY, not the environment: startRecording must return (throw or
+        // succeed) within a bound. Machines with a working mic may succeed; bare CLI /
+        // no-device / denied-permission paths throw. Do NOT require a specific error code
+        // (that failed CI on a machine that could open the mic).
+        let engine = VerseAudioEngine()
+        engine.configure(with: Project.newUntitled())
+        try engine.start()
+        defer { engine.stop() }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("verse-h1-\(UUID().uuidString).caf")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        // Bound well above the production inputBindTimeout so a legitimate slow bind still
+        // passes; a hang never finishes and would fail this suite (or the process timeout).
+        let bound = VerseAudioEngine.inputBindTimeout + 5.0
+        let started = Date()
+        var returned = false
+        do {
+            try engine.startRecording(to: url)
+            returned = true
+            _ = engine.stopRecording()
+        } catch {
+            returned = true
+            // Any error is fine. Hang is the only failure mode this suite forbids.
+        }
+        let elapsed = Date().timeIntervalSince(started)
+        tk.expect(returned, "startRecording returned (threw or succeeded)")
+        tk.expect(elapsed < bound,
+                  "returned within \(bound)s (got \(String(format: "%.2f", elapsed))s); hang never finishes")
+    }
+
     tk.suite("Recording: journaled take written to disk") {
         guard let fmt = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1) else {
             tk.expect(false, "could not make format"); return

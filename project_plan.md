@@ -807,7 +807,7 @@ Verified before writing this step, not assumed:
 
 # Phase H — Battle hardening (remote, no screen required)
 
-## Step H1 — Record can freeze the whole app — PENDING
+## Step H1 — Record can freeze the whole app — DONE
 
 **Real, user-facing, and structurally invisible to CI.** Proven with `sample` on a hung process:
 
