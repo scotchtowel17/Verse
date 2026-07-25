@@ -60,14 +60,14 @@ the wrong track or clip if the project changes between "Copy request" and "Apply
 5. `setVolume` / `setPan` must NOT record. A slider drag emits ~100 calls and would flush the
    entire 100-entry stack, destroying the AI-patch undo point. Leave a comment saying so.
 
-## Step 4 — B file organization — PENDING
+## Step 4 — B file organization — DONE
 
 Split `AppStore.swift` into extensions. No behavior change, no logic edits.
 `AppStore+Transport.swift`, `AppStore+Persistence.swift`, `AppStore+Copilot.swift`.
 All stored properties, timers, `init`, and lifecycle stay in `AppStore.swift`.
 Widen `private` to `internal` only where a move requires it.
 
-## Step 5 — C mutation helpers — PENDING
+## Step 5 — C mutation helpers — DONE
 
 Pure helpers on `Project` / `Track` in `VerseModel`. Schema stays v1.
 
