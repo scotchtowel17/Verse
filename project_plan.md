@@ -863,7 +863,7 @@ via `runFuzzChecks`. Defect write-ups are under **H2 defects found** below.
    control case (`0xC017A01D`): encode → decode → re-encode byte-identical; fingerprint stable.
 5. **Migration hostility.** DONE. 17 malformed/truncated/wrong-type `project.json` inputs all
    throw a non-empty error; missing package `project.json` is readable `PackageError`.
-   Future `schemaVersion` found **H2-MIG-1** (open; not silent-fixed).
+   Future `schemaVersion` found **H2-MIG-1** (FIXED in H4).
 6. **Scale.** DONE. Seed `0x5CA1E7E57`: 50 tracks × 400 notes = 20,000 notes. Save/load
    (JSON + `.verse` package), fingerprint, and `PianoRollLayout` all succeed; layout covers
    global and per-track pitch ranges. Timings printed (no flaky wall-clock upper bound).
@@ -905,28 +905,25 @@ out-of-range one. Velocity-0 still means note-off.
 Harness: suite `H3 MIDI-1 fix — high-bit / real-time mid-data stay in 0…127`; random
 and structured fuzz assert the 0…127 range property (not only no-crash).
 
-### H2-MIG-1 — future `schemaVersion` loads without error and drops unknown fields — OPEN
+### H2-MIG-1 — future `schemaVersion` loads without error and drops unknown fields — FIXED
 
 **Surface:** `Migration.migrateRawIfNeeded` then `Project.fromJSON`.
 
 **Found by:** suite `H2 migration hostility — future schemaVersion`.
 
-**What happens:** A valid v1-shaped `project.json` with `"schemaVersion": 99` and an
-extra key (`futureOnlyField`) is accepted. `migrateRawIfNeeded` returns the bytes
-unchanged whenever `version >= Schema.current` (so 99 skips the step loop). Codable
-then decodes the known v1 fields and **silently drops** unknown keys. Re-encoding
-writes `schemaVersion: 99` without `futureOnlyField`.
+**What happened:** A valid v1-shaped `project.json` with `"schemaVersion": 99` and an
+extra key (`futureOnlyField`) was accepted. `migrateRawIfNeeded` returned the bytes
+unchanged whenever `version >= Schema.current` (so 99 skipped the step loop). Codable
+then decoded the known v1 fields and **silently dropped** unknown keys. Re-encoding
+wrote `schemaVersion: 99` without `futureOnlyField`.
 
-**Why it matters:** Opening a project written by a newer Verse would look successful
-while stripping any fields the newer schema added, then re-saving that loss. That is
-silent data loss, not a readable “this song needs a newer Verse” error.
-
-**Expected (not implemented):** Reject with a clear message when
-`schemaVersion > Schema.current` (for example: “This song was saved with a newer
-version of Verse (schema 99). Open it in an updated Verse.”). Do not decode-as-v1
-and do not re-save under the future version number.
-
-**Not fixed in H2** (report only, per step rules).
+**Fix (H4):** `Migration.migrateRawIfNeeded` throws
+`MigrationError.unsupportedFutureVersion` when `schemaVersion > Schema.current`, with a
+plain-language message (e.g. “This song was saved with a newer version of Verse
+(schema 99). Open it in an updated Verse.”). `Project.fromJSON` and
+`ProjectPackage.read` both fail open via that path. `RecoveryManager` surfaces the
+same message in `projectLoadFailureMessage` instead of treating the autosave as
+missing garbage.
 
 ### H2 status (all items)
 
@@ -936,7 +933,7 @@ and do not re-save under the future version number.
 | 2 PatchValidator property | Pass; **H2-VAL-1** closed in H3 |
 | 3 MIDI parser fuzz | Pass: every emitted event in 0…127; **H2-MIDI-1** closed in H3 |
 | 4 Model round-trip | Pass: 80/80 seeded + dense control encode→decode→re-encode identical |
-| 5 Migration hostility | Pass on malformed/truncated/wrong-type; **H2-MIG-1** open for future schema |
+| 5 Migration hostility | Pass on malformed/truncated/wrong-type; **H2-MIG-1** FIXED in H4 |
 | 6 Scale | Pass: 50 tracks / 20k notes save, load, fingerprint, piano-roll layout |
 
 Scale timings from a green local run (illustrative; not pass/fail):
@@ -956,21 +953,15 @@ rather than an out-of-range one. Velocity-0-means-note-off is unchanged.
 Fuzz assertions tightened: every emitted event carries pitch, velocity, and controller
 values within 0–127 (fixed adversarial, seeded random, and structured+noise suites).
 
-## Step H4 — Fix H2-MIG-1: a newer schema loads and silently loses data — PENDING
+## Step H4 — Fix H2-MIG-1: a newer schema loads and silently loses data — DONE
 
 Found by the migration-hostility fuzz, and previously raised in the first objective review of
 this codebase as a non-blocking recommendation that was never actioned.
 
-`Migration.migrateRawIfNeeded` guards on `version < Schema.current` and returns the data
-untouched otherwise, so a project written by a FUTURE version of Verse decodes with no error.
-Codable drops the fields it does not know, and re-saving writes `schemaVersion: 99` back with
-those fields gone. That is silent data loss on the user's own song.
-
-Fix: reject when `schemaVersion > Schema.current` with a clear, plain-language error, for
-example "This song was made with a newer version of Verse." It must be a readable failure to
-open, never a partial load. Cover it both in `Project.fromJSON` and on the `.verse` package
-read path, and make sure `RecoveryManager` surfaces it sensibly rather than treating the
-autosave as unrecoverable garbage.
-
-Test: a project at `schemaVersion` above current fails to open with that message; a project at
-the current version is unaffected; an older version still migrates forward as today.
+**Fixed:** `Migration.migrateRawIfNeeded` rejects `schemaVersion > Schema.current` with
+`MigrationError.unsupportedFutureVersion` and a plain-language
+`LocalizedError` message. `Project.fromJSON` and `ProjectPackage.read` fail open (no
+partial load). `RecoveryManager.detectRecovery` keeps the autosave on disk and sets
+`projectLoadFailureMessage` so the UI can explain “needs a newer Verse” instead of
+pretending nothing was found. Current schema still opens; forward migration for older
+versions is unchanged.

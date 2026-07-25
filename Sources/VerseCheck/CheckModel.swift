@@ -36,6 +36,46 @@ func runModelChecks(_ tk: TestKit) {
         }
     }
 
+    tk.suite("Model H4: future schemaVersion is a readable open failure") {
+        let future = Schema.current + 1
+        let json = """
+        {
+          "schemaVersion": \(future),
+          "id": "00000000-0000-4000-8000-0000000000CC",
+          "title": "Too New",
+          "tempoBPM": 120,
+          "timeSignature": { "num": 4, "den": 4 },
+          "tracks": [],
+          "masterVolume": 0.8,
+          "createdAt": "1970-01-01T00:00:00Z",
+          "modifiedAt": "1970-01-01T00:00:00Z",
+          "futureOnlyField": true
+        }
+        """
+        let data = Data(json.utf8)
+        tk.expectThrows("fromJSON rejects schema newer than current") {
+            _ = try Project.fromJSON(data)
+        }
+        do {
+            _ = try Project.fromJSON(data)
+            tk.expect(false, "must throw", "opened")
+        } catch let err as Migration.MigrationError {
+            let msg = err.errorDescription ?? err.description
+            tk.expect(msg.localizedCaseInsensitiveContains("newer"),
+                      "message says newer version")
+            tk.expect(msg.contains("\(future)"), "message includes schema \(future)")
+        } catch {
+            tk.expect(false, "MigrationError.unsupportedFutureVersion", "got \(error)")
+        }
+
+        // Current schema still opens; no regression.
+        let current = Project.newUntitled()
+        let currentData = try current.jsonData()
+        let back = try Project.fromJSON(currentData)
+        tk.expectEqual(back.schemaVersion, Schema.current, "current schema unaffected")
+        tk.expectEqual(back.tracks.count, current.tracks.count, "current tracks preserved")
+    }
+
     tk.suite("Model: tonic enum") {
         tk.expectEqual(Tonic.Cs.rawValue, "C#", "sharp-style raw value")
         tk.expectEqual(Tonic.allCases.count, 12, "twelve tonics")

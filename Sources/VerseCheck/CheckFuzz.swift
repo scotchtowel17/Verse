@@ -1079,9 +1079,8 @@ private func runMigrationHostility(_ tk: TestKit) {
     }
 
     tk.suite("H2 migration hostility — future schemaVersion") {
-        // Valid v1 shape with schemaVersion far ahead of Schema.current.
-        // Property: must not crash; should fail with a readable error rather than
-        // silently accepting future schema (which would drop unknown future fields).
+        // H4 / H2-MIG-1 FIXED: future schema must refuse open with a readable error.
+        // Never decode-as-v1 (that would silently drop unknown fields on re-save).
         let futureJSON = """
         {
           "schemaVersion": 99,
@@ -1098,7 +1097,6 @@ private func runMigrationHostility(_ tk: TestKit) {
         """
         let data = Data(futureJSON.utf8)
 
-        // migrateRawIfNeeded must not crash.
         var migrateThrew = false
         var migrateMsg = ""
         do {
@@ -1107,46 +1105,115 @@ private func runMigrationHostility(_ tk: TestKit) {
             migrateThrew = true
             migrateMsg = readableErrorMessage(error)
         }
+        tk.expect(migrateThrew, "migrateRawIfNeeded rejects future schemaVersion")
+        tk.expect(!migrateMsg.isEmpty, "migrate error is non-empty")
+        tk.expect(migrateMsg.localizedCaseInsensitiveContains("newer")
+                  || migrateMsg.localizedCaseInsensitiveContains("schema")
+                  || migrateMsg.localizedCaseInsensitiveContains("version"),
+                  "migrate error mentions newer/schema/version")
 
-        // fromJSON path (what package open uses).
         var fromJSONSucceeded = false
-        var loadedSchema: Int?
         var fromJSONMsg = ""
         do {
-            let p = try Project.fromJSON(data)
+            _ = try Project.fromJSON(data)
             fromJSONSucceeded = true
-            loadedSchema = p.schemaVersion
         } catch {
             fromJSONMsg = readableErrorMessage(error)
         }
+        tk.expect(!fromJSONSucceeded, "fromJSON must not open a future schema (no partial load)")
+        tk.expect(!fromJSONMsg.isEmpty, "future schema rejected with readable error")
+        tk.expect(fromJSONMsg.localizedCaseInsensitiveContains("newer")
+                  || fromJSONMsg.localizedCaseInsensitiveContains("schema")
+                  || fromJSONMsg.localizedCaseInsensitiveContains("version"),
+                  "fromJSON error mentions newer/schema/version")
+    }
 
-        if fromJSONSucceeded {
-            // Documented defect H2-MIG-1: future schema is accepted and re-saved as v99
-            // without a migration path, stripping unknown keys via Codable.
-            tk.expect(true,
-                      "H2-MIG-1 known: future schemaVersion \(loadedSchema ?? -1) loads without error (see project_plan)")
-            // Still no crash; re-encode must not invent tracks.
-            if let p = try? Project.fromJSON(data) {
-                tk.expectEqual(p.tracks.count, 0, "future-schema load does not invent tracks")
-                // Unknown field is not on the model: silent drop if we re-save.
-                if let re = try? p.jsonData(),
-                   let obj = try? JSONSerialization.jsonObject(with: re) as? [String: Any] {
-                    tk.expect(obj["futureOnlyField"] == nil,
-                              "H2-MIG-1: futureOnlyField dropped on re-encode (silent data loss)")
-                }
-            }
-        } else {
-            tk.expect(!fromJSONMsg.isEmpty,
-                      "future schema rejected with readable error")
-            tk.expect(fromJSONMsg.localizedCaseInsensitiveContains("schema")
-                      || fromJSONMsg.localizedCaseInsensitiveContains("version")
-                      || fromJSONMsg.localizedCaseInsensitiveContains("migration"),
-                      "future schema error mentions schema/version/migration")
-            // migrate may or may not throw independently; either is fine if fromJSON fails.
-            if migrateThrew {
-                tk.expect(!migrateMsg.isEmpty, "migrate error is non-empty when thrown")
-            }
+    tk.suite("H4 future schema — package read and recovery surface readable failure") {
+        let futureVersion = Schema.current + 98
+        let futureJSON = """
+        {
+          "schemaVersion": \(futureVersion),
+          "id": "00000000-0000-4000-8000-0000000000BB",
+          "title": "From The Future",
+          "tempoBPM": 100,
+          "timeSignature": { "num": 4, "den": 4 },
+          "tracks": [],
+          "masterVolume": 0.8,
+          "createdAt": "1970-01-01T00:00:00Z",
+          "modifiedAt": "1970-01-01T00:00:00Z",
+          "futureOnlyField": { "keepMe": true }
         }
+        """
+        let data = Data(futureJSON.utf8)
+
+        // Explicit MigrationError case.
+        do {
+            _ = try Migration.migrateRawIfNeeded(data)
+            tk.expect(false, "migrate must throw", "succeeded")
+        } catch let err as Migration.MigrationError {
+            if case .unsupportedFutureVersion(let v) = err {
+                tk.expectEqual(v, futureVersion, "error carries the future schema number")
+            } else {
+                tk.expect(false, "expected unsupportedFutureVersion", "got \(err)")
+            }
+            let msg = err.errorDescription ?? ""
+            tk.expect(msg.localizedCaseInsensitiveContains("newer"),
+                      "plain-language “newer version” message")
+            tk.expect(msg.contains("\(futureVersion)"),
+                      "message names schema \(futureVersion)")
+        } catch {
+            tk.expect(false, "expected MigrationError", "got \(error)")
+        }
+
+        // .verse package open path (ProjectPackage.read → Project.fromJSON → migrate).
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("verse-h4-future-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let pkg = dir.appendingPathComponent("Future.verse")
+        try FileManager.default.createDirectory(at: pkg, withIntermediateDirectories: true)
+        try data.write(to: pkg.appendingPathComponent("project.json"))
+        try FileManager.default.createDirectory(
+            at: pkg.appendingPathComponent("Media"), withIntermediateDirectories: true)
+
+        var packageOpened = false
+        var packageMsg = ""
+        do {
+            _ = try ProjectPackage.read(pkg)
+            packageOpened = true
+        } catch {
+            packageMsg = readableErrorMessage(error)
+        }
+        tk.expect(!packageOpened, "package with future schema must not open")
+        tk.expect(!packageMsg.isEmpty, "package open error is non-empty")
+        tk.expect(packageMsg.localizedCaseInsensitiveContains("newer")
+                  || packageMsg.localizedCaseInsensitiveContains("schema")
+                  || packageMsg.localizedCaseInsensitiveContains("version"),
+                  "package error is readable about schema/version")
+
+        // RecoveryManager: future autosave is not silent garbage; failure is surfaced.
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("verse-h4-recov-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let rec = RecoveryManager(baseDir: base)
+        rec.beginSession()
+        try data.write(to: rec.workspaceDir.appendingPathComponent("autosave-project.json"),
+                       options: [.atomic])
+        let relaunch = RecoveryManager(baseDir: base)
+        let info = relaunch.detectRecovery()
+        tk.expect(info != nil, "future-schema autosave still surfaces as recovery")
+        tk.expect(info?.project == nil, "project is not partially decoded")
+        let failMsg = info?.projectLoadFailureMessage ?? ""
+        tk.expect(!failMsg.isEmpty, "projectLoadFailureMessage is set")
+        tk.expect(failMsg.localizedCaseInsensitiveContains("newer")
+                  || failMsg.localizedCaseInsensitiveContains("schema")
+                  || failMsg.localizedCaseInsensitiveContains("version"),
+                  "recovery failure names schema/version/newer")
+        // Autosave file must still be on disk (not treated as disposable garbage).
+        tk.expect(FileManager.default.fileExists(
+            atPath: relaunch.workspaceDir.appendingPathComponent("autosave-project.json").path),
+                  "autosave file retained after failed decode")
+        relaunch.endSessionCleanly()
     }
 
     tk.suite("H2 migration hostility — current schema still opens") {

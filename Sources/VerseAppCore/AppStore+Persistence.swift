@@ -10,21 +10,36 @@ extension AppStore {
 
     func applyRecovery() {
         guard let info = pendingRecovery else { return }
-        if let recovered = info.project { project = recovered }
-        let rekeyed = project.ensureUniqueTrackIDs()
-        activeTrackID = project.tracks.first(where: { $0.kind == .instrument })?.id ?? activeTrackID
-        engine.reconfigure(with: project)
-        restoreEffectsFromProject()
-        if let takeURL = info.inProgressTakeURL {
-            addRecordingClip(filename: takeURL.lastPathComponent, seconds: durationOf(takeURL))
-        }
-        rebuildTakesFromModel()
-        history.clear()
-        if rekeyed > 0 {
-            let n = rekeyed == 1 ? "1 duplicate track id" : "\(rekeyed) duplicate track ids"
-            statusMessage = "Recovered your unsaved work. Fixed \(n) so every track can play."
+        if let recovered = info.project {
+            project = recovered
+            let rekeyed = project.ensureUniqueTrackIDs()
+            activeTrackID = project.tracks.first(where: { $0.kind == .instrument })?.id ?? activeTrackID
+            engine.reconfigure(with: project)
+            restoreEffectsFromProject()
+            if let takeURL = info.inProgressTakeURL {
+                addRecordingClip(filename: takeURL.lastPathComponent, seconds: durationOf(takeURL))
+            }
+            rebuildTakesFromModel()
+            history.clear()
+            if rekeyed > 0 {
+                let n = rekeyed == 1 ? "1 duplicate track id" : "\(rekeyed) duplicate track ids"
+                statusMessage = "Recovered your unsaved work. Fixed \(n) so every track can play."
+            } else {
+                statusMessage = "Recovered your unsaved work."
+            }
         } else {
-            statusMessage = "Recovered your unsaved work."
+            // Autosave existed but could not be decoded (e.g. newer schema). Still restore any take.
+            if let takeURL = info.inProgressTakeURL {
+                addRecordingClip(filename: takeURL.lastPathComponent, seconds: durationOf(takeURL))
+                rebuildTakesFromModel()
+            }
+            if let fail = info.projectLoadFailureMessage {
+                statusMessage = info.inProgressTakeURL == nil
+                    ? fail
+                    : "\(fail) Restored the in-progress recording."
+            } else {
+                statusMessage = "Couldn’t restore the autosaved project."
+            }
         }
         pendingRecovery = nil
     }

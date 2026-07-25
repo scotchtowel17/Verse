@@ -58,7 +58,12 @@ public final class RecoveryManager {
         public let project: Project?
         public let inProgressTakeFilename: String?
         public let inProgressTakeURL: URL?
-        public var hasSomething: Bool { project != nil || inProgressTakeURL != nil }
+        /// Present when `autosave-project.json` exists but could not be decoded (for example a
+        /// future schemaVersion). Keeps the failure readable instead of pretending nothing was found.
+        public let projectLoadFailureMessage: String?
+        public var hasSomething: Bool {
+            project != nil || inProgressTakeURL != nil || projectLoadFailureMessage != nil
+        }
     }
 
     /// If the previous session didn't end cleanly, return what can be recovered.
@@ -67,8 +72,14 @@ public final class RecoveryManager {
             return nil   // previous session ended cleanly
         }
         var project: Project?
+        var projectLoadFailureMessage: String?
         if let data = try? Data(contentsOf: autosaveURL) {
-            project = try? Project.fromJSON(data)
+            do {
+                project = try Project.fromJSON(data)
+            } catch {
+                // Keep the autosave on disk; surface why it could not be opened.
+                projectLoadFailureMessage = Self.readableLoadFailure(error)
+            }
         }
         var takeName: String?
         var takeURL: URL?
@@ -82,8 +93,23 @@ public final class RecoveryManager {
                 takeURL = url
             }
         }
-        let info = RecoveryInfo(project: project, inProgressTakeFilename: takeName, inProgressTakeURL: takeURL)
+        let info = RecoveryInfo(
+            project: project,
+            inProgressTakeFilename: takeName,
+            inProgressTakeURL: takeURL,
+            projectLoadFailureMessage: projectLoadFailureMessage
+        )
         return info.hasSomething ? info : nil
+    }
+
+    private static func readableLoadFailure(_ error: Error) -> String {
+        if let e = error as? LocalizedError, let d = e.errorDescription, !d.isEmpty {
+            return d
+        }
+        let s = error.localizedDescription
+        return s.isEmpty
+            ? "Couldn’t restore the autosaved project."
+            : s
     }
 
     // MARK: - Session lifecycle
