@@ -34,6 +34,15 @@ public enum PatchValidator {
         var trackHandles: [String: UUID] = [:]
         for (i, t) in project.tracks.enumerated() { trackHandles["T\(i + 1)"] = t.id }
 
+        // Existing clip handles: positional T1C1, T2C3, …
+        // Map handle → (trackUUID, clipUUID)
+        var clipHandles: [String: (track: UUID, clip: UUID)] = [:]
+        for (ti, t) in project.tracks.enumerated() {
+            for (ci, c) in t.clips.enumerated() {
+                clipHandles["T\(ti + 1)C\(ci + 1)"] = (t.id, c.id)
+            }
+        }
+
         var tempTracks: Set<String> = []
         var tempClips: Set<String> = []
 
@@ -51,6 +60,9 @@ public enum PatchValidator {
                 errors.append(PatchError(opIndex: i, "Missing clip reference.")); return nil
             }
             if tempClips.contains(s) { return .temp(s) }
+            if let loc = clipHandles[s] {
+                return .existing(track: loc.track, clip: loc.clip)
+            }
             errors.append(PatchError(opIndex: i, "Unknown clip “\(s)”.")); return nil
         }
 
