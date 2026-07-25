@@ -55,12 +55,23 @@ public enum PatchValidator {
             errors.append(PatchError(opIndex: i, "Unknown track “\(s)”.")); return nil
         }
 
-        func resolveClip(_ ref: Any?, op i: Int) -> ClipRef? {
+        func resolveClip(_ ref: Any?, track: TrackRef, trackHandle: String, op i: Int) -> ClipRef? {
             guard let s = JSONCoerce.string(ref), !s.isEmpty else {
                 errors.append(PatchError(opIndex: i, "Missing clip reference.")); return nil
             }
             if tempClips.contains(s) { return .temp(s) }
             if let loc = clipHandles[s] {
+                // Clip handles encode their track (T3C2 → T3). Reject when the op names a different track.
+                switch track {
+                case .existing(let trackUUID):
+                    if loc.track != trackUUID {
+                        errors.append(PatchError(opIndex: i, "Clip “\(s)” isn't on track “\(trackHandle)”."))
+                        return nil
+                    }
+                case .temp:
+                    errors.append(PatchError(opIndex: i, "Clip “\(s)” isn't on track “\(trackHandle)”."))
+                    return nil
+                }
                 return .existing(track: loc.track, clip: loc.clip)
             }
             errors.append(PatchError(opIndex: i, "Unknown clip “\(s)”.")); return nil
@@ -168,7 +179,8 @@ public enum PatchValidator {
 
             case "addNotes":
                 guard let ref = resolveTrack(op["track"], op: i) else { continue }
-                guard let clip = resolveClip(op["clip"], op: i) else { continue }
+                let trackHandle = JSONCoerce.string(op["track"]) ?? ""
+                guard let clip = resolveClip(op["clip"], track: ref, trackHandle: trackHandle, op: i) else { continue }
                 guard let notesArr = op["notes"] as? [[String: Any]] else {
                     errors.append(PatchError(opIndex: i, "addNotes needs a “notes” list.")); continue
                 }
@@ -192,7 +204,8 @@ public enum PatchValidator {
 
             case "deleteClip":
                 guard let ref = resolveTrack(op["track"], op: i) else { continue }
-                guard let clip = resolveClip(op["clip"], op: i) else { continue }
+                let trackHandle = JSONCoerce.string(op["track"]) ?? ""
+                guard let clip = resolveClip(op["clip"], track: ref, trackHandle: trackHandle, op: i) else { continue }
                 typed.append(.deleteClip(track: ref, clip: clip))
 
             default:

@@ -7,7 +7,7 @@ Each step must leave `swift build` clean and `swift run VerseCheck` exiting 0.
 
 ---
 
-## Step 1 — A3 corrections — PENDING
+## Step 1 — A3 corrections — DONE
 
 Close the defects found in the A3 review.
 

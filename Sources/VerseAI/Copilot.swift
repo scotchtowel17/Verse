@@ -52,7 +52,10 @@ public enum Copilot {
         case .success(let success):
             let cmd = PatchCommand(name: success.summary ?? "Apply Claude patch", ops: success.ops)
             do {
-                try cmd.apply(to: &project)
+                // Apply to a local copy so a mid-apply throw never leaves the caller's project half-mutated.
+                var working = project
+                try cmd.apply(to: &working)
+                project = working
                 return Outcome(status: .applied, summary: success.summary, opCount: success.ops.count,
                                clamps: success.clamps, errors: [], parseMessage: nil)
             } catch let e as PatchError {

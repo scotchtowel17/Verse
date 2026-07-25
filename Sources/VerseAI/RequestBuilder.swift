@@ -16,7 +16,7 @@ public enum RequestBuilder {
         for (ti, t) in project.tracks.enumerated() {
             var clips: [[String: Any]] = []
             for (ci, c) in t.clips.enumerated() {
-                var clipDict: [String: Any] = [
+                let clipDict: [String: Any] = [
                     "id": "T\(ti + 1)C\(ci + 1)",
                     "kind": c.kind.rawValue,
                     "name": c.name,

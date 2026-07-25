@@ -111,4 +111,68 @@ func runPatchChecks(_ tk: TestKit) {
         tk.expectEqual(project.tracks[0].pan, -1.0, "pan clamped to -1.0")
         tk.expect(!outcome.clamps.isEmpty, "clamps were reported")
     }
+
+    // ── A3 corrections: existing-clip ops, ownership check, unresolvable refs.
+    tk.suite("verse-patch — addNotes to an existing clip adds notes") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Existing", startBeat: 0, lengthBeats: 4,
+                 midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
+        ]
+        let reply = "{\"versePatch\":{\"schema\":\"verse-patch\",\"version\":1,\"ops\":[" +
+            "{\"op\":\"addNotes\",\"track\":\"T1\",\"clip\":\"T1C1\",\"notes\":[" +
+            "{\"startBeat\":1,\"lengthBeats\":1,\"pitch\":64,\"velocity\":90}]}]}}"
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "addNotes on existing clip applies")
+        tk.expectEqual(project.tracks[0].clips.count, 1, "still one clip")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.count, 2, "original note plus one new note")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.last?.pitch, 64, "new note pitch is 64")
+    }
+
+    tk.suite("verse-patch — deleteClip on an existing clip removes it") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Keep", startBeat: 0, lengthBeats: 2, midiNotes: []),
+            Clip(kind: .midi, name: "Drop", startBeat: 2, lengthBeats: 2, midiNotes: [])
+        ]
+        let reply = "{\"versePatch\":{\"schema\":\"verse-patch\",\"version\":1,\"ops\":[" +
+            "{\"op\":\"deleteClip\",\"track\":\"T1\",\"clip\":\"T1C2\"}]}}"
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "deleteClip on existing clip applies")
+        tk.expectEqual(project.tracks[0].clips.count, 1, "one clip remains")
+        tk.expectEqual(project.tracks[0].clips[0].name, "Keep", "the kept clip is the first one")
+    }
+
+    tk.suite("verse-patch — clip handle naming the wrong track is rejected") {
+        var project = Project.newUntitled()
+        // T1 has no clips; T2 has clip T2C1. Op claims track T1 with clip T2C1.
+        project.tracks.append(Track(kind: .instrument, name: "Second", instrument: .grandPiano))
+        project.tracks[1].clips = [
+            Clip(kind: .midi, name: "On T2", startBeat: 0, lengthBeats: 4, midiNotes: [])
+        ]
+        let reply = "{\"versePatch\":{\"schema\":\"verse-patch\",\"version\":1,\"ops\":[" +
+            "{\"op\":\"deleteClip\",\"track\":\"T1\",\"clip\":\"T2C1\"}]}}"
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "mismatched track/clip rejected")
+        tk.expectEqual(project.tracks[1].clips.count, 1, "clip on T2 was not deleted")
+        let joined = outcome.errors.map { $0.description }.joined(separator: " | ")
+        tk.expect(joined.contains("T2C1"), "error names the clip handle")
+        tk.expect(joined.contains("T1"), "error names the track handle")
+        tk.expect(joined.contains("isn't on track"), "error is the ownership mismatch message")
+    }
+
+    tk.suite("verse-patch — unresolvable reference is a rejection, not silent success") {
+        var project = Project.newUntitled()
+        project.tempoBPM = 88
+        let reply = "{\"versePatch\":{\"schema\":\"verse-patch\",\"version\":1,\"ops\":[" +
+            "{\"op\":\"setTempo\",\"bpm\":150}," +
+            "{\"op\":\"addNotes\",\"track\":\"T1\",\"clip\":\"T1C9\",\"notes\":[" +
+            "{\"startBeat\":0,\"lengthBeats\":1,\"pitch\":60,\"velocity\":100}]}]}}"
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "unknown clip handle rejects the whole patch")
+        tk.expectEqual(project.tempoBPM, 88, "setTempo did not apply (transactional reject)")
+        tk.expect(project.tracks[0].clips.isEmpty, "no clips created as a side effect")
+        let joined = outcome.errors.map { $0.description }.joined(separator: " | ")
+        tk.expect(joined.contains("T1C9"), "reports the unresolvable clip")
+    }
 }

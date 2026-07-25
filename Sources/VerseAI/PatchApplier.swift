@@ -11,26 +11,26 @@ public enum PatchApplier {
         var tempTrack: [String: UUID] = [:]
         var tempClip: [String: (track: UUID, clip: UUID)] = [:]
 
-        func uuid(_ ref: TrackRef) throws -> UUID {
+        func uuid(_ ref: TrackRef, opIndex: Int) throws -> UUID {
             switch ref {
             case .existing(let u): return u
             case .temp(let t):
                 guard let u = tempTrack[t] else {
-                    throw PatchError(opIndex: nil, "Unresolved temporary track “\(t)”.")
+                    throw PatchError(opIndex: opIndex, "Unresolved temporary track “\(t)”.")
                 }
                 return u
             }
         }
 
-        func index(_ ref: TrackRef) throws -> Int {
-            let u = try uuid(ref)
+        func index(_ ref: TrackRef, opIndex: Int) throws -> Int {
+            let u = try uuid(ref, opIndex: opIndex)
             guard let i = project.trackIndex(id: u) else {
-                throw PatchError(opIndex: nil, "Track no longer exists in project.")
+                throw PatchError(opIndex: opIndex, "Track no longer exists in project.")
             }
             return i
         }
 
-        for op in ops {
+        for (opIndex, op) in ops.enumerated() {
             switch op {
             case .setTempo(let b):
                 project.tempoBPM = b
@@ -44,35 +44,37 @@ public enum PatchApplier {
                 project.tracks.append(t)
                 tempTrack[tempId] = t.id
             case .renameTrack(let ref, let name):
-                let i = try index(ref)
+                let i = try index(ref, opIndex: opIndex)
                 project.tracks[i].name = name
             case .setInstrument(let ref, let inst):
-                let i = try index(ref)
+                let i = try index(ref, opIndex: opIndex)
                 project.tracks[i].instrument = inst
             case .setTrackMix(let ref, let v, let p, let mu, let so):
-                let i = try index(ref)
+                let i = try index(ref, opIndex: opIndex)
                 if let v { project.tracks[i].volume = v }
                 if let p { project.tracks[i].pan = p }
                 if let mu { project.tracks[i].mute = mu }
                 if let so { project.tracks[i].solo = so }
             case .addMidiClip(let ref, let tempClipId, let start, let len):
-                let i = try index(ref)
+                let i = try index(ref, opIndex: opIndex)
                 let c = Clip(kind: .midi, name: "Clip", startBeat: start, lengthBeats: len, midiNotes: [])
                 project.tracks[i].clips.append(c)
                 tempClip[tempClipId] = (project.tracks[i].id, c.id)
-            case .addNotes(let trackRef, let clipRef, let notes):
-                let (trackUUID, clipUUID) = try resolveClipLocation(clipRef, tempClip: tempClip, trackRef: trackRef, tempTrack: tempTrack)
+            case .addNotes(_, let clipRef, let notes):
+                let (trackUUID, clipUUID) = try resolveClipLocation(
+                    clipRef, tempClip: tempClip, opIndex: opIndex)
                 guard let ti = project.trackIndex(id: trackUUID),
                       let ci = project.tracks[ti].clips.firstIndex(where: { $0.id == clipUUID }) else {
-                    throw PatchError(opIndex: nil, "Clip no longer exists in project.")
+                    throw PatchError(opIndex: opIndex, "Clip no longer exists in project.")
                 }
                 var existing = project.tracks[ti].clips[ci].midiNotes ?? []
                 existing.append(contentsOf: notes)
                 project.tracks[ti].clips[ci].midiNotes = existing
-            case .deleteClip(let trackRef, let clipRef):
-                let (trackUUID, clipUUID) = try resolveClipLocation(clipRef, tempClip: tempClip, trackRef: trackRef, tempTrack: tempTrack)
+            case .deleteClip(_, let clipRef):
+                let (trackUUID, clipUUID) = try resolveClipLocation(
+                    clipRef, tempClip: tempClip, opIndex: opIndex)
                 guard let ti = project.trackIndex(id: trackUUID) else {
-                    throw PatchError(opIndex: nil, "Track no longer exists in project.")
+                    throw PatchError(opIndex: opIndex, "Track no longer exists in project.")
                 }
                 project.tracks[ti].clips.removeAll { $0.id == clipUUID }
             }
@@ -80,20 +82,19 @@ public enum PatchApplier {
         project.modifiedAt = Date()
     }
 
+    /// Clip ownership vs. the op's track field is enforced in `PatchValidator` before apply.
     private static func resolveClipLocation(
         _ clipRef: ClipRef,
         tempClip: [String: (track: UUID, clip: UUID)],
-        trackRef: TrackRef,
-        tempTrack: [String: UUID]
+        opIndex: Int
     ) throws -> (track: UUID, clip: UUID) {
         switch clipRef {
         case .temp(let cid):
             guard let loc = tempClip[cid] else {
-                throw PatchError(opIndex: nil, "Unresolved temporary clip “\(cid)”.")
+                throw PatchError(opIndex: opIndex, "Unresolved temporary clip “\(cid)”.")
             }
             return loc
         case .existing(let track, let clip):
-            // Optional ownership sanity check against the track ref (best-effort)
             return (track, clip)
         }
     }
