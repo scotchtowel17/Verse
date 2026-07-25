@@ -299,3 +299,94 @@ because each is a few lines, but do not claim they were observed.
 6. Tests where practical: audition across two different formats does not throw; `removeTrack`
    after `installMeterTaps` leaves no tap installed; `RecoveryManager` still works with an
    injected base dir; a project with duplicate track ids opens with a clear outcome.
+
+## Step G5 — Test coverage for the engine, persistence, and recording layer — DONE
+
+The structural finding behind all of Phase G: 35 of ~70 suites cover `VerseAI`, while the
+engine got 4, recording 2, and persistence 3. Every G-phase defect lived in the thin half.
+Close the gap so this class of bug is caught by the harness rather than by review.
+
+Add suites in `Sources/VerseCheck/`. Prefer real behavior over mocks; the engine can be built
+and rendered offline (see the existing `renderOffline` usage in `CheckMultitrack.swift`), and
+`RecoveryManager` and `ProjectPackage` take injectable directories.
+
+1. **Engine graph lifecycle** (`CheckEngine.swift`): add/remove tracks repeatedly without leaks
+   or throws; `reconfigure` on a project with many tracks leaves exactly the expected node set;
+   `removeTrack` on an unknown id is a safe no-op; effects insert and remove cleanly and audio
+   still flows through afterwards.
+2. **Persistence round trips** (`CheckPersistence.swift`): save then read preserves every model
+   field including `inserts`; a package missing `project.json` produces the readable error; a
+   package whose media is unreadable reports the skipped names rather than failing the save;
+   `extractMedia` reports failures instead of silently presenting an unplayable take.
+3. **Recording** (`CheckRecording.swift`): `TakeRecorder` start/append/stop produces a readable
+   file of the expected frame count; `stop()` twice is safe; `durationSeconds` is correct
+   before and after stop; a zero-frame take reports no URL.
+4. **Transport** (new `CheckTransport.swift`): scheduling a project with both audio and MIDI
+   clips computes the arrangement end correctly; `stop()` cancels pending work so no note fires
+   afterwards; a clip with a negative `startBeat` does not schedule a negative onset.
+
+Do not change production behavior in this step. If a test reveals a real bug, STOP, write the
+bug up in this file under a new heading, and report it rather than silently fixing it.
+
+### Status (2026-07-25 PT)
+
+All four G5 suites landed (tests only; no production edits). `swift build` succeeds.
+`swift run VerseCheck` is red: **513 passed, 1 failed**. The failure is a real production
+bug in `TakeRecorder.durationSeconds` after `stop()` (see next heading). G5 was BLOCKED until Bug G5-1 was fixed
+until that bug is fixed and the harness is green; production was not patched in this step.
+
+## Bug G5-1 — TakeRecorder.durationSeconds returns 0 after stop — FIXED
+
+**Found by:** G5 suite `Recording G5: durationSeconds correct before and after stop`
+**File:** `Sources/VerseEngine/TakeRecorder.swift`
+
+### Symptom
+
+After a non-empty take is stopped, `durationSeconds` returns `0` instead of
+`frameCount / sampleRate`. Before `stop()` the same property is correct (e.g. 0.3s for
+13230 frames at 44.1 kHz). `frameCount` is still correct after stop.
+
+### Cause
+
+`stop()` nils out the open `AVAudioFile` to flush and close it:
+
+```swift
+file = nil   // closes/flushes the AVAudioFile
+```
+
+`durationSeconds` only reads the sample rate from that file handle:
+
+```swift
+public var durationSeconds: Double {
+    guard let file, file.fileFormat.sampleRate > 0 else {
+        return 0
+    }
+    return Double(frameCount) / file.fileFormat.sampleRate
+}
+```
+
+Once `file` is nil, the guard fails and the method returns 0 even when `frameCount > 0`.
+
+### Why it matters
+
+Callers that stop a take and then ask for its duration (UI labels, clip length, recovery
+summaries) get a silent zero. The G5 contract requires duration to be correct before and
+after stop.
+
+### Suggested fix (do not apply under G5; tests-only step)
+
+Retain the capture sample rate in a stored property set on `start`, and compute
+`durationSeconds` from `frameCount` and that rate after the file is closed. Keep returning
+0 when nothing was captured.
+
+### Test lock
+
+The failing assertion in `CheckRecording.swift` encodes the intended contract and must stay
+failing until this bug is fixed (do not weaken it to match the broken return value).
+
+
+**Resolution (G5-1):** `TakeRecorder` now captures `sampleRate` at `start` and computes
+`durationSeconds` from it, so duration is correct both during capture and after `stop()` closes
+the file. Latent only: production reads the value before `stop()` in
+`VerseAudioEngine.stopRecording`, so no user-visible behavior changed. The G5 assertion stays
+as the contract lock. 514 assertions green.

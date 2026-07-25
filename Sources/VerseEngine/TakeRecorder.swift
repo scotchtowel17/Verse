@@ -14,6 +14,8 @@ public final class TakeRecorder: @unchecked Sendable {
     public let level = LevelMeter()
 
     private var file: AVAudioFile?
+    /// Captured at `start` so duration survives `stop()` closing the file.
+    private var sampleRate: Double = 0
 
     public init() {}
 
@@ -31,6 +33,7 @@ public final class TakeRecorder: @unchecked Sendable {
                                 commonFormat: .pcmFormatFloat32, interleaved: false)
         file = f
         self.url = url
+        sampleRate = f.fileFormat.sampleRate
         frameCount = 0
         level.reset()
         isRecording = true
@@ -57,10 +60,11 @@ public final class TakeRecorder: @unchecked Sendable {
         return out
     }
 
+    /// Duration of the captured take. Valid both during capture and after `stop()`, which
+    /// closes the file: the sample rate is captured at `start` rather than read back from the
+    /// (by then nil) `AVAudioFile`.
     public var durationSeconds: Double {
-        guard let file, file.fileFormat.sampleRate > 0 else {
-            return 0
-        }
-        return Double(frameCount) / file.fileFormat.sampleRate
+        guard sampleRate > 0 else { return 0 }
+        return Double(frameCount) / sampleRate
     }
 }
