@@ -2,7 +2,7 @@ import Foundation
 import VerseModel
 
 /// Builds the `verseRequest` JSON the user pastes into Claude (Build Contract §E.1). It carries
-/// the project context (tracks get positional handles T1…Tn that the response references) plus
+/// the project context (tracks get positional handles T1…Tn, clips get T2C1… style handles) plus
 /// the user's ask and the allowed-op capability list. No network, no API key.
 public enum RequestBuilder {
 
@@ -13,12 +13,25 @@ public enum RequestBuilder {
 
     public static func buildJSON(project: Project, userPrompt: String, appVersion: String = "0.1.0") -> String {
         var tracks: [[String: Any]] = []
-        for (i, t) in project.tracks.enumerated() {
+        for (ti, t) in project.tracks.enumerated() {
+            var clips: [[String: Any]] = []
+            for (ci, c) in t.clips.enumerated() {
+                var clipDict: [String: Any] = [
+                    "id": "T\(ti + 1)C\(ci + 1)",
+                    "kind": c.kind.rawValue,
+                    "name": c.name,
+                    "startBeat": c.startBeat,
+                    "lengthBeats": c.lengthBeats,
+                    "noteCount": c.midiNotes?.count ?? 0
+                ]
+                clips.append(clipDict)
+            }
+
             var dict: [String: Any] = [
-                "id": "T\(i + 1)",
+                "id": "T\(ti + 1)",
                 "kind": t.kind.rawValue,
                 "name": t.name,
-                "clips": t.clips.count
+                "clips": clips
             ]
             if let inst = t.instrument {
                 dict["instrument"] = ["sf2": inst.sf2, "program": inst.program,
@@ -58,8 +71,9 @@ public enum RequestBuilder {
         """
         I'm using an app called Verse. Please reply with ONLY a fenced ```json block containing a \
         "versePatch" object (schema "verse-patch", version 1) whose "ops" implement my request. \
-        Allowed ops: \(capabilityOps.joined(separator: ", ")). Use the track ids below (T1, T2, …) \
-        and mint your own tempId / tempClipId for new tracks/clips. My request: "\(userPrompt)".
+        Allowed ops: \(capabilityOps.joined(separator: ", ")). Use the track ids (T1, T2, …) and \
+        clip ids (T1C1, T2C3, …) below. Mint your own tempId / tempClipId for new tracks/clips. \
+        My request: "\(userPrompt)".
         """
     }
 }
