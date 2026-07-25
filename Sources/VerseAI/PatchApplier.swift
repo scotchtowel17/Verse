@@ -2,24 +2,32 @@ import Foundation
 import VerseModel
 import VerseCommands
 
-/// Applies validated, fully-resolved ops to a project (Build Contract §E.4). Because validation
-/// already guaranteed every reference and value, application can't fail partway — but it still
-/// runs on a working copy via `PatchCommand` so the whole patch is one undo group.
+/// Applies validated, fully-resolved ops to a project (Build Contract §E.4).
+/// Application is transactional via `PatchCommand`. Unresolvable references now throw
+/// instead of silently succeeding.
 public enum PatchApplier {
 
-    public static func apply(_ ops: [TypedOp], to project: inout Project) {
+    public static func apply(_ ops: [TypedOp], to project: inout Project) throws {
         var tempTrack: [String: UUID] = [:]
         var tempClip: [String: (track: UUID, clip: UUID)] = [:]
 
-        func uuid(_ ref: TrackRef) -> UUID? {
+        func uuid(_ ref: TrackRef) throws -> UUID {
             switch ref {
             case .existing(let u): return u
-            case .temp(let t): return tempTrack[t]
+            case .temp(let t):
+                guard let u = tempTrack[t] else {
+                    throw PatchError(opIndex: nil, "Unresolved temporary track “\(t)”.")
+                }
+                return u
             }
         }
-        func index(_ ref: TrackRef) -> Int? {
-            guard let u = uuid(ref) else { return nil }
-            return project.trackIndex(id: u)
+
+        func index(_ ref: TrackRef) throws -> Int {
+            let u = try uuid(ref)
+            guard let i = project.trackIndex(id: u) else {
+                throw PatchError(opIndex: nil, "Track no longer exists in project.")
+            }
+            return i
         }
 
         for op in ops {
@@ -36,38 +44,58 @@ public enum PatchApplier {
                 project.tracks.append(t)
                 tempTrack[tempId] = t.id
             case .renameTrack(let ref, let name):
-                if let i = index(ref) { project.tracks[i].name = name }
+                let i = try index(ref)
+                project.tracks[i].name = name
             case .setInstrument(let ref, let inst):
-                if let i = index(ref) { project.tracks[i].instrument = inst }
+                let i = try index(ref)
+                project.tracks[i].instrument = inst
             case .setTrackMix(let ref, let v, let p, let mu, let so):
-                if let i = index(ref) {
-                    if let v { project.tracks[i].volume = v }
-                    if let p { project.tracks[i].pan = p }
-                    if let mu { project.tracks[i].mute = mu }
-                    if let so { project.tracks[i].solo = so }
-                }
+                let i = try index(ref)
+                if let v { project.tracks[i].volume = v }
+                if let p { project.tracks[i].pan = p }
+                if let mu { project.tracks[i].mute = mu }
+                if let so { project.tracks[i].solo = so }
             case .addMidiClip(let ref, let tempClipId, let start, let len):
-                if let i = index(ref) {
-                    let c = Clip(kind: .midi, name: "Clip", startBeat: start, lengthBeats: len, midiNotes: [])
-                    project.tracks[i].clips.append(c)
-                    tempClip[tempClipId] = (project.tracks[i].id, c.id)
+                let i = try index(ref)
+                let c = Clip(kind: .midi, name: "Clip", startBeat: start, lengthBeats: len, midiNotes: [])
+                project.tracks[i].clips.append(c)
+                tempClip[tempClipId] = (project.tracks[i].id, c.id)
+            case .addNotes(let trackRef, let clipRef, let notes):
+                let (trackUUID, clipUUID) = try resolveClipLocation(clipRef, tempClip: tempClip, trackRef: trackRef, tempTrack: tempTrack)
+                guard let ti = project.trackIndex(id: trackUUID),
+                      let ci = project.tracks[ti].clips.firstIndex(where: { $0.id == clipUUID }) else {
+                    throw PatchError(opIndex: nil, "Clip no longer exists in project.")
                 }
-            case .addNotes(_, let clipRef, let notes):
-                if case .temp(let cid) = clipRef, let loc = tempClip[cid],
-                   let ti = project.trackIndex(id: loc.track),
-                   let ci = project.tracks[ti].clips.firstIndex(where: { $0.id == loc.clip }) {
-                    var existing = project.tracks[ti].clips[ci].midiNotes ?? []
-                    existing.append(contentsOf: notes)
-                    project.tracks[ti].clips[ci].midiNotes = existing
+                var existing = project.tracks[ti].clips[ci].midiNotes ?? []
+                existing.append(contentsOf: notes)
+                project.tracks[ti].clips[ci].midiNotes = existing
+            case .deleteClip(let trackRef, let clipRef):
+                let (trackUUID, clipUUID) = try resolveClipLocation(clipRef, tempClip: tempClip, trackRef: trackRef, tempTrack: tempTrack)
+                guard let ti = project.trackIndex(id: trackUUID) else {
+                    throw PatchError(opIndex: nil, "Track no longer exists in project.")
                 }
-            case .deleteClip(_, let clipRef):
-                if case .temp(let cid) = clipRef, let loc = tempClip[cid],
-                   let ti = project.trackIndex(id: loc.track) {
-                    project.tracks[ti].clips.removeAll { $0.id == loc.clip }
-                }
+                project.tracks[ti].clips.removeAll { $0.id == clipUUID }
             }
         }
         project.modifiedAt = Date()
+    }
+
+    private static func resolveClipLocation(
+        _ clipRef: ClipRef,
+        tempClip: [String: (track: UUID, clip: UUID)],
+        trackRef: TrackRef,
+        tempTrack: [String: UUID]
+    ) throws -> (track: UUID, clip: UUID) {
+        switch clipRef {
+        case .temp(let cid):
+            guard let loc = tempClip[cid] else {
+                throw PatchError(opIndex: nil, "Unresolved temporary clip “\(cid)”.")
+            }
+            return loc
+        case .existing(let track, let clip):
+            // Optional ownership sanity check against the track ref (best-effort)
+            return (track, clip)
+        }
     }
 }
 
@@ -76,5 +104,5 @@ public struct PatchCommand: ProjectCommand {
     public let name: String
     public let ops: [TypedOp]
     public init(name: String, ops: [TypedOp]) { self.name = name; self.ops = ops }
-    public func apply(to project: inout Project) throws { PatchApplier.apply(ops, to: &project) }
+    public func apply(to project: inout Project) throws { try PatchApplier.apply(ops, to: &project) }
 }
