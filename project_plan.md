@@ -121,7 +121,7 @@ stays as a deliberate exception.
 ## Deferred (not in this pass)
 
 - Coordinator extraction (revisit only above ~1,200 lines in `AppStore` and with test coverage)
-- Transport honoring `lengthBeats`, which would unblock `resizeClip`
+- Transport honouring `lengthBeats` is done (Step R1); `resizeClip` as an AI op remains deferred until a UI path needs it
 - Phase F: curated presets, licensed phrase library
 
 ## Step 8 — Edit menu undo/redo never updates (found by smoke test) — DONE
@@ -974,7 +974,7 @@ You can now edit notes inside a clip, but there is no surface to position clips 
 `moveClip` exists as a model helper and an AI patch op with **no UI path at all**. That is the
 largest remaining gap for actually writing a song.
 
-## Step R1 — Transport must honour `lengthBeats` — PENDING
+## Step R1 — Transport must honour `lengthBeats` — DONE
 
 Prerequisite, and a correctness fix in its own right. Today `Clip.lengthBeats` is not consulted
 during playback at all:
@@ -997,6 +997,13 @@ edge, that inconsistency becomes visible and confusing.
 4. Tests via the existing offline render: audio stops at the clip boundary rather than playing
    the whole file, a MIDI note crossing the boundary stops at it, and a note beyond the end
    never sounds. Assert on rendered audio and scheduled events, not on wall-clock timing.
+
+**Resolution (R1):** `Transport` now plans MIDI and audio through pure helpers
+(`planMIDINotes`, `planAudioSegment`) that both `play()` and VerseCheck use. MIDI notes are
+dropped when they start at or after `lengthBeats` and truncated when they cross it; audio uses
+`scheduleSegment` with a frame count from `lengthBeats` × tempo (file shorter than clip ends
+early, no loop). Negative onsets still skip. No `resizeClip` AI op. Harness: R1 suites in
+`CheckTransport.swift` (planned events + offline render silence past the boundary).
 
 This also unblocks `resizeClip` as an AI op, which was cut precisely because length was inert.
 Do NOT re-add that op in this step; note it as newly unblocked.

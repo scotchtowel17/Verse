@@ -2,12 +2,32 @@ import Foundation
 import AVFoundation
 import VerseModel
 
+/// One MIDI note on/off pair after `lengthBeats` clipping and negative-onset filtering.
+public struct PlannedMIDINote: Equatable, Sendable {
+    public let pitch: Int
+    public let velocity: Int
+    /// Seconds after musical t=0 (playhead start, before the scheduling lead).
+    public let onSeconds: Double
+    public let offSeconds: Double
+}
+
+/// One audio file segment after `lengthBeats` clipping.
+public struct PlannedAudioSegment: Equatable, Sendable {
+    /// Seconds after musical t=0 when the segment should start.
+    public let whenSeconds: Double
+    public let startingFrame: AVAudioFramePosition
+    public let frameCount: AVAudioFrameCount
+}
+
 /// Drives playback of a whole arrangement (Build Contract §3 transport, §4.2).
 ///
 /// AVAudioSequencer has no end-of-playback callback and can't re-route a live sequence, so
 /// Verse schedules playback itself: audio clips are scheduled sample-accurately on each audio
 /// track's player; MIDI clip notes are scheduled on a serial queue against a shared anchor;
 /// end-of-arrangement is computed and fired by a timer. An optional metronome clicks the beat.
+///
+/// `Clip.lengthBeats` is a hard boundary: MIDI notes do not sound past the clip end, and audio
+/// is scheduled only for the portion of the file that falls inside the clip (`scheduleSegment`).
 @MainActor
 public final class Transport {
     public enum State: Sendable { case stopped, playing }
@@ -44,6 +64,85 @@ public final class Transport {
         return playStartBeat + elapsed * (playBPM / 60.0)
     }
 
+    // MARK: - Planning (pure; used by play and by VerseCheck)
+
+    /// Plan MIDI note on/off events for one clip, honouring `lengthBeats` as a hard end.
+    ///
+    /// - A note starting at or after `clipLengthBeats` is dropped.
+    /// - A note that crosses the clip end is truncated so note-off fires at the clip end.
+    /// - A note whose onset is before the playhead (`onSeconds < 0`) is dropped (existing rule).
+    public static func planMIDINotes(
+        notes: [Note],
+        clipStartBeat: Double,
+        clipLengthBeats: Double,
+        playFromBeat: Double,
+        secondsPerBeat: Double
+    ) -> [PlannedMIDINote] {
+        guard clipLengthBeats > 0, secondsPerBeat > 0 else { return [] }
+        var planned: [PlannedMIDINote] = []
+        for note in notes {
+            guard note.startBeat < clipLengthBeats else { continue }
+            let truncatedLen = min(note.lengthBeats, clipLengthBeats - note.startBeat)
+            guard truncatedLen > 0 else { continue }
+            let onSec = (clipStartBeat + note.startBeat - playFromBeat) * secondsPerBeat
+            guard onSec >= 0 else { continue }
+            let offSec = onSec + truncatedLen * secondsPerBeat
+            planned.append(PlannedMIDINote(
+                pitch: note.pitch,
+                velocity: note.velocity,
+                onSeconds: onSec,
+                offSeconds: offSec
+            ))
+        }
+        return planned
+    }
+
+    /// Plan the audio segment for one clip, honouring `lengthBeats` as a hard end.
+    ///
+    /// Uses `scheduleSegment` semantics: only the frames that fall inside the clip are played.
+    /// If the file is shorter than the clip, playback ends early (no loop). Clips entirely
+    /// before the playhead produce `nil`.
+    public static func planAudioSegment(
+        clipStartBeat: Double,
+        clipLengthBeats: Double,
+        playFromBeat: Double,
+        secondsPerBeat: Double,
+        fileLengthFrames: AVAudioFramePosition,
+        sampleRate: Double
+    ) -> PlannedAudioSegment? {
+        guard clipLengthBeats > 0, secondsPerBeat > 0, sampleRate > 0, fileLengthFrames > 0 else {
+            return nil
+        }
+        let relativeStart = clipStartBeat - playFromBeat
+        let relativeEnd = relativeStart + clipLengthBeats
+        // Entirely before the playhead: nothing to schedule.
+        guard relativeEnd > 0 else { return nil }
+
+        let audibleStartBeats = max(0, relativeStart)
+        let skipBeats = max(0, -relativeStart)
+        let remainingBeats = relativeEnd - audibleStartBeats
+        guard remainingBeats > 0 else { return nil }
+
+        let whenSeconds = audibleStartBeats * secondsPerBeat
+        let skipSeconds = skipBeats * secondsPerBeat
+        let remainingSeconds = remainingBeats * secondsPerBeat
+
+        let startFrame = AVAudioFramePosition((skipSeconds * sampleRate).rounded(.down))
+        guard startFrame < fileLengthFrames else { return nil }
+        let wantedFrames = AVAudioFrameCount(max(0, (remainingSeconds * sampleRate).rounded(.down)))
+        let available = AVAudioFrameCount(fileLengthFrames - startFrame)
+        let frameCount = min(wantedFrames, available)
+        guard frameCount > 0 else { return nil }
+
+        return PlannedAudioSegment(
+            whenSeconds: whenSeconds,
+            startingFrame: startFrame,
+            frameCount: frameCount
+        )
+    }
+
+    // MARK: - Playback
+
     /// Begin playback from `startBeat`. `mediaDir` resolves audio clip filenames.
     public func play(project: Project, mediaDir: URL, from startBeat: Double = 0,
                      loop: ClosedRange<Double>? = nil) {
@@ -61,41 +160,64 @@ public final class Transport {
         var endSeconds = 0.0
 
         for track in project.tracks {
-            // Audio clips → sample-accurate scheduled files on the track's player.
+            // Audio clips → sample-accurate scheduled segments on the track's player.
             if let player = engine.playerNode(for: track.id) {
                 player.stop()
                 for clip in track.clips where clip.kind == .audio {
                     guard let name = clip.mediaFile else { continue }
                     let url = mediaDir.appendingPathComponent(name)
                     guard let file = try? AVAudioFile(forReading: url) else { continue }
-                    let clipStart = max(0, (clip.startBeat - startBeat)) * spb
-                    let when = AVAudioTime(hostTime: anchorHost + AVAudioTime.hostTime(forSeconds: clipStart))
-                    player.scheduleFile(file, at: when)
-                    let dur = file.fileFormat.sampleRate > 0 ? Double(file.length) / file.fileFormat.sampleRate : 0
-                    endSeconds = max(endSeconds, clipStart + dur)
+                    let rate = file.processingFormat.sampleRate
+                    guard let plan = Self.planAudioSegment(
+                        clipStartBeat: clip.startBeat,
+                        clipLengthBeats: clip.lengthBeats,
+                        playFromBeat: startBeat,
+                        secondsPerBeat: spb,
+                        fileLengthFrames: file.length,
+                        sampleRate: rate
+                    ) else { continue }
+                    let when = AVAudioTime(
+                        hostTime: anchorHost + AVAudioTime.hostTime(forSeconds: plan.whenSeconds)
+                    )
+                    player.scheduleSegment(
+                        file,
+                        startingFrame: plan.startingFrame,
+                        frameCount: plan.frameCount,
+                        at: when
+                    )
+                    let dur = rate > 0 ? Double(plan.frameCount) / rate : 0
+                    endSeconds = max(endSeconds, plan.whenSeconds + dur)
                 }
                 player.play()
             }
-            // MIDI clips → scheduled note on/off.
+            // MIDI clips → scheduled note on/off, clipped at lengthBeats.
             for clip in track.clips where clip.kind == .midi {
-                for note in clip.midiNotes ?? [] {
-                    let onSec = (clip.startBeat + note.startBeat - startBeat) * spb
-                    guard onSec >= 0 else { continue }
-                    let offSec = onSec + note.lengthBeats * spb
-                    let tid = track.id
+                let notes = Self.planMIDINotes(
+                    notes: clip.midiNotes ?? [],
+                    clipStartBeat: clip.startBeat,
+                    clipLengthBeats: clip.lengthBeats,
+                    playFromBeat: startBeat,
+                    secondsPerBeat: spb
+                )
+                let tid = track.id
+                for note in notes {
                     // Schedule on MAIN so all engine/trackNodes access stays single-threaded
                     // (no race with main-thread setEffect/removeTrack/addTrack). Note events are
                     // cheap startNote/stopNote calls.
                     let on = DispatchWorkItem {
-                        MainActor.assumeIsolated { self.engine.noteOn(note.pitch, velocity: note.velocity, trackID: tid) }
+                        MainActor.assumeIsolated {
+                            self.engine.noteOn(note.pitch, velocity: note.velocity, trackID: tid)
+                        }
                     }
                     let off = DispatchWorkItem {
-                        MainActor.assumeIsolated { self.engine.noteOff(note.pitch, trackID: tid) }
+                        MainActor.assumeIsolated {
+                            self.engine.noteOff(note.pitch, trackID: tid)
+                        }
                     }
-                    DispatchQueue.main.asyncAfter(deadline: midiAnchor + onSec, execute: on)
-                    DispatchQueue.main.asyncAfter(deadline: midiAnchor + offSec, execute: off)
+                    DispatchQueue.main.asyncAfter(deadline: midiAnchor + note.onSeconds, execute: on)
+                    DispatchQueue.main.asyncAfter(deadline: midiAnchor + note.offSeconds, execute: off)
                     midiWork.append(on); midiWork.append(off)
-                    endSeconds = max(endSeconds, offSec)
+                    endSeconds = max(endSeconds, note.offSeconds)
                 }
             }
         }
