@@ -402,7 +402,7 @@ sounded identical, and the whole preset list was cosmetic. Fetching `GeneralUser
 now reads "GeneralUser GS" instead of "Built-in voice". That is the single biggest sound win
 available and it needed no code.
 
-## Step F1 — Guarantee a built app has real sounds — PENDING
+## Step F1 — Guarantee a built app has real sounds — DONE
 
 The SF2 is gitignored by design and the app degrades gracefully without it, so a fresh clone
 or a CI build silently produces an app where every instrument sounds the same.
@@ -415,7 +415,7 @@ or a CI build silently produces an app where every instrument sounds the same.
    the app must still build, launch, and make sound.
 4. Do not commit the SF2. Do not change `.gitignore`.
 
-## Step F2 — Separate track name from instrument — PENDING
+## Step F2 — Separate track name from instrument — DONE
 
 `TrackListView` binds the instrument Picker to `track.name`, and the preset tags are preset
 names. A new project's track is named "Piano" while the preset is "Grand Piano", so **the
@@ -436,7 +436,7 @@ and renaming a track (including via a Claude `renameTrack` patch) blanks its ins
    its instrument selection intact; `selectPreset` on a user-renamed track keeps the name;
    an off-list GM program resolves to the custom label instead of nothing.
 
-## Step F3 — Curated preset list worth browsing — PENDING
+## Step F3 — Curated preset list worth browsing — DONE
 
 Only meaningful now that the SF2 is real. Expand `presets.json` from 7 to roughly 20-28
 auditioned GM presets, grouped by the existing `category` field, covering at least Keys,

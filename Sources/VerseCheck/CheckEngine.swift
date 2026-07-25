@@ -44,8 +44,18 @@ func runEngineChecks(_ tk: TestKit) {
     }
 
     tk.suite("Engine: curated presets available") {
-        tk.expect(SoundBank.presets.count >= 5, "at least 5 curated presets exposed")
-        tk.expect(SoundBank.presets.contains { $0.category == "Bass" }, "a bass preset is offered")
+        tk.expect(SoundBank.presets.count >= 20, "curated list is browse-worthy (≥20)")
+        tk.expect(SoundBank.presets.count <= 40, "curated list stays scannable")
+        let required = ["Keys", "Guitar", "Bass", "Strings", "Brass", "Woodwind",
+                        "Synth Lead", "Pad", "Drums"]
+        for cat in required {
+            tk.expect(SoundBank.presets.contains { $0.category == cat },
+                      "category \(cat) is offered")
+        }
+        // Seed instrument matches Grand Piano by program+bank, not by track name.
+        let grand = SoundBank.preset(matching: .grandPiano)
+        tk.expectEqual(grand?.name, "Grand Piano", "grandPiano instrument maps to Grand Piano preset")
+        tk.expect(SoundBank.presetCategories.count >= 9, "categories ordered for grouped picker")
     }
 
     // MARK: - Step G4: Crash-shape hardening

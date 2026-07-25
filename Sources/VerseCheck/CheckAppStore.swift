@@ -90,8 +90,104 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         store.selectPreset(preset, for: store.activeTrackID)
         tk.expectEqual(undoDepth(of: store), 6, "selectPreset adds one entry")
         tk.expectEqual(store.undoName, "Select Preset", "selectPreset label")
+        // Default name "Piano" is still auto-named on first selectPreset.
         tk.expectEqual(store.project.track(id: store.activeTrackID)?.name, preset.name,
-                       "preset name written to track")
+                       "default track name auto-updated to preset name")
+    }
+
+    // MARK: - Phase F2: track name vs instrument identity
+
+    tk.suite("AppStore F2: new project track resolves to Grand Piano preset") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let track = store.project.tracks[0]
+        tk.expectEqual(track.name, "Piano", "seed track keeps its display name")
+        guard let inst = track.instrument else {
+            tk.expect(false, "seed track has an instrument")
+            return
+        }
+        let matched = SoundBank.preset(matching: inst)
+        tk.expect(matched != nil, "seed instrument matches a curated preset")
+        tk.expectEqual(matched?.name, "Grand Piano", "new project resolves to Grand Piano")
+        tk.expectEqual(store.presetSelectionKey(for: track), matched?.selectionKey ?? "",
+                       "picker selection key is Grand Piano's program+bank")
+        tk.expectEqual(store.currentPresetName, "Grand Piano",
+                       "currentPresetName is instrument label, not track.name")
+    }
+
+    tk.suite("AppStore F2: renaming a track leaves instrument selection intact") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let tid = store.activeTrackID
+        guard let idx = store.project.trackIndex(id: tid),
+              let before = store.project.tracks[idx].instrument else {
+            tk.expect(false, "active track has instrument")
+            return
+        }
+        let keyBefore = store.presetSelectionKey(for: store.project.tracks[idx])
+        store.project.tracks[idx].name = "Lead Hook"
+        let after = store.project.tracks[idx]
+        tk.expectEqual(after.name, "Lead Hook", "name changed")
+        tk.expectEqual(after.instrument, before, "instrument identity unchanged after rename")
+        tk.expectEqual(store.presetSelectionKey(for: after), keyBefore,
+                       "picker key unchanged after rename")
+        tk.expectEqual(SoundBank.displayName(for: after.instrument), "Grand Piano",
+                       "display name still Grand Piano")
+    }
+
+    tk.suite("AppStore F2: selectPreset preserves user-chosen track name") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let tid = store.activeTrackID
+        guard let idx = store.project.trackIndex(id: tid) else {
+            tk.expect(false, "active track exists")
+            return
+        }
+        store.project.tracks[idx].name = "My Lead"
+        guard let warm = SoundBank.presets.first(where: { $0.name == "Warm Pad" })
+                ?? SoundBank.presets.last else {
+            tk.expect(false, "Warm Pad (or any) preset available")
+            return
+        }
+        store.selectPreset(warm, for: tid)
+        let track = store.project.track(id: tid)
+        tk.expectEqual(track?.name, "My Lead", "user-renamed track keeps its name")
+        tk.expectEqual(track?.instrument?.program, warm.program, "instrument program applied")
+        tk.expectEqual(track?.instrument?.bankMSB, warm.bankMSB, "instrument bank applied")
+        tk.expectEqual(store.currentPresetName, warm.name, "preset label reflects instrument")
+    }
+
+    tk.suite("AppStore F2: off-list GM program shows custom label") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let tid = store.activeTrackID
+        guard let idx = store.project.trackIndex(id: tid) else {
+            tk.expect(false, "active track exists")
+            return
+        }
+        // Program 12 (Marimba) is not in the curated list.
+        let custom = Instrument(sf2: SoundBank.generalUserGS, program: 12, bankMSB: 121, bankLSB: 0)
+        store.project.tracks[idx].instrument = custom
+        let track = store.project.tracks[idx]
+        tk.expect(SoundBank.preset(matching: custom) == nil, "Marimba is off-list")
+        tk.expectEqual(SoundBank.displayName(for: custom), "Custom (program 12)",
+                       "honest custom label")
+        tk.expectEqual(store.presetSelectionKey(for: track), SoundBank.selectionKey(for: custom),
+                       "selection key is program+bank even when custom")
+        tk.expectEqual(store.currentPresetName, "Custom (program 12)",
+                       "currentPresetName uses custom label")
+    }
+
+    tk.suite("AppStore F2: default names auto-update; Instrument N is default") {
+        tk.expect(AppStore.isDefaultTrackName("Piano"), "Piano is default")
+        tk.expect(AppStore.isDefaultTrackName("Instrument 2"), "Instrument 2 is default")
+        tk.expect(AppStore.isDefaultTrackName("Audio 3"), "Audio 3 is default")
+        tk.expect(!AppStore.isDefaultTrackName("My Lead"), "user name is not default")
+        tk.expect(!AppStore.isDefaultTrackName("Grand Piano"), "preset-style name is not default")
     }
 
     tk.suite("AppStore undo: setVolume / setPan never push (stack protection)") {
