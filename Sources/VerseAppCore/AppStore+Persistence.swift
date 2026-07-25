@@ -13,6 +13,7 @@ extension AppStore {
         if let recovered = info.project { project = recovered }
         activeTrackID = project.tracks.first(where: { $0.kind == .instrument })?.id ?? activeTrackID
         engine.reconfigure(with: project)
+        restoreEffectsFromProject()
         if let takeURL = info.inProgressTakeURL {
             addRecordingClip(filename: takeURL.lastPathComponent, seconds: durationOf(takeURL))
         }
@@ -36,7 +37,9 @@ extension AppStore {
         activeTrackID = p.tracks.first?.id ?? UUID()
         currentPackageURL = nil
         takes.removeAll()
+        trackEffects.removeAll()
         engine.reconfigure(with: project)
+        restoreEffectsFromProject()
         history.clear()
     }
 
@@ -59,6 +62,7 @@ extension AppStore {
             activeTrackID = project.tracks.first(where: { $0.kind == .instrument })?.id
                 ?? project.tracks.first?.id ?? UUID()
             engine.reconfigure(with: project)
+            restoreEffectsFromProject()
             rebuildTakesFromModel()
             history.clear()
             statusMessage = failedMedia.isEmpty

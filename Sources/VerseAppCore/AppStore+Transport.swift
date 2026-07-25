@@ -63,6 +63,7 @@ extension AppStore {
         history.record(project, name: "Delete Track")
         engine.removeTrack(id: id)
         project.tracks.removeAll { $0.id == id }
+        trackEffects.removeValue(forKey: id)
         if activeTrackID == id {
             activeTrackID = project.tracks.first(where: { $0.kind == .instrument })?.id ?? project.tracks.first!.id
         }
@@ -98,10 +99,48 @@ extension AppStore {
 
     // MARK: Effects (M4)
 
-    func setEffect(_ kind: VerseAudioEngine.BuiltInEffect, _ id: UUID) {
+    /// Manufacturer tag written into `Track.inserts` for Verse built-in effects. Hosted
+    /// third-party Audio Units are never stored under this manufacturer (session-only).
+    public static let builtInEffectManufacturer = "verse.builtin"
+
+    public func setEffect(_ kind: VerseAudioEngine.BuiltInEffect, _ id: UUID) {
         engine.setEffect(kind, trackID: id)
         trackEffects[id] = kind
+        // Persist into the existing schema field so the choice survives save/open and
+        // reconfigure (undo/redo/patch). Do not bump Schema.current.
+        if let i = project.trackIndex(id: id) {
+            project.tracks[i].inserts = Self.insertsReplacingBuiltIn(kind, in: project.tracks[i].inserts)
+        }
     }
-    func effect(for id: UUID) -> VerseAudioEngine.BuiltInEffect { trackEffects[id] ?? .none }
+    public func effect(for id: UUID) -> VerseAudioEngine.BuiltInEffect { trackEffects[id] ?? .none }
+    /// Built-in effect currently wired in the engine graph for `id` (may differ from the
+    /// picker only if a hosted AU is inserted; hosted AUs report as `.none`).
+    public func engineEffect(for id: UUID) -> VerseAudioEngine.BuiltInEffect {
+        engine.currentEffect(trackID: id)
+    }
     func trackLevel(_ id: UUID) -> Float { trackLevels[id] ?? 0 }
+
+    /// Read a Verse built-in effect marker from `Track.inserts`, or `.none`.
+    public static func builtInEffect(fromInserts inserts: [AudioUnitRef]) -> VerseAudioEngine.BuiltInEffect {
+        for ref in inserts where ref.manufacturer == builtInEffectManufacturer {
+            if let kind = VerseAudioEngine.BuiltInEffect(rawValue: ref.subtype) {
+                return kind
+            }
+        }
+        return .none
+    }
+
+    /// Replace any `verse.builtin` entries in `existing` with the chosen built-in (or none).
+    /// Non-builtin refs are left alone; hosted AUs are not written here.
+    public static func insertsReplacingBuiltIn(_ kind: VerseAudioEngine.BuiltInEffect,
+                                               in existing: [AudioUnitRef]) -> [AudioUnitRef] {
+        var next = existing.filter { $0.manufacturer != builtInEffectManufacturer }
+        if kind != .none {
+            next.append(AudioUnitRef(type: "aufx",
+                                     subtype: kind.rawValue,
+                                     manufacturer: builtInEffectManufacturer,
+                                     name: kind.label))
+        }
+        return next
+    }
 }

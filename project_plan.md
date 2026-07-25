@@ -221,7 +221,7 @@ Phase A hardened the AI layer. These are the equivalent defects one layer down, 
 objective review at `037caff`. Same rules: no silent state lies, no silent no-ops, honest
 messages, no behavior change beyond what each step names.
 
-## Step G1 — Effects truth — PENDING
+## Step G1 — Effects truth — DONE
 
 Today `setEffect` records the chosen kind in `AppStore.trackEffects` while the engine holds the
 actual node in `trackNodes`. `syncEngineToProject()` calls `engine.reconfigure`, which calls
@@ -249,7 +249,7 @@ writes, so effects also vanish on save and reopen with no message.
    names a track that does not exist; a built-in effect survives save then open; a v1 project
    with no `inserts` still opens unchanged.
 
-## Step G3 — Workspace retention — PENDING
+## Step G3 — Workspace retention — DONE
 
 Two opposite failures today. Clean quit calls `endSessionCleanly(clearMedia: false)`, so every
 take ever recorded accumulates forever in Application Support. Meanwhile `discardRecovery()`
