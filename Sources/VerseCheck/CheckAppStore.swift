@@ -577,6 +577,42 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
                   "default band is at least ~2 octaves plus the pinned toolbar")
     }
 
+    tk.suite("Piano roll: the pitch window does not move while the user edits notes") {
+        // Live defect: the window centre was the mean pitch of the open clip, recomputed every
+        // render, so each added note shifted the grid out from under the pointer (observed as
+        // the range label stepping D#3-A#4 -> F#3-C#5 -> A#3-F5 across two double-clicks).
+        // The centre is now latched, and re-derived only on the transitions below.
+        let a = UUID(), b = UUID()
+
+        tk.expect(!PianoRollLayout.shouldRecentrePitchWindow(oldClipID: nil, newClipID: a),
+                  "creating the first clip under the pointer must not re-centre")
+        tk.expect(!PianoRollLayout.shouldRecentrePitchWindow(oldClipID: a, newClipID: nil),
+                  "closing a clip leaves the window where the user left it")
+        tk.expect(!PianoRollLayout.shouldRecentrePitchWindow(oldClipID: a, newClipID: a),
+                  "the same clip re-reported is not a re-open")
+        tk.expect(PianoRollLayout.shouldRecentrePitchWindow(oldClipID: a, newClipID: b),
+                  "opening a different clip re-centres on its music")
+        tk.expect(!PianoRollLayout.shouldRecentrePitchWindow(oldClipID: nil, newClipID: nil),
+                  "no clip either side is not a re-open")
+
+        // The reason a latch is needed at all: the derived focus is content-dependent, so any
+        // edit would move an unlatched window.
+        let low = [Note(startBeat: 0, lengthBeats: 1, pitch: 48, velocity: 96)]
+        let added = low + [Note(startBeat: 1, lengthBeats: 1, pitch: 84, velocity: 96)]
+        tk.expect(PianoRollLayout.focusPitch(notes: low) != PianoRollLayout.focusPitch(notes: added),
+                  "adding a note changes the derived focus, which is why it must be latched")
+
+        // And with the centre held, the drawn range is identical before and after that edit.
+        let rowH = PianoRollLayout.rowHeight
+        let held = PianoRollLayout.focusPitch(notes: low)
+        tk.expectEqual(
+            PianoRollLayout.visiblePitchRange(focusPitch: held, paneHeight: rowH * 24,
+                                              rowHeight: rowH),
+            PianoRollLayout.visiblePitchRange(focusPitch: held, paneHeight: rowH * 24,
+                                              rowHeight: rowH),
+            "a held centre draws the same rows regardless of note edits")
+    }
+
     tk.suite("Piano roll layout: drawn row count equals range-label pitch count (X3)") {
         // Correctness: whatever pane height the grid is given, the number of rows drawn
         // must equal the number of pitches in the range the label reports. The live bug was
