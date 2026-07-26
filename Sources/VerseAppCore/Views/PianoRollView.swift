@@ -90,12 +90,17 @@ struct PianoRollEmbeddedView: View {
     /// Double-click detection on empty grid (add note).
     @State private var lastEmptyClickTime: Date?
     @State private var lastEmptyClickPoint: CGPoint?
+    /// Last measured pitch-ScrollView height. Expand and divider drag change this without
+    /// changing clipID, so centring must re-run when it moves (T3).
+    @State private var pitchViewportHeight: CGFloat = 0
 
     private static let rowHeight: CGFloat = PianoRollLayout.rowHeight
     private static let clickSlop: CGFloat = 4
     private static let doubleClickSeconds: TimeInterval = 0.4
     /// ScrollViewReader target for the pitch that should open centred in the viewport.
     private static let pitchFocusID = "pianoRollPitchFocus"
+    /// Ignore sub-point height noise from layout thrash.
+    private static let heightChangeEpsilon: CGFloat = 0.5
 
     private var clipID: UUID? { store.pianoRollClipID }
 
@@ -147,11 +152,20 @@ struct PianoRollEmbeddedView: View {
                     }
                     .onAppear {
                         isFocused = true
+                        pitchViewportHeight = geo.size.height
                         scrollPitchIntoView(proxy)
                     }
                     .onChange(of: clipID) { _, _ in
                         selectedNoteIDs = []
                         isFocused = true
+                        scrollPitchIntoView(proxy)
+                    }
+                    // Expand / divider drag change height only; clipID stays the same.
+                    .onChange(of: geo.size.height) { _, newHeight in
+                        let previous = pitchViewportHeight
+                        pitchViewportHeight = newHeight
+                        guard newHeight > 0 else { return }
+                        guard abs(newHeight - previous) > Self.heightChangeEpsilon else { return }
                         scrollPitchIntoView(proxy)
                     }
                 }
@@ -226,9 +240,15 @@ struct PianoRollEmbeddedView: View {
     }
 
     /// Centre the pitch viewport on the selected clip's notes (middle C when empty).
+    ///
+    /// Layout can settle over more than one run-loop turn (expand from collapsed, divider
+    /// drag). A single async hop is not enough: scroll while height is still 0 or mid-change
+    /// is a no-op or wrong. Yield twice so content size and the measured band height land.
     private func scrollPitchIntoView(_ proxy: ScrollViewProxy) {
-        // One turn later so the ScrollView has laid out content sizes for scrollTo.
-        DispatchQueue.main.async {
+        Task { @MainActor in
+            await Task.yield()
+            proxy.scrollTo(Self.pitchFocusID, anchor: .center)
+            await Task.yield()
             proxy.scrollTo(Self.pitchFocusID, anchor: .center)
         }
     }

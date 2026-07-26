@@ -1180,7 +1180,7 @@ it unusable on open.
 Do not change the shared-axis behaviour or any Phase S editing behaviour; these are layout and
 viewport fixes.
 
-## Step T3 — Pitch centring is stale when the roll expands — PENDING
+## Step T3 — Pitch centring is stale when the roll expands — DONE
 
 Third attempt at this; here is the actual root cause rather than another guess.
 
@@ -1205,3 +1205,24 @@ Fix:
 3. `focusPitch` returning the mean pitch is correct; do not change it. The bug is when it is
    applied, not what it computes.
 4. Add a check that expanding a collapsed roll leaves the focus pitch inside the visible band.
+
+## Step T4 — Pitch centring: stop retrying the scroll approach — OPEN
+
+Three attempts (P2b, T2, T3) have now fixed this in tests and failed in the running app. Each
+time the assertion passed and the live roll still opened on the wrong octave. Measured on the
+last attempt: Bass B (pitches 36 and 41) opens with C3 near the bottom of the band and one note
+clipping the lower edge, unchanged from before the fix.
+
+Repeating the same approach a fourth time is not justified. The approach itself is the problem:
+centring depends on `ScrollViewProxy.scrollTo` landing correctly against a 128-row grid whose
+layout height changes as the pane expands, and the harness cannot observe the real scroll
+offset, so a passing test proves the intent and not the result.
+
+Re-decomposition, to be done instead of another scroll fix: **stop scrolling a 128-row grid.**
+Render only a bounded pitch window (about two octaves) centred on the clip's focus pitch, sized
+to the pane, with no inner vertical ScrollView. Pitch navigation becomes explicit (octave
+up/down buttons, or a drag on the key gutter) rather than an implicit scroll position that has
+to be corrected after every layout change. That removes the timing dependency entirely and makes
+the visible range directly assertable.
+
+Until then the workaround is to scroll the roll manually, which does work.

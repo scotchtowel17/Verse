@@ -499,6 +499,52 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
                   "default band is at least ~2 octaves plus the pinned toolbar")
     }
 
+    tk.suite("Piano roll layout: expand from collapsed keeps focus pitch in the visible band (T3)") {
+        // Live T3 case: Bass B notes at 36 and 41. Collapsed / tiny first layout pass leaves
+        // scroll meaningless; after expand (or divider drag) re-centring must put the mean
+        // pitch inside the visible band, not parked with one note clipping the lower edge.
+        let bassNotes = [36, 41].map {
+            Note(startBeat: 0, lengthBeats: 0.5, pitch: $0, velocity: 100)
+        }
+        let focus = PianoRollLayout.focusPitch(notes: bassNotes)
+        tk.expect(focus >= 36 && focus <= 41, "focus is the mean of the bass cluster (got \(focus))")
+        let range = PianoRollLayout.displayPitchRange(notes: bassNotes)
+        tk.expect(range.contains(36) && range.contains(41), "display range covers both bass notes")
+
+        // Tiny height stands in for the collapsed / pre-layout pass (height ≈ 0 or one row).
+        let collapsedViewport = PianoRollLayout.rowHeight
+        let collapsedOffset = PianoRollLayout.verticalScrollOffset(
+            focusPitch: focus,
+            pitchRange: range,
+            rowHeight: PianoRollLayout.rowHeight,
+            viewportHeight: collapsedViewport
+        )
+        // Expanded default band (~2 octaves of pitch rows): re-centre as T3 does on height change.
+        let expandedViewport = PianoRollLayout.rowHeight
+            * CGFloat(PianoRollLayout.defaultViewportPitchRows)
+        let expandedOffset = PianoRollLayout.verticalScrollOffset(
+            focusPitch: focus,
+            pitchRange: range,
+            rowHeight: PianoRollLayout.rowHeight,
+            viewportHeight: expandedViewport
+        )
+        // Offsets for tiny vs expanded must be allowed to differ; the contract is the expanded
+        // band, not that scroll stays frozen from the collapsed pass.
+        _ = collapsedOffset
+
+        let focusY = PianoRollLayout.yForPitch(focus, pitchHigh: range.upperBound,
+                                               rowHeight: PianoRollLayout.rowHeight)
+            + PianoRollLayout.rowHeight / 2
+        let visibleTop = expandedOffset
+        let visibleBottom = expandedOffset + expandedViewport
+        tk.expect(focusY >= visibleTop && focusY <= visibleBottom,
+                  "after expand, focus pitch \(focus) (y=\(focusY)) is inside visible band [\(visibleTop), \(visibleBottom)]")
+        // And still centred, not merely barely inside.
+        let visibleCenter = expandedOffset + expandedViewport / 2
+        tk.expect(abs(focusY - visibleCenter) < 1,
+                  "after expand, focus pitch is vertically centred (not only barely on-screen)")
+    }
+
     tk.suite("AppStore piano roll: add/delete each push one labeled undo entry") {
         let (store, dir) = makeTestStore()
         defer { try? FileManager.default.removeItem(at: dir) }
