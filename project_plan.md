@@ -1375,3 +1375,35 @@ asserts pitches, velocities, approximate start beats (±0.5 beat slack vs transp
 window), phrase ordering, held-note close-out near stop beat, exactly one “Record MIDI” undo
 (stack empty after one undo), and zero capture when unarmed or when the transport is not
 running. Physical controller remains unverified. **No defects found.**
+
+## Step V3 — AI capability parity with the UI — PENDING
+
+The AI has 13 ops and is now materially behind what a user can do by hand. A person can split a
+clip, duplicate a clip, move a clip to another track, resize a clip, and delete or move
+individual notes; Claude can do none of those. `resizeClip` in particular was cut *because*
+clip length was inert, and R1 fixed that, so it has simply never been re-added.
+
+Add these ops, wired through `versePatchOps`, `TypedOp`, `RequestBuilder.capabilityOps`, the
+validator, the applier, and the preview renderer, reusing the existing `Project` helpers rather
+than writing second implementations:
+
+1. `resizeClip` — now meaningful because the transport honours `lengthBeats`. Enforce the
+   minimum clip length; reject rather than clamp.
+2. `duplicateClip` — reuse `Project.duplicateClip`, which already regenerates the clip UUID and
+   every note UUID.
+3. `splitClip` — MIDI only, at a given beat, reusing the U2 split. Reject audio clips and
+   out-of-bounds split points with the same readable reasons the UI gives.
+4. `moveClipToTrack` — enforce the same kind compatibility as the UI: a MIDI clip may only land
+   on an instrument track and audio only on audio.
+5. `deleteNote` and `moveNote` — addressing an individual note within a clip. Choose a note
+   addressing scheme consistent with the existing positional handle style (for example
+   `T2C1N3`), resolve it at validation time to a UUID exactly as clip handles are, and reject a
+   stale or mismatched reference.
+
+Requirements that do not change: validation resolves or rejects every reference before anything
+is applied, all errors are collected rather than early-returned, the whole patch remains one
+undo group, and the preview renderer describes each new op in plain English from the validated
+`TypedOp` and never from Claude's prose.
+
+Every new op needs the standard five tests: happy path, bad reference, out-of-range, undo
+restores exactly, and a multi-op patch containing one invalid op applies nothing.
