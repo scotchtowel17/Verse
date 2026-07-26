@@ -291,7 +291,7 @@ through the lane headers, the clips and the notes in the roll. Three problems, f
 
 Keep the palette, the semantic-colour separation, and every behaviour from X1 and X2.
 
-## Step X4 — On-screen keyboard keys are far too wide — PENDING
+## Step X4 — On-screen keyboard keys are far too wide — DONE
 
 Owner: "add another octave range to the piano keys below, or shorten the width. Right now it
 looks weird having them so big."
@@ -317,3 +317,30 @@ size. Make the octave count adaptive.
 5. Tests on the pure function: a narrow width yields the minimum, a wide width yields more
    octaves rather than wider keys, the resulting key width stays within a sane band across a
    range of widths, and the clamp holds at both ends.
+
+## Step X5 — X4 broke the keyboard: it renders blank — PENDING
+
+Verified live: the on-screen keyboard now draws as a flat empty bar with a single divider, no
+playable keys, at any window width.
+
+Root cause, from reading `PianoKeyboardView`: the view measures its own width with a
+`GeometryReader` inside a background that writes a `PianoKeyboardWidthKey` preference, then uses
+that measured width both to choose the octave count AND to set its own `.frame(height:)`. That
+is a layout cycle: the size depends on a value derived from the size. SwiftUI resolves it by not
+converging, so the width stays at its initial 0, `octaveCount(availableWidth: 0)` returns the
+minimum, and almost nothing is drawn.
+
+`octaveCount` itself is correct; do not change its maths.
+
+Fix the layout, not the function:
+1. Use a `GeometryReader` as the **container** for the keys and compute the octave count from
+   `geo.size.width` directly inside it. Do not route width back out through a preference.
+2. **Break the height dependency.** Derive the keyboard's height from the *target* white-key
+   width, which is a constant, not from the resulting key width. Height must not depend on
+   measured width, or the cycle returns.
+3. Guard the degenerate case explicitly: if the measured width is 0 or not yet known, draw
+   nothing rather than a misleading empty bar, and let the next layout pass fill it in.
+4. Keep everything X4 asked for: adaptive octave count, keys filling the width exactly, sensible
+   proportions, `baseOctaveC` and Z/X shift and held-note highlighting all still working.
+5. Add an assertion that a realistic width yields more than one octave, so a collapse to the
+   minimum is caught rather than merely looking wrong on screen.

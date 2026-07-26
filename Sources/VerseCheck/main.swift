@@ -27,5 +27,6 @@ runMIDIChecks(tk)
 runFuzzChecks(tk)
 runUndoRoundTripChecks(tk)
 runLayoutSelectionPropertyChecks(tk)
+runPianoKeyboardLayoutChecks(tk)
 
 tk.finish()
