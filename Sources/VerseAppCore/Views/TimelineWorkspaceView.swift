@@ -25,7 +25,7 @@ struct TimelineWorkspaceView: View {
     }
 
     private var openClip: Clip? {
-        guard let id = store.pianoRollClipID,
+        guard let id = store.effectivePianoRollClipID,
               let loc = store.project.clipLocation(id: id) else { return nil }
         let clip = store.project.tracks[loc.trackIndex].clips[loc.clipIndex]
         return clip.kind == .midi ? clip : nil
@@ -98,13 +98,30 @@ struct TimelineWorkspaceView: View {
         HStack(spacing: 8) {
             Label("Piano roll", systemImage: "rectangle.split.2x1")
                 .font(.subheadline.weight(.semibold))
-            if let clip = openClip {
-                Text(clip.name.isEmpty ? "MIDI clip" : clip.name)
+            if store.pianoRollIsAudioTrack {
+                Text(store.project.track(id: store.rollTrackID)?.name ?? "Audio")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                Text("Audio tracks don’t have notes")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            } else if let clip = openClip {
+                Text(store.project.track(id: store.rollTrackID)?.name ?? "Track")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text(clip.name.isEmpty ? "MIDI clip" : clip.name)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
             } else {
-                Text("Click a MIDI clip or the track’s roll button to edit notes")
+                Text(store.project.track(id: store.rollTrackID)?.name ?? "Track")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text("Double-click to add a note")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
@@ -471,7 +488,7 @@ struct ArrangementLanesView: View {
             ? (clip.kind == .midi ? "MIDI" : "Audio")
             : clip.name
         let selected = selectedClipIDs.contains(clip.id)
-        let openInRoll = store.pianoRollClipID == clip.id && clip.kind == .midi
+        let openInRoll = store.effectivePianoRollClipID == clip.id && clip.kind == .midi
 
         ZStack(alignment: .trailing) {
             RoundedRectangle(cornerRadius: 4)

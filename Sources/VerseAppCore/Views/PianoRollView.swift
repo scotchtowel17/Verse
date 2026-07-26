@@ -8,35 +8,46 @@ import VerseModel
 struct PianoRollChrome: View {
     @Environment(AppStore.self) private var store
 
+    private var track: Track? {
+        store.project.track(id: store.rollTrackID)
+    }
+
     private var clip: Clip? {
-        guard let id = store.pianoRollClipID,
+        guard let id = store.effectivePianoRollClipID,
               let loc = store.project.clipLocation(id: id) else { return nil }
         let c = store.project.tracks[loc.trackIndex].clips[loc.clipIndex]
         return c.kind == .midi ? c : nil
-    }
-
-    private var trackName: String {
-        guard let id = store.pianoRollClipID,
-              let loc = store.project.clipLocation(id: id) else { return "" }
-        return store.project.tracks[loc.trackIndex].name
     }
 
     var body: some View {
         HStack(spacing: 10) {
             Label("Piano roll", systemImage: "rectangle.split.2x1")
                 .font(.subheadline.weight(.semibold))
-            if let clip {
-                Text("· \(clip.name.isEmpty ? "MIDI clip" : clip.name)")
+            if let track, track.kind == .audio {
+                Text("· \(track.name)")
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                if !trackName.isEmpty {
-                    Text("on \(trackName)")
+                Text("Audio tracks don’t have notes")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            } else if let track {
+                Text("· \(track.name)")
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                if let clip {
+                    Text(clip.name.isEmpty ? "MIDI clip" : clip.name)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                } else {
+                    Text("Double-click the grid to add a note")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                 }
             } else {
-                Text("Click a MIDI clip above to edit its notes")
+                Text("Select a track to edit notes")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
@@ -49,7 +60,7 @@ struct PianoRollChrome: View {
                 Label("Collapse", systemImage: "chevron.down")
             }
             .controlSize(.small)
-            .help("Hide the piano roll (clip stays selected)")
+            .help("Hide the piano roll (track stays selected)")
         }
     }
 }
@@ -103,7 +114,7 @@ struct PianoRollEmbeddedView: View {
     private static let clickSlop: CGFloat = 4
     private static let doubleClickSeconds: TimeInterval = 0.4
 
-    private var clipID: UUID? { store.pianoRollClipID }
+    private var clipID: UUID? { store.effectivePianoRollClipID }
 
     private var clip: Clip? {
         guard let clipID else { return nil }
@@ -111,6 +122,8 @@ struct PianoRollEmbeddedView: View {
         let c = store.project.tracks[loc.trackIndex].clips[loc.clipIndex]
         return c.kind == .midi ? c : nil
     }
+
+    private var isAudioTrack: Bool { store.pianoRollIsAudioTrack }
 
     private var clipStart: Double { clip?.startBeat ?? 0 }
 
@@ -144,7 +157,8 @@ struct PianoRollEmbeddedView: View {
         // Snap toolbar stays above the pitch pane. Horizontal time scroll stays with the
         // parent workspace (shared axis). No vertical ScrollView on pitch (T4).
         VStack(alignment: .leading, spacing: 0) {
-            if clip != nil {
+            // Snap + pitch nav stay available whenever the roll can draw (instrument track).
+            if !isAudioTrack {
                 snapBar
                     .padding(.horizontal, 6)
                     .padding(.vertical, 4)
@@ -248,14 +262,17 @@ struct PianoRollEmbeddedView: View {
                 )
             }
             ZStack(alignment: .topLeading) {
-                if clip == nil {
-                    emptyClipPlaceholder(totalHeight: max(gridHeight, 80),
-                                         pitchLow: pitchLow, pitchHigh: pitchHigh)
+                if isAudioTrack {
+                    audioTrackPlaceholder(totalHeight: max(gridHeight, 80),
+                                          pitchLow: pitchLow, pitchHigh: pitchHigh)
                 } else {
                     gridLayer(rowHeight: rowHeight, totalHeight: gridHeight,
                               pitchLow: pitchLow, pitchHigh: pitchHigh)
                     // Clip span highlight under notes (arrangement-absolute).
                     clipSpanOverlay(totalHeight: gridHeight)
+                    if clip == nil {
+                        emptyInstrumentHint(totalHeight: max(gridHeight, 80))
+                    }
                     emptyGridHitTarget(rowHeight: rowHeight, totalHeight: gridHeight,
                                        pitchLow: pitchLow, pitchHigh: pitchHigh)
                     notesLayer(rowHeight: rowHeight, pitchLow: pitchLow, pitchHigh: pitchHigh)
@@ -322,7 +339,18 @@ struct PianoRollEmbeddedView: View {
         pitchNavOffset = min(127 - focusPitch, max(-focusPitch, pitchNavOffset + delta))
     }
 
-    private func emptyClipPlaceholder(
+    /// Instrument track with no MIDI clip yet: show what to do, keep the grid clickable.
+    private func emptyInstrumentHint(totalHeight: CGFloat) -> some View {
+        Text("Double-click to add a note")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .padding(12)
+            .frame(width: totalWidth, height: totalHeight)
+            .allowsHitTesting(false)
+    }
+
+    /// Audio track: plain language, no interactive note grid.
+    private func audioTrackPlaceholder(
         totalHeight: CGFloat,
         pitchLow: Int,
         pitchHigh: Int
@@ -330,10 +358,12 @@ struct PianoRollEmbeddedView: View {
         ZStack {
             gridLayer(rowHeight: Self.rowHeight, totalHeight: totalHeight,
                       pitchLow: pitchLow, pitchHigh: pitchHigh)
-            Text("Click a MIDI clip in the arrangement to edit notes here")
+                .opacity(0.35)
+            Text("Audio tracks don’t have notes. Select an instrument track to draw MIDI.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-                .padding(12)
+                .multilineTextAlignment(.center)
+                .padding(16)
         }
         .frame(width: totalWidth, height: totalHeight)
         .allowsHitTesting(false)
@@ -1068,5 +1098,49 @@ public enum PianoRollSelection {
             result.append((pitch: p, startBeat: s))
         }
         return result
+    }
+
+    // MARK: Track-first clip resolution (W1)
+
+    /// Which MIDI clip the roll edits when the user has not selected one explicitly.
+    /// Order: clip under the playhead, else nearest earlier (latest start at or before the
+    /// playhead), else the first MIDI clip in track order. Nil when the track has none.
+    public static func resolvedMIDIClip(
+        clips: [Clip],
+        playheadBeat: Double
+    ) -> Clip? {
+        let midi = clips.filter { $0.kind == .midi }
+        guard !midi.isEmpty else { return nil }
+        if midi.count == 1 { return midi[0] }
+        if let under = midi.first(where: {
+            playheadBeat >= $0.startBeat && playheadBeat < $0.startBeat + $0.lengthBeats
+        }) {
+            return under
+        }
+        let earlier = midi.filter { $0.startBeat <= playheadBeat }
+        if let nearest = earlier.max(by: { $0.startBeat < $1.startBeat }) {
+            return nearest
+        }
+        return midi.first
+    }
+
+    /// Placement for a MIDI clip created on demand when the user draws a note on a track
+    /// that has none. Clip is bar-aligned to contain the note; length is at least
+    /// `minimumBars` bars and long enough to cover the note.
+    public static func onDemandClipPlacement(
+        absoluteNoteStart: Double,
+        noteLengthBeats: Double,
+        beatsPerBar: Int,
+        minimumBars: Int = 4
+    ) -> (clipStart: Double, clipLength: Double, localNoteStart: Double) {
+        let bpb = max(1, beatsPerBar)
+        let absStart = max(0, absoluteNoteStart)
+        let clipStart = floor(absStart / Double(bpb)) * Double(bpb)
+        let localStart = absStart - clipStart
+        let noteEndLocal = localStart + max(noteLengthBeats, 0)
+        let minLength = Double(bpb * max(1, minimumBars))
+        let barsCoveringNote = ceil(noteEndLocal / Double(bpb)) * Double(bpb)
+        let clipLength = max(minLength, barsCoveringNote)
+        return (clipStart, clipLength, localStart)
     }
 }
