@@ -167,6 +167,7 @@ public final class AppStore {
     // MARK: - Engine lifecycle
 
     public func startEngineIfNeeded() {
+        // Re-entrancy: engine is already up. Deliberate silent no-op.
         guard !started else { return }
         engine.configure(with: project)
         do { try engine.start(); started = true }
@@ -290,6 +291,7 @@ public final class AppStore {
     /// Snapshot undo once at the start of a continuous gesture (drag move / drag resize).
     /// Mutate freely until `endPianoRollGesture()`. Do NOT call on every drag update.
     public func beginPianoRollGesture(name: String) {
+        // Double-begin guard: keep the first undo snapshot for the whole drag.
         guard !pianoRollGestureActive else { return }
         history.record(project, name: name)
         pianoRollGestureActive = true
@@ -297,6 +299,7 @@ public final class AppStore {
 
     /// End a continuous gesture: clear the active flag and autosave once.
     public func endPianoRollGesture() {
+        // End without begin: nothing was snapshotted; no autosave needed.
         guard pianoRollGestureActive else { return }
         pianoRollGestureActive = false
         recovery.autosave(project)
@@ -306,6 +309,7 @@ public final class AppStore {
     @discardableResult
     public func pianoRollAddNote(pitch: Int, startBeat: Double, lengthBeats: Double,
                                  velocity: Int = 100) -> UUID? {
+        // Should be impossible while the roll is open: the view only draws when a clip is set.
         guard let clipID = pianoRollClipID else { return nil }
         var working = project
         let noteID: UUID
@@ -333,6 +337,7 @@ public final class AppStore {
     /// Discrete multi-delete: one undo entry for the whole selection (never per note).
     /// Default label is "Delete Note" for one id and "Delete Notes" for several.
     public func pianoRollDeleteNotes(ids: [UUID], undoName: String? = nil) {
+        // Empty selection or no open clip: nothing was asked for (or roll already closed).
         guard let clipID = pianoRollClipID, !ids.isEmpty else { return }
         var working = project
         var deleted = 0
@@ -344,6 +349,8 @@ public final class AppStore {
                 // Missing notes are skipped; others still delete.
             }
         }
+        // Should be impossible from a live selection: all ids already gone (stale selection).
+        // No undo, no status spam.
         guard deleted > 0 else { return }
         let name = undoName ?? (deleted == 1 ? "Delete Note" : "Delete Notes")
         history.record(project, name: name)
@@ -358,6 +365,7 @@ public final class AppStore {
     public func pianoRollPasteNotes(
         _ specs: [(pitch: Int, startBeat: Double, lengthBeats: Double, velocity: Int)]
     ) -> [UUID] {
+        // Empty clipboard paste or roll closed: nothing to apply.
         guard let clipID = pianoRollClipID, !specs.isEmpty else { return [] }
         var working = project
         var ids: [UUID] = []
@@ -392,6 +400,7 @@ public final class AppStore {
     /// Continuous multi-note move. All notes move or none do (formation preserved). Caller
     /// must begin a piano-roll gesture first. One undo entry covers the whole gesture.
     public func pianoRollMoveNotes(_ moves: [(id: UUID, toPitch: Int, toStartBeat: Double)]) {
+        // No active gesture or empty move list: refuse silent undo-less mutation.
         guard pianoRollGestureActive, let clipID = pianoRollClipID, !moves.isEmpty else { return }
         var working = project
         do {
@@ -402,23 +411,27 @@ public final class AppStore {
             project = working
         } catch {
             // Out-of-range mid-drag: reject the whole update so the selection never splits.
+            // High-frequency during drag; status would spam. Next in-range sample recovers.
         }
     }
 
     /// Continuous resize update. Caller must `beginPianoRollGesture(name: "Resize Note")` first.
     /// No-ops if no gesture is active so a missed begin cannot mutate without undo.
     public func pianoRollResizeNote(id noteID: UUID, toLengthBeats lengthBeats: Double) {
+        // No active gesture: refuse silent undo-less mutation.
         guard pianoRollGestureActive, let clipID = pianoRollClipID else { return }
         do {
             try project.resizeNote(id: noteID, inClip: clipID, toLengthBeats: lengthBeats)
         } catch {
             // Zero/negative length mid-drag is floored by the model when still positive;
-            // true rejects are ignored so the drag can recover.
+            // true rejects are ignored so the drag can recover. High-frequency path.
         }
     }
 
     /// Audition a pitch on the roll’s track. Replaces any previous roll audition note.
     public func pianoRollAuditionStart(_ pitch: Int) {
+        // `activeTrackID` is always set; the Optional wrapping is only for `??` with the
+        // optional roll track. The else branch is unreachable.
         guard let tid = pianoRollTrackID ?? Optional(activeTrackID) else { return }
         if let prev = pianoRollAuditionPitch, prev != pitch {
             engine.noteOff(prev, trackID: tid)
@@ -429,6 +442,7 @@ public final class AppStore {
 
     /// Silence the roll’s audition note, if any.
     public func pianoRollAuditionStop() {
+        // Nothing sounding from the roll: nothing to stop.
         guard let pitch = pianoRollAuditionPitch else { return }
         let tid = pianoRollTrackID ?? activeTrackID
         engine.noteOff(pitch, trackID: tid)
@@ -441,6 +455,7 @@ public final class AppStore {
     /// drag resize). Mutate freely until `endArrangementGesture()`. Do NOT call on every
     /// drag update.
     public func beginArrangementGesture(name: String) {
+        // Double-begin guard: keep the first undo snapshot for the whole drag.
         guard !arrangementGestureActive else { return }
         history.record(project, name: name)
         arrangementGestureActive = true
@@ -448,6 +463,7 @@ public final class AppStore {
 
     /// End a continuous arrangement gesture: clear the active flag and autosave once.
     public func endArrangementGesture() {
+        // End without begin: nothing was snapshotted.
         guard arrangementGestureActive else { return }
         arrangementGestureActive = false
         recovery.autosave(project)
@@ -456,11 +472,13 @@ public final class AppStore {
     /// Continuous clip-move update. Caller must `beginArrangementGesture(name: "Move Clip")`
     /// first. Does not record undo and does not autosave. No-ops if no gesture is active.
     public func arrangementMoveClip(id clipID: UUID, toStartBeat startBeat: Double) {
+        // Missed begin: refuse silent undo-less mutation.
         guard arrangementGestureActive else { return }
         do {
             try project.moveClip(id: clipID, toStartBeat: startBeat)
         } catch {
             // Negative start mid-drag is expected when the pointer leaves the grid; ignore.
+            // High-frequency path; no status spam.
         }
     }
 
@@ -470,6 +488,7 @@ public final class AppStore {
     public func arrangementMoveClips(
         _ placements: [(id: UUID, startBeat: Double, trackIndex: Int)]
     ) {
+        // Missed begin or empty list: nothing to apply without an undo group.
         guard arrangementGestureActive, !placements.isEmpty else { return }
         var working = project
         // Snapshot clips first so removals do not lose payload when re-homing to new tracks.
@@ -522,18 +541,20 @@ public final class AppStore {
     /// Continuous clip-resize update. Caller must
     /// `beginArrangementGesture(name: "Resize Clip")` first. No-ops if no gesture is active.
     public func arrangementResizeClip(id clipID: UUID, toLengthBeats lengthBeats: Double) {
+        // Missed begin: refuse silent undo-less mutation.
         guard arrangementGestureActive else { return }
         do {
             try project.resizeClip(id: clipID, toLengthBeats: lengthBeats)
         } catch {
             // Zero/negative length mid-drag is floored by the model when still positive;
-            // true rejects are ignored so the drag can recover.
+            // true rejects are ignored so the drag can recover. High-frequency path.
         }
     }
 
     /// Discrete multi-delete of arrangement clips. One undo entry for the whole selection
     /// (never per clip). Default label is "Delete Clip(s)".
     public func arrangementDeleteClips(ids: [UUID], undoName: String? = nil) {
+        // Empty selection: nothing was asked for.
         guard !ids.isEmpty else { return }
         var working = project
         var deleted = 0
@@ -545,6 +566,7 @@ public final class AppStore {
                 // Missing clips are skipped; others still delete.
             }
         }
+        // Should be impossible from a live selection: all ids already gone (stale selection).
         guard deleted > 0 else { return }
         let name = undoName ?? (deleted == 1 ? "Delete Clip" : "Delete Clips")
         history.record(project, name: name)
@@ -591,6 +613,7 @@ public final class AppStore {
     public func arrangementPasteClips(
         _ specs: [(clip: Clip, startBeat: Double, trackIndex: Int)]
     ) -> [UUID] {
+        // Empty clipboard paste: nothing was asked for.
         guard !specs.isEmpty else { return [] }
         var working = project
         var ids: [UUID] = []
@@ -624,10 +647,13 @@ public final class AppStore {
     /// Play a note on the active instrument track. Velocity defaults match the on-screen
     /// keyboard; MIDI input passes the controller velocity through.
     func noteOn(_ pitch: Int, velocity: Int = 96) {
+        // Already held (repeat note-on / stuck key spam): avoid double engine note-ons.
+        // High-frequency path; no status.
         guard heldNotes.insert(pitch).inserted else { return }
         engine.noteOn(pitch, velocity: velocity, trackID: activeTrackID)
     }
     func noteOff(_ pitch: Int) {
+        // Note was not held: duplicate off or never-on. High-frequency; silent.
         guard heldNotes.remove(pitch) != nil else { return }
         engine.noteOff(pitch, trackID: activeTrackID)
     }
@@ -703,6 +729,7 @@ public final class AppStore {
 
     /// Ensure a capture session exists for the active instrument while record is armed.
     private func ensureMIDICaptureSession() {
+        // Not armed, or active track is not an instrument: capture is not applicable.
         guard isRecording else { return }
         guard let track = project.track(id: activeTrackID), track.kind == .instrument else {
             return
@@ -715,9 +742,12 @@ public final class AppStore {
     }
 
     private func captureMIDINoteOn(pitch: Int, velocity: Int) {
+        // High-frequency MIDI path: only land notes while armed + playing + instrument.
         guard isCapturingMIDI else { return }
         ensureMIDICaptureSession()
+        // Should be impossible after ensureMIDICaptureSession on an instrument track.
         guard var session = midiCapture else { return }
+        // Transport beat can lag a tick at stop boundaries; skip rather than invent time.
         guard let beat = transport.currentBeat else { return }
         session.lastBeat = beat
         // Re-trigger: close any prior open note on this pitch at this beat, then open again.
@@ -733,6 +763,7 @@ public final class AppStore {
     }
 
     private func captureMIDINoteOff(pitch: Int) {
+        // Not armed / no session, or off for a pitch never opened: high-frequency no-ops.
         guard isRecording, var session = midiCapture else { return }
         guard let prior = session.open.removeValue(forKey: pitch) else { return }
         let beat = transport.currentBeat ?? session.lastBeat
@@ -747,6 +778,7 @@ public final class AppStore {
 
     /// Close every still-held capture note at `beat` (recording or playback stop).
     private func closeOpenMIDINotes(at beat: Double) {
+        // No pending take: nothing to close.
         guard var session = midiCapture else { return }
         session.lastBeat = beat
         for (pitch, prior) in session.open {
@@ -762,6 +794,7 @@ public final class AppStore {
 
     /// Transport stop hook: finish open capture notes at the playhead without committing.
     func endOpenMIDICaptureNotesAtPlayhead() {
+        // Pause/stop while not armed, or no session yet: nothing to close.
         guard isRecording, let session = midiCapture else { return }
         let beat = transport.currentBeat ?? session.lastBeat
         closeOpenMIDINotes(at: beat)
@@ -772,11 +805,21 @@ public final class AppStore {
     private func commitMIDICapture() {
         let stopBeat = transport.currentBeat ?? midiCapture?.lastBeat ?? 0
         closeOpenMIDINotes(at: stopBeat)
+        // No session: record was never armed for MIDI (or already committed).
         guard let session = midiCapture else { return }
         midiCapture = nil
+        // Empty take (armed but no notes): deliberate no-op, no undo, no status noise.
         guard !session.completed.isEmpty else { return }
-        guard let ti = project.trackIndex(id: session.trackID) else { return }
-        guard project.tracks[ti].kind == .instrument else { return }
+        // User recorded notes: if the capture track is gone or no longer an instrument,
+        // that is a real failure and must not look like a successful stop.
+        guard let ti = project.trackIndex(id: session.trackID) else {
+            statusMessage = "Couldn’t save the MIDI take — that track is gone."
+            return
+        }
+        guard project.tracks[ti].kind == .instrument else {
+            statusMessage = "Couldn’t save the MIDI take — that track is no longer an instrument."
+            return
+        }
 
         history.record(project, name: "Record MIDI")
 
@@ -815,7 +858,10 @@ public final class AppStore {
 
     public func selectPreset(_ preset: SoundBank.Preset, for id: UUID? = nil) {
         let tid = id ?? activeTrackID
-        guard let idx = project.trackIndex(id: tid) else { return }
+        guard let idx = project.trackIndex(id: tid) else {
+            statusMessage = "That track isn’t in this project."
+            return
+        }
         history.record(project, name: "Select Preset")
         let inst = Instrument(sf2: SoundBank.preferredBankName,
                               program: preset.program, bankMSB: preset.bankMSB, bankLSB: preset.bankLSB)
@@ -835,12 +881,15 @@ public final class AppStore {
 
     /// Picker identity for a track's instrument (program + bank), independent of track.name.
     public func presetSelectionKey(for track: Track) -> String {
+        // Audio tracks (and any instrument without a bank) have no picker key.
         guard let inst = track.instrument else { return "" }
         return SoundBank.selectionKey(for: inst)
     }
 
     /// Apply a picker selection key by matching a curated preset. Unknown keys are ignored.
     public func selectPreset(selectionKey key: String, for id: UUID) {
+        // Off-list / custom keys appear in the picker so the current choice stays visible;
+        // re-selecting them is a deliberate no-op (not a curated preset change).
         guard let preset = presets.first(where: { $0.selectionKey == key }) else { return }
         selectPreset(preset, for: id)
     }
@@ -857,12 +906,18 @@ public final class AppStore {
 
     public func toggleRecording() {
         // Copilot preview sheet does not disable menu/keyboard shortcuts on its own.
-        guard !copilotPreviewBlocksTransport else { return }
+        guard !copilotPreviewBlocksTransport else {
+            statusMessage = "Finish or cancel the Claude preview before recording."
+            return
+        }
         isRecording ? stopRecording() : startRecording()
     }
 
     public func startRecording() {
-        guard !copilotPreviewBlocksTransport else { return }
+        guard !copilotPreviewBlocksTransport else {
+            statusMessage = "Finish or cancel the Claude preview before recording."
+            return
+        }
         recordError = nil
         // Audio take path (mic → CAF). May fail without a microphone; instrument tracks can
         // still arm for MIDI capture (Phase M3) without audio input.
@@ -935,6 +990,7 @@ public final class AppStore {
     }
 
     func durationOf(_ url: URL) -> Double {
+        // Unreadable or zero-rate file: callers treat 0 as “unknown / empty take length”.
         guard let f = try? AVAudioFile(forReading: url), f.fileFormat.sampleRate > 0 else { return 0 }
         return Double(f.length) / f.fileFormat.sampleRate
     }
@@ -943,6 +999,7 @@ public final class AppStore {
         takes.removeAll()
         for track in project.tracks where track.kind == .audio {
             for clip in track.clips {
+                // MIDI-only or media-less audio rows: skip, not an error.
                 guard let name = clip.mediaFile else { continue }
                 let url = workingMediaDir.appendingPathComponent(name)
                 if FileManager.default.fileExists(atPath: url.path) {
@@ -960,6 +1017,7 @@ public final class AppStore {
     public var redoName: String? { history.redoName }
 
     public func undo() {
+        // Empty stack: menus/shortcuts are disabled via `canUndo`; silent is standard.
         guard let prev = history.undo(current: project) else { return }
         project = prev
         syncEngineToProject()
@@ -967,6 +1025,7 @@ public final class AppStore {
     }
 
     public func redo() {
+        // Empty stack: same as undo; silent when nothing to redo.
         guard let next = history.redo(current: project) else { return }
         project = next
         syncEngineToProject()

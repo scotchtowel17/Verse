@@ -2,6 +2,7 @@ import Foundation
 import VerseModel
 import VerseEngine
 import VersePersistence
+import VerseAI
 import VerseAppCore
 
 /// AppStore undo-contract checks (Steps 3 and 6). Requires VerseAppCore so the app target
@@ -1658,5 +1659,152 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
                        "collapse hides the pane but keeps the selected clip")
         store.showPianoRoll = true
         tk.expectEqual(store.pianoRollClipID, clip.id, "re-expand shows the same clip")
+    }
+
+    // MARK: - Step V4: silent no-op audit (swallows must surface status)
+
+    tk.suite("AppStore V4: delete last track refuses with status, no undo") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        tk.expectEqual(store.project.tracks.count, 1, "fresh project has one track")
+        let onlyID = store.project.tracks[0].id
+        store.statusMessage = nil
+        store.deleteTrack(onlyID)
+        tk.expectEqual(store.project.tracks.count, 1, "last track still present")
+        tk.expectEqual(store.project.tracks[0].id, onlyID, "same track id kept")
+        tk.expect(!store.canUndo, "refused delete records no undo")
+        let msg = store.statusMessage
+        tk.expect(msg != nil, "last-track refuse sets status")
+        tk.expect(
+            msg!.localizedCaseInsensitiveContains("at least one")
+                || msg!.localizedCaseInsensitiveContains("one track"),
+            "status names the one-track rule")
+    }
+
+    tk.suite("AppStore V4: delete missing track refuses with status, no empty undo") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.addInstrumentTrack()
+        tk.expect(store.project.tracks.count > 1, "more than one track so count guard passes")
+        let depth = undoDepth(of: store)
+        store.statusMessage = nil
+        store.deleteTrack(UUID())
+        // Capture before undoDepth: that helper undoes/redoes and rewrites statusMessage.
+        let missingMsg = store.statusMessage
+        tk.expectEqual(store.project.tracks.count, 2, "no track removed for unknown id")
+        tk.expectEqual(undoDepth(of: store), depth, "missing-track refuse records no undo")
+        tk.expect(missingMsg != nil, "missing track sets status")
+        // Match substance, not a specific apostrophe glyph (curly vs ASCII).
+        tk.expect(
+            (missingMsg ?? "").localizedCaseInsensitiveContains("track")
+                && (missingMsg ?? "").localizedCaseInsensitiveContains("project"),
+            "status names the missing track (got: \(missingMsg ?? "nil"))")
+    }
+
+    tk.suite("AppStore V4: selectPreset on missing track sets status") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        guard let preset = SoundBank.presets.first else {
+            tk.expect(false, "SoundBank has at least one preset")
+            return
+        }
+        store.statusMessage = nil
+        store.selectPreset(preset, for: UUID())
+        tk.expect(!store.canUndo, "missing-track preset records no undo")
+        let presetMsg = store.statusMessage
+        tk.expect(presetMsg != nil, "missing track preset sets status")
+        tk.expect(
+            (presetMsg ?? "").localizedCaseInsensitiveContains("track")
+                && (presetMsg ?? "").localizedCaseInsensitiveContains("project"),
+            "status names the missing track (got: \(presetMsg ?? "nil"))")
+    }
+
+    tk.suite("AppStore V4: transport and record refuse during copilot preview") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.startEngineIfNeeded()
+        // Minimal valid preview state: sheet up with a non-nil pending prep.
+        let fp = store.project.structuralFingerprint
+        let reply = "{\"versePatch\":{\"schema\":\"verse-patch\",\"version\":1," +
+            "\"fingerprint\":\"\(fp)\"," +
+            "\"ops\":[{\"op\":\"setTempo\",\"bpm\":128}]}}"
+        switch Copilot.preview(reply: reply, project: store.project) {
+        case .success(let p):
+            store.pendingCopilotPreview = p
+            store.showCopilotPreview = true
+        case .failure(let outcome):
+            tk.expect(false, "preview should succeed for setTempo (\(outcome.userMessage))")
+            return
+        }
+        tk.expect(store.showCopilotPreview && store.pendingCopilotPreview != nil,
+                  "preview blocks transport")
+
+        store.statusMessage = nil
+        store.startPlayback()
+        tk.expect(!store.isPlaying, "play refused while preview open")
+        let playMsg = store.statusMessage
+        tk.expect(playMsg != nil, "blocked play sets status")
+        tk.expect(playMsg!.localizedCaseInsensitiveContains("preview"),
+                  "play status names the preview")
+
+        store.statusMessage = nil
+        store.startRecording()
+        tk.expect(!store.isRecording, "record refused while preview open")
+        let recMsg = store.statusMessage
+        tk.expect(recMsg != nil, "blocked record sets status")
+        tk.expect(recMsg!.localizedCaseInsensitiveContains("preview"),
+                  "record status names the preview")
+
+        store.pendingCopilotPreview = nil
+        store.showCopilotPreview = false
+    }
+
+    tk.suite("AppStore V4: MIDI commit surfaces when capture track is gone") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.startEngineIfNeeded()
+        // Need a second track so deleteTrack is allowed after arming capture on the first.
+        store.addInstrumentTrack()
+        let captureID = store.project.tracks[0].id
+        store.activeTrackID = captureID
+
+        store.startRecording()
+        tk.expect(store.isRecording, "armed for capture")
+        store.startPlayback()
+        tk.expect(store.isPlaying, "playing during capture")
+        _ = waitUntilAppStore(timeout: 1.0) { (store.playbackBeat ?? 0) > 0.05 }
+
+        store.handleMIDIEvents([.noteOn(channel: 0, note: 60, velocity: 100)])
+        let onBeat = store.playbackBeat ?? 0
+        _ = waitUntilAppStore(timeout: 2.0) { (store.playbackBeat ?? 0) >= onBeat + 0.3 }
+        store.handleMIDIEvents([.noteOff(channel: 0, note: 60, velocity: 0)])
+
+        // Delete the capture track while the take still has notes pending.
+        store.deleteTrack(captureID)
+        tk.expect(store.project.track(id: captureID) == nil, "capture track removed")
+
+        store.statusMessage = nil
+        store.stopRecording()
+        store.stopPlayback()
+        store.panic()
+
+        let msg = store.statusMessage
+        tk.expect(msg != nil, "lost capture track sets status")
+        tk.expect(
+            msg!.localizedCaseInsensitiveContains("track is gone")
+                || msg!.localizedCaseInsensitiveContains("couldn’t save")
+                || msg!.localizedCaseInsensitiveContains("couldn't save"),
+            "status explains the MIDI take was not saved")
+        // No "Record MIDI" undo: commit refused rather than inventing a home for the notes.
+        tk.expect(store.undoName != "Record MIDI", "refused commit does not push Record MIDI")
+        for t in store.project.tracks {
+            let notes = t.clips.flatMap { $0.midiNotes ?? [] }
+            tk.expect(notes.isEmpty, "no silent note dump onto remaining tracks")
+        }
     }
 }

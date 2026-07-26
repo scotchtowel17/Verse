@@ -38,6 +38,7 @@ extension AppStore {
 
     /// User confirmed the rendered ops. Re-checks fingerprint, then applies as one undo group.
     public func commitCopilotPreview() {
+        // Sheet dismiss race / double-apply: no pending preview means nothing to commit.
         guard let prep = pendingCopilotPreview else {
             showCopilotPreview = false
             return
@@ -48,6 +49,7 @@ extension AppStore {
 
         var working = project
         let outcome = Copilot.commit(prep, to: &working)
+        // Failure already sets a plain-language `userMessage`; do not also mutate the project.
         copilotMessage = outcome.userMessage
         guard outcome.status == .applied else { return }
         history.record(project, name: "Apply Claude Patch")  // one undo group for the whole patch
