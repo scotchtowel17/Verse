@@ -25,7 +25,6 @@ public struct ContentView: View {
             keyboardHint
             PianoKeyboardView(
                 baseC: store.baseOctaveC,
-                octaves: 2,
                 held: store.heldNotes,
                 noteOn: { store.noteOn($0) },
                 noteOff: { store.noteOff($0) }

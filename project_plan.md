@@ -290,3 +290,57 @@ through the lane headers, the clips and the notes in the roll. Three problems, f
    honest; right now nothing looks available.
 
 Keep the palette, the semantic-colour separation, and every behaviour from X1 and X2.
+
+## Step X4 — On-screen keyboard keys are far too wide — DONE
+
+Owner: "add another octave range to the piano keys below, or shorten the width. Right now it
+looks weird having them so big."
+
+`ContentView` passes `octaves: 2` as a hard-coded constant and `PianoKeyboardView` divides the
+full window width by 15 white keys. At the window sizes actually in use that is roughly 90pt per
+white key, several times the proportions of a real keyboard, which is why it looks wrong.
+
+Do not simply swap 2 for a larger constant: that just moves the problem to a different window
+size. Make the octave count adaptive.
+
+1. Add a pure, testable function that picks the octave count from the available width and a
+   target white-key width (about 26pt reads correctly on screen; a real white key is around
+   23mm). Clamp to a sensible range, roughly 1 to 7 octaves, so a very narrow window still shows
+   something playable and a very wide one does not become absurd.
+2. The keys then fill the available width exactly with that octave count, so the resulting key
+   width lands near the target without leaving a gap or stretching.
+3. Keep the keyboard's height proportionate to the new key width; very wide, very short keys are
+   part of what looks wrong today. Black keys keep their usual proportion of white-key width and
+   height.
+4. `baseOctaveC` and the Z/X octave shift must keep working, and the held-note highlighting from
+   both the mouse and MIDI must keep working across the new range.
+5. Tests on the pure function: a narrow width yields the minimum, a wide width yields more
+   octaves rather than wider keys, the resulting key width stays within a sane band across a
+   range of widths, and the clamp holds at both ends.
+
+## Step X5 — X4 broke the keyboard: it renders blank — DONE
+
+Verified live: the on-screen keyboard now draws as a flat empty bar with a single divider, no
+playable keys, at any window width.
+
+Root cause, from reading `PianoKeyboardView`: the view measures its own width with a
+`GeometryReader` inside a background that writes a `PianoKeyboardWidthKey` preference, then uses
+that measured width both to choose the octave count AND to set its own `.frame(height:)`. That
+is a layout cycle: the size depends on a value derived from the size. SwiftUI resolves it by not
+converging, so the width stays at its initial 0, `octaveCount(availableWidth: 0)` returns the
+minimum, and almost nothing is drawn.
+
+`octaveCount` itself is correct; do not change its maths.
+
+Fix the layout, not the function:
+1. Use a `GeometryReader` as the **container** for the keys and compute the octave count from
+   `geo.size.width` directly inside it. Do not route width back out through a preference.
+2. **Break the height dependency.** Derive the keyboard's height from the *target* white-key
+   width, which is a constant, not from the resulting key width. Height must not depend on
+   measured width, or the cycle returns.
+3. Guard the degenerate case explicitly: if the measured width is 0 or not yet known, draw
+   nothing rather than a misleading empty bar, and let the next layout pass fill it in.
+4. Keep everything X4 asked for: adaptive octave count, keys filling the width exactly, sensible
+   proportions, `baseOctaveC` and Z/X shift and held-note highlighting all still working.
+5. Add an assertion that a realistic width yields more than one octave, so a collapse to the
+   minimum is caught rather than merely looking wrong on screen.
