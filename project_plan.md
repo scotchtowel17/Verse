@@ -1113,3 +1113,116 @@ Three related changes to the roll's interaction model.
    Never per-note and never per drag update.
 
 Selection state is view-local; do not put it in the persisted model. No schema change.
+
+---
+
+# Phase T — Piano roll becomes an inline pane, aligned to the arrangement
+
+Owner: "I need to be able to see the other tracks and where they line up when I'm using the
+piano roll, and I don't think the piano roll should be like a separate pop-out window. It
+should just be like an interface change."
+
+The roll is currently a modal `.sheet`. That is the wrong shape: it hides the arrangement, so
+you cannot see how the notes you are editing line up against the other tracks' clips, and it
+makes the main transport unreachable (which is why S1 had to duplicate transport controls into
+the roll).
+
+## Step T1 — Inline, aligned piano roll — DONE
+
+1. **Remove the sheet.** The piano roll becomes a pane inside the main window, below the
+   arrangement, with the Tracks list and Arrangement still visible above it. No modal
+   presentation, no Done button dismissing a sheet. A collapse/expand control is fine.
+2. **Shared time axis. This is the point of the whole change.** The roll and the arrangement
+   must use the same beats-per-point scale and the same horizontal scroll offset, so a note at
+   beat 8 in the roll sits directly under whatever is at beat 8 in the arrangement lanes.
+   Scrolling one scrolls the other. Factor the beat-to-x mapping into one shared source of truth
+   rather than duplicating it in two views.
+3. **One ruler, one playhead.** A single beat ruler serves both, and the playhead is a single
+   vertical line that reads continuously from the arrangement lanes down through the roll grid.
+   Clicking or dragging the ruler scrubs, as it does today.
+4. **Selecting a clip in the arrangement loads it into the roll below.** A single click on a MIDI
+   clip selects it and shows its notes; the roll header names the clip and track. With no clip
+   selected the roll shows an empty grid and says what to do.
+5. **The roll's duplicated transport buttons can go**, since the main transport bar is now
+   reachable. Keep ruler scrubbing and keep Space for play/pause. Do not lose pause-holds-position
+   or rewind.
+6. **Preserve every Phase S editing behaviour exactly**: double-click to add, marquee select,
+   shift-click toggle, whole-selection move preserving formation, Cmd-C/X/V with paste at the
+   playhead, Delete removes the selection, and one undo entry per completed gesture.
+7. **Vertical space is now tight** with three stacked sections. The Tracks list already collapsed
+   to nothing once at the default window size. Give each section a sensible minimum, make the
+   roll collapsible, and let the user drag the divider between arrangement and roll. It must be
+   usable at the default window size, not only full screen.
+8. The clip's own note area still scrolls vertically by pitch, independently of the shared
+   horizontal axis.
+
+No schema change. Selection stays view-local.
+
+## Step T2 — Inline roll opens unusable (found by running it) — DONE
+
+The core of T1 works and was verified live: the roll is inline, the arrangement stays visible
+above it, the shared beat axis lines up (a clip at bars 3-5 has its notes directly beneath it),
+the clip's active region is shaded in the roll, and one playhead spans both. Two problems make
+it unusable on open.
+
+1. **The roll does not centre vertically on the selected clip's notes.** Opening the Lead clip
+   (4 notes at pitches 72-76) shows an EMPTY grid parked around C6 while the header says
+   "4 notes". This is the same defect fixed once already in P2b, reintroduced when the roll
+   became inline. Centre the pitch viewport on the clip's notes when a clip is selected, falling
+   back to middle C for an empty clip.
+2. **The default roll height is far too short**: roughly seven pitch rows, which is not enough to
+   edit anything. Give the expanded roll a sensible default height (enough for about two octaves)
+   while still respecting the minimums for the Tracks list and Arrangement above it. Dragging the
+   divider taller works and should be kept.
+3. **The roll's own toolbar row (Snap control and note count) disappears** once the divider is
+   dragged to enlarge the grid. It must stay pinned and visible at every pane height.
+
+Do not change the shared-axis behaviour or any Phase S editing behaviour; these are layout and
+viewport fixes.
+
+## Step T3 — Pitch centring is stale when the roll expands — DONE
+
+Third attempt at this; here is the actual root cause rather than another guess.
+
+`PianoRollView` centres the pitch viewport by calling `proxy.scrollTo(pitchFocusID,
+anchor: .center)` from exactly two triggers: `.onAppear` and `.onChange(of: clipID)`.
+
+Neither fires in the common case. The inline roll starts collapsed, so `.onAppear` runs while
+the pane has little or no height and the scroll is meaningless. When the user then expands the
+pane, or drags the divider, the height changes but `clipID` has not, so nothing re-centres.
+Selecting the clip that is already loaded likewise does not change `clipID`. The result is a
+grid parked on the wrong octave while the header correctly reports the note count.
+
+Verified live: Bass B (notes at pitch 36 and 41) opened showing C3 at the bottom with only one
+note clipping the lower edge.
+
+Fix:
+1. Re-centre whenever the pitch viewport's available height changes, not only on appear and on
+   clip change. A `GeometryReader` height change or an `.onChange` on the measured height is
+   fine; the point is that expanding the pane or dragging the divider must re-centre.
+2. Make the centring robust to layout timing rather than relying on a single
+   `DispatchQueue.main.async` hop.
+3. `focusPitch` returning the mean pitch is correct; do not change it. The bug is when it is
+   applied, not what it computes.
+4. Add a check that expanding a collapsed roll leaves the focus pitch inside the visible band.
+
+## Step T4 — Pitch centring: stop retrying the scroll approach — OPEN
+
+Three attempts (P2b, T2, T3) have now fixed this in tests and failed in the running app. Each
+time the assertion passed and the live roll still opened on the wrong octave. Measured on the
+last attempt: Bass B (pitches 36 and 41) opens with C3 near the bottom of the band and one note
+clipping the lower edge, unchanged from before the fix.
+
+Repeating the same approach a fourth time is not justified. The approach itself is the problem:
+centring depends on `ScrollViewProxy.scrollTo` landing correctly against a 128-row grid whose
+layout height changes as the pane expands, and the harness cannot observe the real scroll
+offset, so a passing test proves the intent and not the result.
+
+Re-decomposition, to be done instead of another scroll fix: **stop scrolling a 128-row grid.**
+Render only a bounded pitch window (about two octaves) centred on the clip's focus pitch, sized
+to the pane, with no inner vertical ScrollView. Pitch navigation becomes explicit (octave
+up/down buttons, or a drag on the key gutter) rather than an implicit scroll position that has
+to be corrected after every layout change. That removes the timing dependency entirely and makes
+the visible range directly assertable.
+
+Until then the workaround is to scroll the roll manually, which does work.

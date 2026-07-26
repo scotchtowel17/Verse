@@ -453,6 +453,98 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
                   "empty clip still shows ~3 octaves")
     }
 
+    tk.suite("Piano roll layout: open centres vertically on the clip's notes (T2 / P2b)") {
+        // Lead-style clip: four notes at 72–76. Opening must focus near that cluster, not C6
+        // (the top of a short viewport when scroll stays at offset 0).
+        let leadNotes = [72, 73, 74, 76].map {
+            Note(startBeat: 0, lengthBeats: 0.5, pitch: $0, velocity: 100)
+        }
+        let focus = PianoRollLayout.focusPitch(notes: leadNotes)
+        tk.expect(focus >= 72 && focus <= 76, "focus pitch sits inside the note cluster (got \(focus))")
+        tk.expectEqual(PianoRollLayout.focusPitch(notes: []), 60, "empty clip focuses middle C")
+
+        let range = PianoRollLayout.displayPitchRange(notes: leadNotes)
+        // A short viewport (~7 rows, the live T2 failure mode) must scroll so the focus
+        // pitch is centred, not leave the user staring at empty high rows.
+        let shortViewport = PianoRollLayout.rowHeight * 7
+        let offset = PianoRollLayout.verticalScrollOffset(
+            focusPitch: focus,
+            pitchRange: range,
+            rowHeight: PianoRollLayout.rowHeight,
+            viewportHeight: shortViewport
+        )
+        tk.expect(offset > 0, "short viewport scrolls down from the top of the range")
+        // After applying offset, focus row centre should land near the viewport middle.
+        let focusY = PianoRollLayout.yForPitch(focus, pitchHigh: range.upperBound,
+                                               rowHeight: PianoRollLayout.rowHeight)
+            + PianoRollLayout.rowHeight / 2
+        let visibleCenter = offset + shortViewport / 2
+        tk.expect(abs(focusY - visibleCenter) < 1,
+                  "focus pitch is vertically centred in the short viewport")
+
+        // Tall default band (~2 octaves): still centres, and stays in bounds.
+        let defaultViewport = PianoRollLayout.rowHeight
+            * CGFloat(PianoRollLayout.defaultViewportPitchRows)
+        let tallOffset = PianoRollLayout.verticalScrollOffset(
+            focusPitch: focus,
+            pitchRange: range,
+            rowHeight: PianoRollLayout.rowHeight,
+            viewportHeight: defaultViewport
+        )
+        let contentH = CGFloat(range.upperBound - range.lowerBound + 1) * PianoRollLayout.rowHeight
+        tk.expect(tallOffset >= 0 && tallOffset <= max(0, contentH - defaultViewport),
+                  "default-band scroll stays within content bounds")
+        tk.expect(PianoRollLayout.defaultBandHeight
+                    >= PianoRollLayout.rowHeight * 24 + PianoRollLayout.snapToolbarHeight - 1,
+                  "default band is at least ~2 octaves plus the pinned toolbar")
+    }
+
+    tk.suite("Piano roll layout: expand from collapsed keeps focus pitch in the visible band (T3)") {
+        // Live T3 case: Bass B notes at 36 and 41. Collapsed / tiny first layout pass leaves
+        // scroll meaningless; after expand (or divider drag) re-centring must put the mean
+        // pitch inside the visible band, not parked with one note clipping the lower edge.
+        let bassNotes = [36, 41].map {
+            Note(startBeat: 0, lengthBeats: 0.5, pitch: $0, velocity: 100)
+        }
+        let focus = PianoRollLayout.focusPitch(notes: bassNotes)
+        tk.expect(focus >= 36 && focus <= 41, "focus is the mean of the bass cluster (got \(focus))")
+        let range = PianoRollLayout.displayPitchRange(notes: bassNotes)
+        tk.expect(range.contains(36) && range.contains(41), "display range covers both bass notes")
+
+        // Tiny height stands in for the collapsed / pre-layout pass (height ≈ 0 or one row).
+        let collapsedViewport = PianoRollLayout.rowHeight
+        let collapsedOffset = PianoRollLayout.verticalScrollOffset(
+            focusPitch: focus,
+            pitchRange: range,
+            rowHeight: PianoRollLayout.rowHeight,
+            viewportHeight: collapsedViewport
+        )
+        // Expanded default band (~2 octaves of pitch rows): re-centre as T3 does on height change.
+        let expandedViewport = PianoRollLayout.rowHeight
+            * CGFloat(PianoRollLayout.defaultViewportPitchRows)
+        let expandedOffset = PianoRollLayout.verticalScrollOffset(
+            focusPitch: focus,
+            pitchRange: range,
+            rowHeight: PianoRollLayout.rowHeight,
+            viewportHeight: expandedViewport
+        )
+        // Offsets for tiny vs expanded must be allowed to differ; the contract is the expanded
+        // band, not that scroll stays frozen from the collapsed pass.
+        _ = collapsedOffset
+
+        let focusY = PianoRollLayout.yForPitch(focus, pitchHigh: range.upperBound,
+                                               rowHeight: PianoRollLayout.rowHeight)
+            + PianoRollLayout.rowHeight / 2
+        let visibleTop = expandedOffset
+        let visibleBottom = expandedOffset + expandedViewport
+        tk.expect(focusY >= visibleTop && focusY <= visibleBottom,
+                  "after expand, focus pitch \(focus) (y=\(focusY)) is inside visible band [\(visibleTop), \(visibleBottom)]")
+        // And still centred, not merely barely inside.
+        let visibleCenter = expandedOffset + expandedViewport / 2
+        tk.expect(abs(focusY - visibleCenter) < 1,
+                  "after expand, focus pitch is vertically centred (not only barely on-screen)")
+    }
+
     tk.suite("AppStore piano roll: add/delete each push one labeled undo entry") {
         let (store, dir) = makeTestStore()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -1190,5 +1282,75 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         // Snap Off leaves values unrounded; grid snaps.
         tk.expectEqual(ArrangementLayout.snap(1.37, to: 0.0), 1.37, "snap Off is free")
         tk.expectEqual(ArrangementLayout.snap(1.37, to: 0.25), 1.25, "1/16 snaps 1.37 → 1.25")
+    }
+
+    // MARK: - Step T1: shared BeatTimeline (arrangement + piano roll)
+
+    tk.suite("BeatTimeline: single beats-to-x mapping for arrangement and roll") {
+        tk.expectEqual(BeatTimeline.beatWidth, 28, "shared pixels-per-beat is 28")
+        tk.expectEqual(BeatTimeline.x(forBeat: 0), 0, "beat 0 is at x 0")
+        tk.expectEqual(BeatTimeline.x(forBeat: 8), 8 * BeatTimeline.beatWidth,
+                       "beat 8 maps to 8 × beatWidth")
+        tk.expectEqual(BeatTimeline.beat(atX: BeatTimeline.x(forBeat: 8)), 8,
+                       "beat(atX:) inverts x(forBeat:)")
+        tk.expectEqual(BeatTimeline.width(forBeats: 0.25), 0.25 * BeatTimeline.beatWidth,
+                       "1/16 note width matches arrangement clip scale")
+
+        // Note at local 0 in a clip starting at beat 8 sits under arrangement beat 8.
+        let clipStart = 8.0
+        let noteLocal = 0.0
+        let abs = BeatTimeline.absoluteStart(clipStart: clipStart, noteLocalStart: noteLocal)
+        tk.expectEqual(abs, 8, "local 0 in clip at 8 is arrangement beat 8")
+        tk.expectEqual(BeatTimeline.x(forBeat: abs), BeatTimeline.x(forBeat: 8),
+                       "note and arrangement event at beat 8 share the same x")
+        tk.expectEqual(BeatTimeline.localBeat(absolute: 10, clipStart: 8), 2,
+                       "absolute 10 in clip at 8 is local beat 2")
+    }
+
+    tk.suite("BeatTimeline: contentBeats covers arrangement and open clip notes") {
+        let empty = BeatTimeline.contentBeats(tracks: [], beatsPerBar: 4, openClip: nil)
+        tk.expectEqual(empty, ArrangementLayout.contentBeats(tracks: [], beatsPerBar: 4),
+                       "without open clip, content matches arrangement")
+
+        let track = Track(kind: .instrument, name: "P", instrument: .grandPiano,
+                          clips: [Clip(kind: .midi, name: "c", startBeat: 4, lengthBeats: 4,
+                                       midiNotes: [Note(startBeat: 0, lengthBeats: 1,
+                                                        pitch: 60, velocity: 100)])])
+        let open = track.clips[0]
+        let withClip = BeatTimeline.contentBeats(tracks: [track], beatsPerBar: 4, openClip: open)
+        let arrOnly = ArrangementLayout.contentBeats(tracks: [track], beatsPerBar: 4)
+        tk.expect(withClip >= arrOnly, "open clip does not shrink content")
+        tk.expect(withClip >= open.startBeat + open.lengthBeats,
+                  "content covers the open clip’s end")
+
+        // Note extending past the clip length still extends the shared axis.
+        let longNote = Clip(kind: .midi, name: "long", startBeat: 0, lengthBeats: 2,
+                            midiNotes: [Note(startBeat: 0, lengthBeats: 40,
+                                             pitch: 60, velocity: 100)])
+        let longTrack = Track(kind: .instrument, name: "P", instrument: .grandPiano,
+                              clips: [longNote])
+        let longContent = BeatTimeline.contentBeats(
+            tracks: [longTrack], beatsPerBar: 4, openClip: longNote)
+        tk.expect(longContent >= 40, "note end past clip length extends shared contentBeats")
+    }
+
+    tk.suite("AppStore T1: open roll expands inline pane; collapse keeps clip") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 8, lengthBeats: 4,
+                        midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
+        store.project.tracks[0].clips = [clip]
+        tk.expect(!store.showPianoRoll, "roll starts collapsed (no sheet)")
+
+        store.openPianoRoll(clipID: clip.id)
+        tk.expect(store.showPianoRoll, "opening a MIDI clip expands the inline roll")
+        tk.expectEqual(store.pianoRollClipID, clip.id, "open clip id is stored")
+
+        store.showPianoRoll = false
+        tk.expectEqual(store.pianoRollClipID, clip.id,
+                       "collapse hides the pane but keeps the selected clip")
+        store.showPianoRoll = true
+        tk.expectEqual(store.pianoRollClipID, clip.id, "re-expand shows the same clip")
     }
 }

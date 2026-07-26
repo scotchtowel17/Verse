@@ -9,7 +9,8 @@ struct TrackListView: View {
     /// Enough height for at least one full track row (instrument, volume, pan, M/S, effect).
     /// Without a floor the flexible ScrollView collapses to zero at the default window size.
     private static let rowMinHeight: CGFloat = 72
-    private static let listMaxHeight: CGFloat = 230
+    /// Cap tracks so the arrangement + inline piano roll keep room at the default window size.
+    private static let listMaxHeight: CGFloat = 160
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -29,9 +30,10 @@ struct TrackListView: View {
                 }
             }
             .frame(minHeight: Self.rowMinHeight, maxHeight: Self.listMaxHeight)
-            // Prefer keeping tracks visible when the window is tight; arrangement fills leftover.
-            .layoutPriority(1)
+            // Fixed band: do not compete with the timeline for leftover height.
+            .layoutPriority(0)
         }
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
