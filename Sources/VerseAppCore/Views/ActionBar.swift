@@ -86,7 +86,7 @@ public enum ActionBarLogic {
         }
     }
 
-    /// Quantize: needs a MIDI clip with notes and snap on (1 / 0.5 / 0.25).
+    /// Quantize: needs a MIDI clip with notes and snap on a supported grid (see `SnapGrid`).
     public static func quantizeHelp(
         snapBeats: Double,
         openClip: Clip?,
@@ -103,12 +103,8 @@ public enum ActionBarLogic {
         guard !notes.isEmpty else {
             return (false, "No notes to quantize")
         }
-        guard snapBeats > 0 else {
-            return (false, "Turn on snap (1/4, 1/8, or 1/16) to quantize")
-        }
-        let allowed: Set<Double> = [1.0, 0.5, 0.25]
-        guard allowed.contains(snapBeats) else {
-            return (false, "Turn on snap (1/4, 1/8, or 1/16) to quantize")
+        guard snapBeats > 0, SnapGrid.isAllowedQuantizeGrid(snapBeats) else {
+            return (false, SnapGrid.quantizeNeedsSnapMessage)
         }
         if selectedNoteIDs.isEmpty {
             return (true, "Quantize all notes in clip to snap")
@@ -136,6 +132,25 @@ public enum ActionBarLogic {
             return (false, "Nothing to fit")
         }
         return (true, "Fit timeline to content")
+    }
+
+    /// Set loop region from the single selected arrangement clip (Z3). Transport-only; no undo.
+    public static func loopFromClipHelp(selectedClipIDs: Set<UUID>) -> (enabled: Bool, help: String) {
+        if selectedClipIDs.isEmpty {
+            return (false, "Select a clip to loop")
+        }
+        if selectedClipIDs.count > 1 {
+            return (false, "Select one clip to loop")
+        }
+        return (true, "Loop selected clip")
+    }
+
+    /// Clear the loop region when one is set (Z3).
+    public static func clearLoopHelp(hasRegion: Bool) -> (enabled: Bool, help: String) {
+        if hasRegion {
+            return (true, "Clear loop region (fall back to whole arrangement)")
+        }
+        return (false, "No loop region set")
     }
 }
 
@@ -228,6 +243,21 @@ struct ActionBar: View {
                 )
             ) {
                 store.pianoRollQuantizeNotes()
+            }
+
+            Divider().frame(height: 18).padding(.horizontal, 2)
+
+            actionButton(
+                systemImage: "repeat.1",
+                state: ActionBarLogic.loopFromClipHelp(selectedClipIDs: store.selectedClipIDs)
+            ) {
+                store.setLoopRegionFromSelectedClip()
+            }
+            actionButton(
+                systemImage: "xmark.circle",
+                state: ActionBarLogic.clearLoopHelp(hasRegion: store.loopRegion != nil)
+            ) {
+                store.clearLoopRegion()
             }
         }
     }

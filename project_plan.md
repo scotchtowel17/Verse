@@ -456,14 +456,14 @@ Measured against Verse today:
    differences and clamps at the ends without collapsing; one undo entry restores every note's
    prior velocity exactly.
 
-## Step Z2 — Finer and triplet grid divisions — PENDING
+## Step Z2 — Finer and triplet grid divisions — DONE
 
 Add 1/32, and triplet divisions 1/4T, 1/8T, 1/16T, to the snap control used by both the roll and
 the arrangement. Triplet values are a third of the corresponding straight division. Keep the
 control compact; it is already dense, so consider grouping straight and triplet values rather
 than adding six more buttons in a row.
 
-## Step Z3 — Loop a region while writing — PENDING
+## Step Z3 — Loop a region while writing — DONE
 
 The transport already accepts `loop: ClosedRange<Double>` and `startPlayback` passes
 `0...arrangementBeats` when the loop toggle is on, so looping only ever covers the whole song.
@@ -484,7 +484,7 @@ What a songwriter actually needs is to loop four bars while getting a part right
    repeats it rather than running to the arrangement end; clearing the region restores the
    whole-arrangement fallback.
 
-## Step Z2 — Finer and triplet grid divisions — PENDING
+## Step Z2 — Finer and triplet grid divisions — DONE
 
 Snap currently offers Off, 1/4, 1/8, 1/16 only. Add **1/32** and the triplet divisions
 **1/4T, 1/8T, 1/16T**, where a triplet value is one third of the corresponding straight
@@ -495,3 +495,15 @@ The snap control is already dense and its row has overflowed once before, so do 
 four more buttons: group straight and triplet values so the control stays compact and nothing
 deforms or clips at realistic widths. The same divisions must be available to the arrangement
 and the roll, and quantize must use whichever is selected.
+
+## Step Z4 — Loop region not confirmed on screen — OPEN
+
+Z3's loop region is implemented and unit-tested (a region set from a clip matches that clip's
+bounds, playback with a region repeats rather than running to the arrangement end, clearing
+restores the whole-arrangement fallback). It could NOT be confirmed by hand: after several
+attempts using both the roll's loop control and the action bar's loop button, no loop band ever
+appeared in the shared ruler.
+
+Either the region is not being set by those controls, or it is set but not drawn. Determine
+which. The ruler band is the whole point of the feature, since a loop you cannot see is a loop
+you cannot trust or adjust. Confirm by running the app, not by adding another assertion.

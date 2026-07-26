@@ -479,6 +479,29 @@ func runPatchChecks(_ tk: TestKit) {
         tk.expectEqual(project.tracks[0].clips[0].midiNotes?[0].startBeat, 0.25, "snapped on 1/16")
     }
 
+    tk.suite("verse-patch — quantizeNotes accepts 1/32 and triplet strings (Z2)") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4,
+                 midiNotes: [Note(startBeat: 0.1, lengthBeats: 1, pitch: 60, velocity: 100)])
+        ]
+        let reply32 = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"quantizeNotes\",\"track\":\"T1\",\"clip\":\"T1C1\",\"grid\":\"1/32\"}]")
+        let out32 = Copilot.apply(reply: reply32, to: &project)
+        tk.expectEqual(out32.status, .applied, "string grid 1/32 applies")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?[0].startBeat, 0.125, "snapped on 1/32")
+
+        project.tracks[0].clips[0].midiNotes = [
+            Note(startBeat: 0.4, lengthBeats: 1, pitch: 60, velocity: 100)
+        ]
+        let replyT = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"quantizeNotes\",\"track\":\"T1\",\"clip\":\"T1C1\",\"grid\":\"1/4T\"}]")
+        let outT = Copilot.apply(reply: replyT, to: &project)
+        tk.expectEqual(outT.status, .applied, "string grid 1/4T applies")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?[0].startBeat, SnapGrid.quarterTriplet,
+                       "snapped on 1/4T")
+    }
+
     tk.suite("verse-patch — transposeNotes shifts pitches") {
         var project = Project.newUntitled()
         project.tracks[0].clips = [

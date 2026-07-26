@@ -1872,6 +1872,33 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         // Snap Off leaves values unrounded; grid snaps.
         tk.expectEqual(ArrangementLayout.snap(1.37, to: 0.0), 1.37, "snap Off is free")
         tk.expectEqual(ArrangementLayout.snap(1.37, to: 0.25), 1.25, "1/16 snaps 1.37 → 1.25")
+        // Step Z2: 1/32 and triplets share the same snap math for arrangement and roll.
+        tk.expectEqual(ArrangementLayout.snap(0.1, to: SnapGrid.thirtySecond), 0.125,
+                       "1/32 snaps 0.1 → 0.125")
+        tk.expectEqual(ArrangementLayout.snap(0.4, to: SnapGrid.quarterTriplet),
+                       SnapGrid.quarterTriplet, "1/4T snaps 0.4 → 1/3")
+        tk.expectEqual(PianoRollLayout.snap(0.2, to: SnapGrid.eighthTriplet),
+                       SnapGrid.eighthTriplet, "1/8T snaps match on the roll")
+        tk.expectEqual(PianoRollLayout.snap(0.1, to: SnapGrid.sixteenthTriplet),
+                       SnapGrid.sixteenthTriplet, "1/16T snaps match on the roll")
+    }
+
+    tk.suite("Z2 SnapGrid divisions (1/32 and triplets)") {
+        tk.expect(SnapGrid.isAllowedQuantizeGrid(SnapGrid.thirtySecond), "1/32 is quantize-legal")
+        tk.expect(SnapGrid.isAllowedQuantizeGrid(SnapGrid.quarterTriplet), "1/4T is quantize-legal")
+        tk.expect(SnapGrid.isAllowedQuantizeGrid(SnapGrid.eighthTriplet), "1/8T is quantize-legal")
+        tk.expect(SnapGrid.isAllowedQuantizeGrid(SnapGrid.sixteenthTriplet), "1/16T is quantize-legal")
+        tk.expect(!SnapGrid.isAllowedQuantizeGrid(0), "Off is not a quantize grid")
+        tk.expect(!SnapGrid.isAllowedQuantizeGrid(0.333), "near-miss 0.333 is not 1/4T")
+        // Triplet = one third of the corresponding straight division.
+        tk.expectEqual(SnapGrid.quarterTriplet, SnapGrid.quarter / 3.0, "1/4T is 1/3 of 1/4")
+        tk.expectEqual(SnapGrid.eighthTriplet, SnapGrid.eighth / 3.0, "1/8T is 1/3 of 1/8")
+        tk.expectEqual(SnapGrid.sixteenthTriplet, SnapGrid.sixteenth / 3.0, "1/16T is 1/3 of 1/16")
+        tk.expectEqual(SnapGrid.shortLabel(for: SnapGrid.thirtySecond), "1/32", "short label 1/32")
+        tk.expectEqual(SnapGrid.shortLabel(for: SnapGrid.eighthTriplet), "1/8T", "short label 1/8T")
+        tk.expectEqual(SnapGrid.parseGridLabel("1/32"), SnapGrid.thirtySecond, "parse 1/32")
+        tk.expectEqual(SnapGrid.parseGridLabel("1/4T"), SnapGrid.quarterTriplet, "parse 1/4T")
+        tk.expectEqual(SnapGrid.parseGridLabel("1/16T"), SnapGrid.sixteenthTriplet, "parse 1/16T")
     }
 
     // MARK: - Step T1: shared BeatTimeline (arrangement + piano roll)
@@ -1986,6 +2013,24 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         tk.expect(store.statusMessage?.localizedCaseInsensitiveContains("snap") == true,
                   "snap Off explains why quantize cannot run")
         tk.expectEqual(undoDepth(of: store), depthBefore, "refused quantize records no undo")
+
+        // Step Z2: quantize uses whichever snap division is selected (1/32 and triplets).
+        store.project.tracks[0].clips[0].midiNotes = [
+            Note(id: n1.id, startBeat: 0.1, lengthBeats: 0.25, pitch: 60, velocity: 100),
+        ]
+        store.selectedNoteIDs = []
+        store.pianoRollSnapBeats = SnapGrid.thirtySecond
+        store.pianoRollQuantizeNotes()
+        tk.expectEqual(store.project.tracks[0].clips[0].midiNotes?[0].startBeat, 0.125,
+                       "quantize to selected 1/32 snap")
+
+        store.project.tracks[0].clips[0].midiNotes = [
+            Note(id: n1.id, startBeat: 0.4, lengthBeats: 0.25, pitch: 60, velocity: 100),
+        ]
+        store.pianoRollSnapBeats = SnapGrid.quarterTriplet
+        store.pianoRollQuantizeNotes()
+        tk.expectEqual(store.project.tracks[0].clips[0].midiNotes?[0].startBeat,
+                       SnapGrid.quarterTriplet, "quantize to selected 1/4T snap")
     }
 
     tk.suite("X2 AppStore duplicate clips") {
@@ -2052,11 +2097,175 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         let qAudio = ActionBarLogic.quantizeHelp(
             snapBeats: 0.25, openClip: nil, isAudioTrack: true, selectedNoteIDs: [])
         tk.expect(!qAudio.enabled, "quantize disabled on audio track")
+        let q32 = ActionBarLogic.quantizeHelp(
+            snapBeats: SnapGrid.thirtySecond, openClip: midi, isAudioTrack: false, selectedNoteIDs: [])
+        tk.expect(q32.enabled, "quantize enabled on 1/32 snap")
+        let qTrip = ActionBarLogic.quantizeHelp(
+            snapBeats: SnapGrid.eighthTriplet, openClip: midi, isAudioTrack: false, selectedNoteIDs: [])
+        tk.expect(qTrip.enabled, "quantize enabled on 1/8T snap")
 
         let zIn = ActionBarLogic.zoomInHelp(zoom: BeatTimeline.maxZoom)
         tk.expect(!zIn.enabled, "zoom in disabled at max")
         let zOut = ActionBarLogic.zoomOutHelp(zoom: BeatTimeline.minZoom)
         tk.expect(!zOut.enabled, "zoom out disabled at min")
+
+        let loopEmpty = ActionBarLogic.loopFromClipHelp(selectedClipIDs: [])
+        tk.expect(!loopEmpty.enabled, "loop-from-clip disabled with no selection")
+        let loopOne = ActionBarLogic.loopFromClipHelp(selectedClipIDs: [midi.id])
+        tk.expect(loopOne.enabled, "loop-from-clip enabled with one clip")
+        let loopMany = ActionBarLogic.loopFromClipHelp(selectedClipIDs: [midi.id, UUID()])
+        tk.expect(!loopMany.enabled, "loop-from-clip disabled with multi-select")
+        let clearOff = ActionBarLogic.clearLoopHelp(hasRegion: false)
+        tk.expect(!clearOff.enabled, "clear loop disabled when no region")
+        let clearOn = ActionBarLogic.clearLoopHelp(hasRegion: true)
+        tk.expect(clearOn.enabled, "clear loop enabled when region set")
+    }
+
+    // MARK: - Step Z3: loop region (transport state, not document)
+
+    tk.suite("Z3 LoopRegionLogic: normalize, fromClip, fallback, start, move, resize") {
+        tk.expect(LoopRegionLogic.normalized(start: 4, end: 4) == nil, "zero-length rejected")
+        tk.expect(LoopRegionLogic.normalized(start: 4, end: 4.05) == nil, "sub-minimum rejected")
+        let n = LoopRegionLogic.normalized(start: 8, end: 2)
+        tk.expectEqual(n?.lowerBound, 2, "order-independent lower")
+        tk.expectEqual(n?.upperBound, 8, "order-independent upper")
+        let neg = LoopRegionLogic.normalized(start: -3, end: 1)
+        tk.expectEqual(neg?.lowerBound, 0, "start clamped to 0")
+        tk.expectEqual(neg?.upperBound, 1, "end preserved after clamp")
+
+        let fromClip = LoopRegionLogic.fromClip(startBeat: 4, lengthBeats: 8)
+        tk.expectEqual(fromClip?.lowerBound, 4, "fromClip start")
+        tk.expectEqual(fromClip?.upperBound, 12, "fromClip end")
+
+        tk.expect(LoopRegionLogic.playbackLoop(loopOn: false, region: 0...4, arrangementEnd: 16) == nil,
+                  "loop off yields no transport loop")
+        let fallback = LoopRegionLogic.playbackLoop(loopOn: true, region: nil, arrangementEnd: 16)
+        tk.expectEqual(fallback?.lowerBound, 0, "fallback start is 0")
+        tk.expectEqual(fallback?.upperBound, 16, "fallback end is arrangement end")
+        let shortArr = LoopRegionLogic.playbackLoop(loopOn: true, region: nil, arrangementEnd: 2)
+        tk.expectEqual(shortArr?.upperBound, 4, "fallback floors at 4 beats like pre-Z3")
+        let regionLoop = LoopRegionLogic.playbackLoop(loopOn: true, region: 2...6, arrangementEnd: 32)
+        tk.expectEqual(regionLoop?.lowerBound, 2, "region lower when set")
+        tk.expectEqual(regionLoop?.upperBound, 6, "region upper when set")
+
+        tk.expectEqual(LoopRegionLogic.playbackStart(playhead: 5, loop: nil), 5,
+                       "no loop keeps playhead")
+        tk.expectEqual(LoopRegionLogic.playbackStart(playhead: 3, loop: 2...6), 3,
+                       "playhead inside region is kept")
+        tk.expectEqual(LoopRegionLogic.playbackStart(playhead: 0, loop: 2...6), 2,
+                       "playhead before region jumps to start")
+        tk.expectEqual(LoopRegionLogic.playbackStart(playhead: 10, loop: 2...6), 2,
+                       "playhead past region jumps to start")
+
+        let moved = LoopRegionLogic.moved(4...8, by: -10)
+        tk.expectEqual(moved.lowerBound, 0, "move clamps start to 0")
+        tk.expectEqual(moved.upperBound, 4, "move preserves length")
+        let resizedStart = LoopRegionLogic.resized(4...8, edge: .start, to: 5)
+        tk.expectEqual(resizedStart?.lowerBound, 5, "resize start")
+        let resizedEnd = LoopRegionLogic.resized(4...8, edge: .end, to: 12)
+        tk.expectEqual(resizedEnd?.upperBound, 12, "resize end")
+        tk.expect(LoopRegionLogic.resized(4...8, edge: .start, to: 8) == nil,
+                  "resize that collapses is rejected")
+    }
+
+    tk.suite("Z3 AppStore: region from selected clip matches clip bounds; no undo") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.addInstrumentTrack()
+        let depthAfterAdd = undoDepth(of: store)
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 4, lengthBeats: 8,
+                        midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
+        store.project.tracks[0].clips = [clip]
+        store.selectedClipIDs = [clip.id]
+
+        store.setLoopRegionFromSelectedClip()
+        tk.expectEqual(store.loopRegion?.lowerBound, 4, "region start matches clip")
+        tk.expectEqual(store.loopRegion?.upperBound, 12, "region end matches clip end")
+        tk.expectEqual(undoDepth(of: store), depthAfterAdd,
+                       "setLoopRegionFromSelectedClip records no undo")
+
+        store.setLoopRegion(start: 1, end: 3)
+        tk.expectEqual(store.loopRegion?.lowerBound, 1, "direct set start")
+        tk.expectEqual(store.loopRegion?.upperBound, 3, "direct set end")
+        tk.expectEqual(undoDepth(of: store), depthAfterAdd, "setLoopRegion records no undo")
+
+        store.clearLoopRegion()
+        tk.expect(store.loopRegion == nil, "clear removes region")
+        tk.expectEqual(undoDepth(of: store), depthAfterAdd, "clearLoopRegion records no undo")
+    }
+
+    tk.suite("Z3 AppStore: no region falls back to whole arrangement; region loops instead") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.startEngineIfNeeded()
+        // Long arrangement so whole-arrangement auto-stop would take many seconds.
+        let clip = Clip(kind: .midi, name: "long", startBeat: 0, lengthBeats: 32,
+                        midiNotes: [Note(startBeat: 0, lengthBeats: 16, pitch: 60, velocity: 90)])
+        store.project.tracks[0].clips = [clip]
+
+        // Fallback path (no region): same range the pre-Z3 toggle used.
+        store.loopOn = true
+        store.loopRegion = nil
+        let end = store.arrangementBeats
+        let expectedFallback = LoopRegionLogic.playbackLoop(
+            loopOn: true, region: nil, arrangementEnd: end)
+        tk.expectEqual(expectedFallback?.lowerBound, 0, "fallback lower")
+        tk.expectEqual(expectedFallback?.upperBound, max(4, end), "fallback upper")
+
+        // Region path: short region so a loop wrap happens well before arrangement end.
+        store.setLoopRegion(start: 0, end: 2)
+        store.scrubPlayhead(to: 0)
+        store.startPlayback()
+        tk.expect(store.isPlaying, "playing with region loop")
+
+        // At 120 BPM, 2 beats = 1.0s of musical time. lead is 0.12s. After ~1.4s the
+        // loop timer should have restarted from beat 0 at least once. Arrangement end
+        // is 32 beats (~16s), so if we were not looping the region we would still be
+        // playing near beat 2+, not wrapping. Assert we stay playing and that the
+        // playhead is still inside the region after more than one region length.
+        let stillPlaying = waitUntilAppStore(timeout: 2.5) {
+            store.isPlaying && (store.playbackBeat ?? 99) < 2.5
+        }
+        tk.expect(stillPlaying, "still playing inside region after more than one cycle window")
+        if let beat = store.playbackBeat {
+            tk.expect(beat < 4.0,
+                      "playhead stays near the region, not racing toward arrangement end "
+                      + "(got \(beat))")
+        } else {
+            tk.expect(false, "playbackBeat while looping")
+        }
+        store.pausePlayback()
+
+        // Clearing the region restores whole-arrangement fallback math.
+        store.clearLoopRegion()
+        let afterClear = LoopRegionLogic.playbackLoop(
+            loopOn: true, region: store.loopRegion, arrangementEnd: store.arrangementBeats)
+        tk.expectEqual(afterClear?.upperBound, max(4, store.arrangementBeats),
+                       "clear restores whole-arrangement fallback")
+    }
+
+    tk.suite("Z3 AppStore: multi-select and empty select refuse without mutating") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let a = Clip(kind: .midi, name: "a", startBeat: 0, lengthBeats: 4,
+                     midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
+        let b = Clip(kind: .midi, name: "b", startBeat: 8, lengthBeats: 4,
+                     midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 62, velocity: 100)])
+        store.project.tracks[0].clips = [a, b]
+        store.loopRegion = 1...2
+
+        store.selectedClipIDs = []
+        store.setLoopRegionFromSelectedClip()
+        tk.expectEqual(store.loopRegion?.lowerBound, 1, "empty select leaves region alone")
+        tk.expect(store.statusMessage != nil, "empty select sets a status message")
+
+        store.selectedClipIDs = [a.id, b.id]
+        store.setLoopRegionFromSelectedClip()
+        tk.expectEqual(store.loopRegion?.lowerBound, 1, "multi-select leaves region alone")
+        tk.expect(store.statusMessage != nil, "multi-select sets a status message")
     }
 
     tk.suite("BeatTimeline: contentBeats covers arrangement and open clip notes") {

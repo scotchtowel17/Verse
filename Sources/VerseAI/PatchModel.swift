@@ -30,7 +30,8 @@ public enum TypedOp {
     case addMidiClip(track: TrackRef, tempClipId: String, startBeat: Double, lengthBeats: Double)
     case addNotes(track: TrackRef, clip: ClipRef, notes: [Note])
     case deleteClip(track: TrackRef, clip: ClipRef)
-    /// Snap note starts to grid. `gridBeats` is 1 (1/4), 0.5 (1/8), or 0.25 (1/16).
+    /// Snap note starts to grid. `gridBeats` is any `SnapGrid` quantize value
+    /// (1/4–1/32 straight, or 1/4T / 1/8T / 1/16T triplets).
     case quantizeNotes(track: TrackRef, clip: ClipRef, gridBeats: Double)
     /// Shift all note pitches by `semitones`. Out-of-range results are rejected, never clamped.
     case transposeNotes(track: TrackRef, clip: ClipRef, semitones: Int)

@@ -8,7 +8,7 @@ struct TimelineWorkspaceView: View {
     @Environment(AppStore.self) private var store
 
     /// Arrangement snap (clips). Independent of the roll’s note snap.
-    @State private var arrangementSnapBeats: Double = 0.25
+    @State private var arrangementSnapBeats: Double = SnapGrid.sixteenth
     /// Drag-resizable band heights (viewport, not content).
     @State private var arrangementBandHeight: CGFloat = 150
     /// Default is ~2 octaves of pitch rows plus the pinned snap toolbar (T2).
@@ -79,18 +79,12 @@ struct TimelineWorkspaceView: View {
                     .foregroundStyle(.secondary)
             }
             HStack(spacing: 10) {
-                Text("Snap").font(.callout).foregroundStyle(.secondary)
-                Picker("Snap", selection: $arrangementSnapBeats) {
-                    Text("Off").tag(0.0)
-                    Text("1/4").tag(1.0)
-                    Text("1/8").tag(0.5)
-                    Text("1/16").tag(0.25)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 260)
-                .help("Grid snap for clip start and length. Off allows free placement.")
-                Spacer()
+                SnapGridPicker(
+                    snapBeats: $arrangementSnapBeats,
+                    showLabel: true,
+                    helpText: "Grid snap for clip start and length. Off allows free placement."
+                )
+                Spacer(minLength: 8)
                 Text("Select · drag to move · right edge to resize · click MIDI for piano roll")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
@@ -276,8 +270,49 @@ struct TimelineWorkspaceView: View {
 
     // MARK: - Ruler + playhead
 
+    /// Ruler drag intent for loop region editing vs playhead scrub (Z3).
+    private enum RulerDragKind {
+        case scrub
+        case createRegion(originBeat: Double)
+        case moveRegion(origin: ClosedRange<Double>, startX: CGFloat)
+        case resizeRegion(edge: LoopRegionEdge, origin: ClosedRange<Double>)
+    }
+
+    @State private var rulerDragKind: RulerDragKind?
+
+    private static let loopEdgeHitPx: CGFloat = 6
+
     private func sharedRuler(beatWidth: CGFloat, totalWidth: CGFloat) -> some View {
         Canvas { context, size in
+            // Loop region band behind tick marks (Z3). Brighter when the loop toggle is on.
+            if let region = store.loopRegion {
+                let x0 = BeatTimeline.x(forBeat: region.lowerBound, zoom: zoom)
+                let x1 = BeatTimeline.x(forBeat: region.upperBound, zoom: zoom)
+                let w = max(2, x1 - x0)
+                let fillOpacity = store.loopOn ? 0.28 : 0.14
+                let strokeOpacity = store.loopOn ? 0.75 : 0.45
+                let rect = CGRect(x: x0, y: 1, width: w, height: size.height - 2)
+                context.fill(
+                    Path(roundedRect: rect, cornerRadius: 2),
+                    with: .color(Color.accentColor.opacity(fillOpacity))
+                )
+                context.stroke(
+                    Path(roundedRect: rect, cornerRadius: 2),
+                    with: .color(Color.accentColor.opacity(strokeOpacity)),
+                    lineWidth: 1
+                )
+                // Edge grips so the region is obviously adjustable.
+                let gripW: CGFloat = 3
+                context.fill(
+                    Path(CGRect(x: x0, y: 2, width: gripW, height: size.height - 4)),
+                    with: .color(Color.accentColor.opacity(strokeOpacity))
+                )
+                context.fill(
+                    Path(CGRect(x: x1 - gripW, y: 2, width: gripW, height: size.height - 4)),
+                    with: .color(Color.accentColor.opacity(strokeOpacity))
+                )
+            }
+
             let beatCount = Int(ceil(contentBeats))
             for b in 0...beatCount {
                 let x = CGFloat(b) * beatWidth
@@ -309,17 +344,89 @@ struct TimelineWorkspaceView: View {
             Rectangle().fill(Color.black.opacity(0.15)).frame(height: 0.5)
         }
         .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { value in scrub(atX: value.location.x) }
-                .onEnded { value in scrub(atX: value.location.x) }
-        )
-        .help("Click or drag to move the playhead")
+        .gesture(rulerGesture())
+        .contextMenu {
+            if store.loopRegion != nil {
+                Button("Clear Loop Region") {
+                    store.clearLoopRegion()
+                }
+            }
+            Button("Set Loop from Selected Clip") {
+                store.setLoopRegionFromSelectedClip()
+            }
+            .disabled(store.selectedClipIDs.count != 1)
+        }
+        .help(rulerHelp)
+    }
+
+    private var rulerHelp: String {
+        if store.loopRegion != nil {
+            return "Click/drag playhead · drag loop edges or body · Option-drag new region"
+        }
+        return "Click or drag to move the playhead · Option-drag to set a loop region"
+    }
+
+    private func rulerGesture() -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                if rulerDragKind == nil {
+                    rulerDragKind = resolveRulerDragKind(atX: value.startLocation.x)
+                }
+                applyRulerDrag(value)
+            }
+            .onEnded { value in
+                applyRulerDrag(value)
+                rulerDragKind = nil
+            }
+    }
+
+    private func resolveRulerDragKind(atX x: CGFloat) -> RulerDragKind {
+        // Option (alt) drag always creates / replaces the region (Z3).
+        if NSEvent.modifierFlags.contains(.option) {
+            let beat = beatClamped(atX: x)
+            return .createRegion(originBeat: beat)
+        }
+        if let region = store.loopRegion {
+            let x0 = BeatTimeline.x(forBeat: region.lowerBound, zoom: zoom)
+            let x1 = BeatTimeline.x(forBeat: region.upperBound, zoom: zoom)
+            if abs(x - x0) <= Self.loopEdgeHitPx {
+                return .resizeRegion(edge: .start, origin: region)
+            }
+            if abs(x - x1) <= Self.loopEdgeHitPx {
+                return .resizeRegion(edge: .end, origin: region)
+            }
+            if x >= x0 && x <= x1 {
+                return .moveRegion(origin: region, startX: x)
+            }
+        }
+        return .scrub
+    }
+
+    private func applyRulerDrag(_ value: DragGesture.Value) {
+        guard let kind = rulerDragKind else { return }
+        switch kind {
+        case .scrub:
+            scrub(atX: value.location.x)
+        case .createRegion(let originBeat):
+            let endBeat = beatClamped(atX: value.location.x)
+            store.setLoopRegion(start: originBeat, end: endBeat)
+        case .moveRegion(let origin, let startX):
+            let delta = Double((value.location.x - startX) / BeatTimeline.beatWidth(zoom: zoom))
+            store.setLoopRegion(LoopRegionLogic.moved(origin, by: delta))
+        case .resizeRegion(let edge, let origin):
+            let edgeBeat = beatClamped(atX: value.location.x)
+            if let next = LoopRegionLogic.resized(origin, edge: edge, to: edgeBeat) {
+                store.setLoopRegion(next)
+            }
+        }
+    }
+
+    private func beatClamped(atX x: CGFloat) -> Double {
+        max(0, min(contentBeats, BeatTimeline.beat(atX: x, zoom: zoom)))
     }
 
     private func scrub(atX x: CGFloat) {
-        let beat = max(0, min(contentBeats, BeatTimeline.beat(atX: x, zoom: zoom)))
-        store.scrubPlayhead(to: beat)
+        store.scrubPlayhead(to: beatClamped(atX: x))
     }
 
     @ViewBuilder

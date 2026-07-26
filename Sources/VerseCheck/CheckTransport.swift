@@ -313,6 +313,57 @@ private func runTransportChecksOnMain(_ tk: TestKit) {
         }
     }
 
+    // MARK: - Step Z3: transport loop region
+
+    tk.suite("Transport Z3: loop range restarts rather than auto-stopping at arrangement end") {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("verse-tr-z3-loop-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Arrangement spans 16 beats (8s at 120 BPM). Loop only the first 2 beats (1s).
+        // Without a loop range, auto-stop would fire around lead + 8 + 0.8 ≈ 8.9s.
+        // With a loop, playback must still be running well before that, after several wraps.
+        let midiID = UUID()
+        var project = Project(title: "z3-loop", tempoBPM: 120)
+        project.tracks = [
+            Track(id: midiID, kind: .instrument, name: "Keys", instrument: .grandPiano, clips: [
+                Clip(kind: .midi, name: "Long", startBeat: 0, lengthBeats: 16,
+                     midiNotes: [Note(startBeat: 0, lengthBeats: 16, pitch: 60, velocity: 90)])
+            ])
+        ]
+
+        let engine = VerseAudioEngine()
+        engine.configure(with: project)
+        try engine.start()
+        let transport = Transport(engine: engine)
+
+        var autoStopFired = false
+        transport.onStop = { autoStopFired = true }
+
+        let loop: ClosedRange<Double> = 0...2
+        transport.play(project: project, mediaDir: dir, from: 0, loop: loop)
+        tk.expectEqual(transport.state, .playing, "playing with loop region")
+
+        // Wait past more than one loop length (lead 0.12 + 1.0 region ≈ 1.12s per cycle).
+        // Two cycles ≈ 2.2s. Still playing, and currentBeat should be near the region.
+        pumpMain(for: 2.4)
+        tk.expectEqual(transport.state, .playing, "still playing after loop wraps")
+        tk.expect(!autoStopFired, "loop path must not fire arrangement auto-stop")
+        if let beat = transport.currentBeat {
+            // After a wrap, beat is near 0...2 (plus a little scheduling lead noise).
+            tk.expect(beat < 6.0,
+                      "playhead stays near the loop region after wraps (got \(beat))")
+            tk.expect(beat >= 0,
+                      "playhead is non-negative after wraps")
+        } else {
+            tk.expect(false, "currentBeat non-nil while looping")
+        }
+
+        transport.stop()
+        engine.stop()
+    }
+
     tk.suite("Transport R1: audio plan frame count comes from lengthBeats, not file length") {
         let spb = 0.5            // 120 BPM
         let sampleRate = 44_100.0

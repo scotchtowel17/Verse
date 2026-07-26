@@ -618,7 +618,10 @@ private func randomOpDicts(project: Project, rng: inout SeededRNG, count: Int,
                     "op": "quantizeNotes",
                     "track": clip.track,
                     "clip": clip.clip,
-                    "gridBeats": rng.pick([1.0, 0.5, 0.25]),
+                    "gridBeats": rng.pick([
+                        SnapGrid.quarter, SnapGrid.eighth, SnapGrid.sixteenth, SnapGrid.thirtySecond,
+                        SnapGrid.quarterTriplet, SnapGrid.eighthTriplet, SnapGrid.sixteenthTriplet,
+                    ]),
                 ])
             } else {
                 ops.append(["op": "setTempo", "bpm": 110])

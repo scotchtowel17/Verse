@@ -47,7 +47,9 @@ struct TransportBar: View {
 
             Toggle(isOn: Binding(get: { store.loopOn }, set: { store.loopOn = $0 })) {
                 Image(systemName: "repeat")
-            }.toggleStyle(.button).help("Loop")
+            }
+            .toggleStyle(.button)
+            .help(loopHelp)
 
             Toggle(isOn: Binding(get: { store.monitoring }, set: { store.setMonitoring($0) })) {
                 Image(systemName: "headphones")
@@ -63,6 +65,21 @@ struct TransportBar: View {
         }
         .padding(8)
         .background(.black.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var loopHelp: String {
+        if let region = store.loopRegion {
+            let label = "beats \(formatLoopBeat(region.lowerBound))-\(formatLoopBeat(region.upperBound))"
+            return store.loopOn ? "Loop region on (\(label))" : "Loop off · region set (\(label))"
+        }
+        return store.loopOn
+            ? "Loop whole arrangement on"
+            : "Loop (set a region in the ruler or from a clip)"
+    }
+
+    private func formatLoopBeat(_ v: Double) -> String {
+        if v == floor(v) { return String(Int(v)) }
+        return String(format: "%.2f", v)
     }
 
     /// Three-state record control: unarmed, armed (waiting for play), capturing (armed + playing).
