@@ -11,7 +11,8 @@ struct TimelineWorkspaceView: View {
     @State private var arrangementSnapBeats: Double = 0.25
     /// Drag-resizable band heights (viewport, not content).
     @State private var arrangementBandHeight: CGFloat = 150
-    @State private var rollBandHeight: CGFloat = 200
+    /// Default is ~2 octaves of pitch rows plus the pinned snap toolbar (T2).
+    @State private var rollBandHeight: CGFloat = PianoRollLayout.defaultBandHeight
     @State private var dividerDragStart: CGFloat?
 
     private static let arrangementMinHeight: CGFloat = 100
@@ -162,14 +163,13 @@ struct TimelineWorkspaceView: View {
 
                         if rollExpanded {
                             divider
-                            // Piano roll: pitch scrolls vertically; time uses the shared H offset.
-                            ScrollView(.vertical, showsIndicators: true) {
-                                PianoRollEmbeddedView(
-                                    contentBeats: contentBeats,
-                                    totalWidth: totalW,
-                                    showsGutter: true
-                                )
-                            }
+                            // Piano roll owns its vertical pitch scroll (and pinned snap bar).
+                            // Time still uses the shared horizontal offset from this parent.
+                            PianoRollEmbeddedView(
+                                contentBeats: contentBeats,
+                                totalWidth: totalW,
+                                showsGutter: true
+                            )
                             .frame(width: gutter + totalW, height: rollH, alignment: .topLeading)
                         }
                     }

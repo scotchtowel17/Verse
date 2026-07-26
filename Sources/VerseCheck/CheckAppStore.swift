@@ -453,6 +453,52 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
                   "empty clip still shows ~3 octaves")
     }
 
+    tk.suite("Piano roll layout: open centres vertically on the clip's notes (T2 / P2b)") {
+        // Lead-style clip: four notes at 72–76. Opening must focus near that cluster, not C6
+        // (the top of a short viewport when scroll stays at offset 0).
+        let leadNotes = [72, 73, 74, 76].map {
+            Note(startBeat: 0, lengthBeats: 0.5, pitch: $0, velocity: 100)
+        }
+        let focus = PianoRollLayout.focusPitch(notes: leadNotes)
+        tk.expect(focus >= 72 && focus <= 76, "focus pitch sits inside the note cluster (got \(focus))")
+        tk.expectEqual(PianoRollLayout.focusPitch(notes: []), 60, "empty clip focuses middle C")
+
+        let range = PianoRollLayout.displayPitchRange(notes: leadNotes)
+        // A short viewport (~7 rows, the live T2 failure mode) must scroll so the focus
+        // pitch is centred, not leave the user staring at empty high rows.
+        let shortViewport = PianoRollLayout.rowHeight * 7
+        let offset = PianoRollLayout.verticalScrollOffset(
+            focusPitch: focus,
+            pitchRange: range,
+            rowHeight: PianoRollLayout.rowHeight,
+            viewportHeight: shortViewport
+        )
+        tk.expect(offset > 0, "short viewport scrolls down from the top of the range")
+        // After applying offset, focus row centre should land near the viewport middle.
+        let focusY = PianoRollLayout.yForPitch(focus, pitchHigh: range.upperBound,
+                                               rowHeight: PianoRollLayout.rowHeight)
+            + PianoRollLayout.rowHeight / 2
+        let visibleCenter = offset + shortViewport / 2
+        tk.expect(abs(focusY - visibleCenter) < 1,
+                  "focus pitch is vertically centred in the short viewport")
+
+        // Tall default band (~2 octaves): still centres, and stays in bounds.
+        let defaultViewport = PianoRollLayout.rowHeight
+            * CGFloat(PianoRollLayout.defaultViewportPitchRows)
+        let tallOffset = PianoRollLayout.verticalScrollOffset(
+            focusPitch: focus,
+            pitchRange: range,
+            rowHeight: PianoRollLayout.rowHeight,
+            viewportHeight: defaultViewport
+        )
+        let contentH = CGFloat(range.upperBound - range.lowerBound + 1) * PianoRollLayout.rowHeight
+        tk.expect(tallOffset >= 0 && tallOffset <= max(0, contentH - defaultViewport),
+                  "default-band scroll stays within content bounds")
+        tk.expect(PianoRollLayout.defaultBandHeight
+                    >= PianoRollLayout.rowHeight * 24 + PianoRollLayout.snapToolbarHeight - 1,
+                  "default band is at least ~2 octaves plus the pinned toolbar")
+    }
+
     tk.suite("AppStore piano roll: add/delete each push one labeled undo entry") {
         let (store, dir) = makeTestStore()
         defer { try? FileManager.default.removeItem(at: dir) }

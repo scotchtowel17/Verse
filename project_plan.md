@@ -1158,7 +1158,7 @@ the roll).
 
 No schema change. Selection stays view-local.
 
-## Step T2 — Inline roll opens unusable (found by running it) — PENDING
+## Step T2 — Inline roll opens unusable (found by running it) — DONE
 
 The core of T1 works and was verified live: the roll is inline, the arrangement stays visible
 above it, the shared beat axis lines up (a clip at bars 3-5 has its notes directly beneath it),
@@ -1179,3 +1179,29 @@ it unusable on open.
 
 Do not change the shared-axis behaviour or any Phase S editing behaviour; these are layout and
 viewport fixes.
+
+## Step T3 — Pitch centring is stale when the roll expands — PENDING
+
+Third attempt at this; here is the actual root cause rather than another guess.
+
+`PianoRollView` centres the pitch viewport by calling `proxy.scrollTo(pitchFocusID,
+anchor: .center)` from exactly two triggers: `.onAppear` and `.onChange(of: clipID)`.
+
+Neither fires in the common case. The inline roll starts collapsed, so `.onAppear` runs while
+the pane has little or no height and the scroll is meaningless. When the user then expands the
+pane, or drags the divider, the height changes but `clipID` has not, so nothing re-centres.
+Selecting the clip that is already loaded likewise does not change `clipID`. The result is a
+grid parked on the wrong octave while the header correctly reports the note count.
+
+Verified live: Bass B (notes at pitch 36 and 41) opened showing C3 at the bottom with only one
+note clipping the lower edge.
+
+Fix:
+1. Re-centre whenever the pitch viewport's available height changes, not only on appear and on
+   clip change. A `GeometryReader` height change or an `.onChange` on the measured height is
+   fine; the point is that expanding the pane or dragging the divider must re-centre.
+2. Make the centring robust to layout timing rather than relying on a single
+   `DispatchQueue.main.async` hop.
+3. `focusPitch` returning the mean pitch is correct; do not change it. The bug is when it is
+   applied, not what it computes.
+4. Add a check that expanding a collapsed roll leaves the focus pitch inside the visible band.
