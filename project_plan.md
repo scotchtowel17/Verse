@@ -1473,7 +1473,7 @@ width / zero height / inverted drag / point), `BeatTimeline` beat↔x (200 trial
 invert). Full harness: **1719 assertions, 0 failures. No defects found.** No production code
 changes.
 
-## Step V6 — Audio split groundwork (model only) — PENDING
+## Step V6 — Audio split groundwork (model only) — DONE
 
 Audio split was deferred because `Clip` cannot express "this clip plays from N seconds into the
 file". Do the model half now so audio split later is a small UI change rather than a schema
@@ -1495,6 +1495,14 @@ migration under time pressure. **No UI in this step.**
    non-zero offset schedules from the right frame, asserted on rendered audio the way R1 does;
    splitting an audio clip yields halves whose offsets and lengths tile the original exactly;
    the future-schema refusal still works.
+
+**Resolution (V6):** `Schema.current` is 2. `Clip.mediaStartSeconds` defaults to 0.
+`Migration.steps[1]` runs `v1ToV2`, which defaults missing `mediaStartSeconds` on every clip;
+`migrateRawIfNeeded` still rejects `schemaVersion > Schema.current` (H4).
+`Transport.planAudioSegment` / `play` use the offset for `startingFrame` (plus mid-clip playhead
+skip), still capped at file length. `Project.splitAudioClip` produces abutting audio halves with
+advanced media offset; not wired to UI or AI. Harness: V6 suites in `CheckModel` and
+`CheckTransport`.
 
 ## Step V7 — Compact project_plan.md — PENDING
 

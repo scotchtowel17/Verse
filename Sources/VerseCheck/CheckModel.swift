@@ -36,6 +36,145 @@ func runModelChecks(_ tk: TestKit) {
         }
     }
 
+    // MARK: - Step V6: schema v2 mediaStartSeconds + v1→v2 migration
+
+    tk.suite("Model V6: v1 fixture opens as v2 with mediaStartSeconds 0; re-saves as v2") {
+        // Hand-built v1 JSON: no mediaStartSeconds on the audio clip.
+        let v1JSON = """
+        {
+          "schemaVersion": 1,
+          "id": "00000000-0000-4000-8000-0000000000A1",
+          "title": "Legacy Song",
+          "tempoBPM": 120,
+          "timeSignature": { "num": 4, "den": 4 },
+          "tracks": [
+            {
+              "id": "00000000-0000-4000-8000-0000000000B1",
+              "kind": "audio",
+              "name": "Audio",
+              "volume": 0.8,
+              "pan": 0,
+              "mute": false,
+              "solo": false,
+              "inserts": [],
+              "clips": [
+                {
+                  "id": "00000000-0000-4000-8000-0000000000C1",
+                  "kind": "audio",
+                  "name": "take",
+                  "startBeat": 0,
+                  "lengthBeats": 4,
+                  "mediaFile": "take.caf"
+                }
+              ]
+            }
+          ],
+          "masterVolume": 0.85,
+          "createdAt": "1970-01-01T00:00:00Z",
+          "modifiedAt": "1970-01-01T00:00:00Z"
+        }
+        """
+        let data = Data(v1JSON.utf8)
+        let opened = try Project.fromJSON(data)
+        tk.expectEqual(opened.schemaVersion, Schema.current, "v1 opens as schema \(Schema.current)")
+        tk.expectEqual(opened.schemaVersion, 2, "current schema is 2")
+        tk.expectEqual(opened.tracks.count, 1, "track preserved")
+        tk.expectEqual(opened.tracks[0].clips.count, 1, "clip preserved")
+        tk.expectEqual(opened.tracks[0].clips[0].mediaStartSeconds, 0,
+                       "migrated clip defaults mediaStartSeconds to 0")
+        tk.expectEqual(opened.tracks[0].clips[0].mediaFile, "take.caf", "media path preserved")
+        tk.expectEqual(opened.title, "Legacy Song", "title preserved")
+
+        // Re-save is schema v2 and includes the field.
+        let resaved = try opened.jsonData()
+        let resavedObj = try JSONSerialization.jsonObject(with: resaved) as? [String: Any]
+        tk.expectEqual(resavedObj?["schemaVersion"] as? Int, 2, "re-save writes schemaVersion 2")
+        let clips = (resavedObj?["tracks"] as? [[String: Any]])?.first?["clips"] as? [[String: Any]]
+        let mediaStart = clips?.first?["mediaStartSeconds"] as? Double
+        tk.expectEqual(mediaStart, 0, "re-save includes mediaStartSeconds: 0")
+
+        let roundTrip = try Project.fromJSON(resaved)
+        tk.expectEqual(roundTrip.schemaVersion, 2, "v2 re-opens as v2")
+        tk.expectEqual(roundTrip.tracks[0].clips[0].mediaStartSeconds, 0,
+                       "round-trip keeps mediaStartSeconds")
+    }
+
+    tk.suite("Model V6: new clips default mediaStartSeconds to 0; non-zero round-trips") {
+        let zero = Clip(kind: .audio, name: "z", startBeat: 0, lengthBeats: 2, mediaFile: "a.caf")
+        tk.expectEqual(zero.mediaStartSeconds, 0, "init default is 0")
+        let offset = Clip(kind: .audio, name: "o", startBeat: 0, lengthBeats: 2,
+                          mediaFile: "a.caf", mediaStartSeconds: 1.25)
+        tk.expectEqual(offset.mediaStartSeconds, 1.25, "non-zero stored")
+
+        var p = Project(title: "offset", tempoBPM: 120)
+        p.tracks = [Track(kind: .audio, name: "A", clips: [offset])]
+        let back = try Project.fromJSON(try p.jsonData())
+        tk.expectEqual(back.schemaVersion, Schema.current, "saved as current schema")
+        tk.expectEqual(back.tracks[0].clips[0].mediaStartSeconds, 1.25,
+                       "non-zero mediaStartSeconds round-trips")
+    }
+
+    tk.suite("Model V6: splitAudioClip tiles offsets and lengths; refuses MIDI and edges") {
+        var p = Project(title: "audio-split", tempoBPM: 120)
+        // 120 BPM → 0.5 s/beat. Clip at arrangement 2…10 (length 8), media starts at 1.0 s.
+        // Split at arrangement beat 6 → local 4 beats → 2.0 s of media advance.
+        let orig = Clip(kind: .audio, name: "take", startBeat: 2, lengthBeats: 8,
+                        mediaFile: "take.caf", mediaStartSeconds: 1.0)
+        let origID = orig.id
+        p.tracks = [Track(kind: .audio, name: "Audio", clips: [orig])]
+
+        let pair = try p.splitAudioClip(id: orig.id, atBeat: 6)
+        tk.expectEqual(p.tracks[0].clips.count, 2, "original replaced by two halves")
+        let left = p.tracks[0].clips[0]
+        let right = p.tracks[0].clips[1]
+        tk.expectEqual(left.id, pair.left.id, "return matches left")
+        tk.expectEqual(right.id, pair.right.id, "return matches right")
+        tk.expect(left.id != origID, "left has fresh UUID")
+        tk.expect(right.id != origID, "right has fresh UUID")
+        tk.expect(left.id != right.id, "halves have distinct UUIDs")
+
+        tk.expectEqual(left.startBeat, 2, "left starts where original did")
+        tk.expectEqual(left.lengthBeats, 4, "left runs to playhead")
+        tk.expectEqual(right.startBeat, 6, "right starts at playhead")
+        tk.expectEqual(right.lengthBeats, 4, "right runs to original end")
+        tk.expectEqual(left.startBeat + left.lengthBeats, right.startBeat, "no gap")
+        tk.expectEqual(right.startBeat + right.lengthBeats, 10, "right end matches original end")
+        tk.expectEqual(left.lengthBeats + right.lengthBeats, 8, "lengths tile original")
+
+        tk.expectEqual(left.mediaStartSeconds, 1.0, "left keeps original media offset")
+        tk.expectEqual(right.mediaStartSeconds, 1.0 + 4 * 0.5,
+                       "right advances by left duration in seconds (4 beats × 0.5 s)")
+        tk.expectEqual(left.mediaFile, "take.caf", "left shares media file")
+        tk.expectEqual(right.mediaFile, "take.caf", "right shares media file")
+
+        // Edges and wrong kind.
+        var midiProject = Project.newUntitled()
+        let midi = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 4,
+                        midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
+        midiProject.tracks[0].clips = [midi]
+        tk.expectThrows("refuse MIDI via splitAudioClip") {
+            try midiProject.splitAudioClip(id: midi.id, atBeat: 2)
+        }
+
+        // Rebuild a single audio clip for edge refusals.
+        var edge = Project(title: "edge", tempoBPM: 120)
+        let a = Clip(kind: .audio, name: "t", startBeat: 0, lengthBeats: 4,
+                     mediaFile: "t.caf", mediaStartSeconds: 0.5)
+        edge.tracks = [Track(kind: .audio, name: "A", clips: [a])]
+        tk.expectThrows("refuse split at exact start") {
+            try edge.splitAudioClip(id: a.id, atBeat: 0)
+        }
+        tk.expectThrows("refuse split at exact end") {
+            try edge.splitAudioClip(id: a.id, atBeat: 4)
+        }
+        tk.expectThrows("refuse unknown clip") {
+            try edge.splitAudioClip(id: UUID(), atBeat: 2)
+        }
+        tk.expectEqual(edge.tracks[0].clips.count, 1, "failed splits leave clip intact")
+        tk.expectEqual(edge.tracks[0].clips[0].mediaStartSeconds, 0.5,
+                       "failed splits leave mediaStartSeconds")
+    }
+
     tk.suite("Model H4: future schemaVersion is a readable open failure") {
         let future = Schema.current + 1
         let json = """

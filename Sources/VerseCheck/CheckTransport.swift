@@ -466,4 +466,155 @@ private func runTransportChecksOnMain(_ tk: TestKit) {
             tk.expect(n.offSeconds < 16 * spb, "not the unclipped 16-beat note end")
         }
     }
+
+    // MARK: - Step V6: mediaStartSeconds offsets the scheduled file frame
+
+    tk.suite("Transport V6: audio plan startingFrame comes from mediaStartSeconds") {
+        let spb = 0.5
+        let sampleRate = 44_100.0
+        let fileFrames: AVAudioFramePosition = 88_200  // 2.0 s
+        // mediaStart 0.5 s → frame 22050; clip length 1 beat = 0.5 s = 22050 frames.
+        let plan = Transport.planAudioSegment(
+            clipStartBeat: 0,
+            clipLengthBeats: 1,
+            playFromBeat: 0,
+            secondsPerBeat: spb,
+            fileLengthFrames: fileFrames,
+            sampleRate: sampleRate,
+            mediaStartSeconds: 0.5
+        )
+        tk.expect(plan != nil, "segment planned with media offset")
+        if let plan {
+            tk.expectEqual(plan.whenSeconds, 0, "arrangement when is still playhead")
+            tk.expectEqual(plan.startingFrame, 22_050,
+                           "startingFrame is mediaStartSeconds × sampleRate")
+            tk.expectEqual(plan.frameCount, 22_050,
+                           "frame count still from lengthBeats")
+        }
+
+        // Default / zero offset matches pre-V6 (file head).
+        let fromHead = Transport.planAudioSegment(
+            clipStartBeat: 0,
+            clipLengthBeats: 1,
+            playFromBeat: 0,
+            secondsPerBeat: spb,
+            fileLengthFrames: fileFrames,
+            sampleRate: sampleRate,
+            mediaStartSeconds: 0
+        )
+        if let fromHead {
+            tk.expectEqual(fromHead.startingFrame, 0, "zero mediaStartSeconds starts at file head")
+        }
+
+        // Mid-clip playhead advances further into the file on top of mediaStartSeconds.
+        let midPlay = Transport.planAudioSegment(
+            clipStartBeat: 0,
+            clipLengthBeats: 2,
+            playFromBeat: 1,   // skip 1 beat = 0.5 s into the clip
+            secondsPerBeat: spb,
+            fileLengthFrames: fileFrames,
+            sampleRate: sampleRate,
+            mediaStartSeconds: 0.25
+        )
+        if let midPlay {
+            // 0.25 + 0.5 = 0.75 s → frame 33075
+            tk.expectEqual(midPlay.startingFrame, 33_075,
+                           "playhead skip adds to mediaStartSeconds for the file frame")
+        }
+
+        // Offset past end of file: nothing to schedule.
+        let pastEnd = Transport.planAudioSegment(
+            clipStartBeat: 0,
+            clipLengthBeats: 1,
+            playFromBeat: 0,
+            secondsPerBeat: spb,
+            fileLengthFrames: fileFrames,
+            sampleRate: sampleRate,
+            mediaStartSeconds: 3.0
+        )
+        tk.expect(pastEnd == nil, "mediaStart past file length is not scheduled")
+    }
+
+    tk.suite("Transport V6: offline render of offset clip plays the right file region") {
+        // File: 0.5 s silence, then 0.5 s sine. Clip with mediaStartSeconds 0.5 must be
+        // audible; the same length from mediaStart 0 must be near silent (R1-style assert).
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("verse-tr-v6-offset-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let sampleRate = 44_100.0
+        let takeName = "half-silent.caf"
+        let url = dir.appendingPathComponent(takeName)
+        try writeMelodyCAF(to: url, segments: [(0.0, 0.5), (440.0, 0.5)], sampleRate: sampleRate)
+
+        let spb = 0.5  // 120 BPM; 1 beat = 0.5 s
+        let file = try AVAudioFile(forReading: url)
+
+        let offsetPlan = Transport.planAudioSegment(
+            clipStartBeat: 0,
+            clipLengthBeats: 1,
+            playFromBeat: 0,
+            secondsPerBeat: spb,
+            fileLengthFrames: file.length,
+            sampleRate: file.processingFormat.sampleRate,
+            mediaStartSeconds: 0.5
+        )
+        tk.expect(offsetPlan != nil, "offset plan exists")
+        guard let offsetPlan else { return }
+        tk.expectEqual(offsetPlan.startingFrame, 22_050,
+                       "offset plan starts at half-second frame")
+
+        let headPlan = Transport.planAudioSegment(
+            clipStartBeat: 0,
+            clipLengthBeats: 1,
+            playFromBeat: 0,
+            secondsPerBeat: spb,
+            fileLengthFrames: file.length,
+            sampleRate: file.processingFormat.sampleRate,
+            mediaStartSeconds: 0
+        )
+        tk.expect(headPlan != nil, "head plan exists")
+        guard let headPlan else { return }
+        tk.expectEqual(headPlan.startingFrame, 0, "head plan starts at 0")
+
+        func render(plan: PlannedAudioSegment) throws -> [Float] {
+            let audioID = UUID()
+            var project = Project(title: "v6-offset", tempoBPM: 120)
+            project.tracks = [
+                Track(id: audioID, kind: .audio, name: "Audio", clips: [
+                    Clip(kind: .audio, name: "Take", startBeat: 0, lengthBeats: 1,
+                         mediaFile: takeName, mediaStartSeconds: 0.5)
+                ])
+            ]
+            let engine = VerseAudioEngine()
+            engine.configure(with: project)
+            return try engine.renderOffline(seconds: 0.5, sampleRate: sampleRate) { e in
+                guard let player = e.playerNode(for: audioID) else { return }
+                player.stop()
+                player.scheduleSegment(
+                    file,
+                    startingFrame: plan.startingFrame,
+                    frameCount: plan.frameCount,
+                    at: nil
+                )
+                player.play()
+            }
+        }
+
+        let offsetSamples = try render(plan: offsetPlan)
+        let headSamples = try render(plan: headPlan)
+        tk.expect(offsetSamples.count > 1000, "offset render produced samples")
+        tk.expect(headSamples.count > 1000, "head render produced samples")
+
+        let offsetStats = VerseAudioEngine.stats(offsetSamples)
+        let headStats = VerseAudioEngine.stats(headSamples)
+        tk.expect(offsetStats.isAudible,
+                  "mediaStartSeconds 0.5 plays the sine half (peak=\(offsetStats.peak))")
+        tk.expect(headStats.peak < 1e-3,
+                  "mediaStartSeconds 0 plays the silent half (peak=\(headStats.peak))")
+        tk.expect(offsetStats.rms > headStats.rms * 10,
+                  "offset energy dwarfs head-of-file energy "
+                  + "(\(offsetStats.rms) vs \(headStats.rms))")
+    }
 }

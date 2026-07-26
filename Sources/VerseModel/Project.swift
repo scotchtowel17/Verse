@@ -10,7 +10,7 @@ import Foundation
 
 public enum Schema {
     /// Bump on any breaking change to the persisted shape; `Migration` chains forward.
-    public static let current: Int = 1
+    public static let current: Int = 2
 }
 
 // MARK: - Musical value types
@@ -89,13 +89,18 @@ public struct Clip: Codable, Sendable, Identifiable, Hashable {
     public var lengthBeats: Double
     /// Relative path within the bundle's `Media/` directory for audio clips.
     public var mediaFile: String?
+    /// Offset in seconds into `mediaFile` where this clip begins (audio only; 0 = file start).
+    /// Schema v2; v1 projects migrate to 0.
+    public var mediaStartSeconds: Double
     public var midiNotes: [Note]?
     public init(id: UUID = UUID(), kind: ClipKind, name: String = "",
                 startBeat: Double = 0, lengthBeats: Double = 0,
-                mediaFile: String? = nil, midiNotes: [Note]? = nil) {
+                mediaFile: String? = nil, mediaStartSeconds: Double = 0,
+                midiNotes: [Note]? = nil) {
         self.id = id; self.kind = kind; self.name = name
         self.startBeat = startBeat; self.lengthBeats = lengthBeats
-        self.mediaFile = mediaFile; self.midiNotes = midiNotes
+        self.mediaFile = mediaFile; self.mediaStartSeconds = mediaStartSeconds
+        self.midiNotes = midiNotes
     }
 }
 
@@ -214,7 +219,7 @@ public struct Project: Codable, Sendable, Identifiable {
     }
 }
 
-// MARK: - Mutation helpers (schema stays v1)
+// MARK: - Mutation helpers
 
 /// Readable failures from pure project/track mutations. Callers must not treat a throw as success.
 public enum MutationError: Error, Equatable, CustomStringConvertible {
@@ -233,8 +238,10 @@ public enum MutationError: Error, Equatable, CustomStringConvertible {
     case invalidClipLength(Double)
     /// Clip kind does not match the destination track kind (MIDI→instrument, audio→audio).
     case incompatibleClipTrack(clipKind: ClipKind, trackKind: TrackKind)
-    /// Audio clips cannot be split (schema has no start-offset field yet).
+    /// `splitClip` is MIDI-only; audio uses `splitAudioClip` (not yet in UI / AI).
     case cannotSplitAudioClip
+    /// `splitAudioClip` is audio-only; MIDI uses `splitClip`.
+    case cannotSplitNonAudioClip
     /// Split point is at or outside the clip’s own time range (would yield a zero-length half).
     case splitOutOfBounds
 
@@ -271,6 +278,8 @@ public enum MutationError: Error, Equatable, CustomStringConvertible {
             }
         case .cannotSplitAudioClip:
             return "Audio clips can’t be split yet. Only MIDI clips can be split."
+        case .cannotSplitNonAudioClip:
+            return "Only audio clips can be split this way. Use the regular split for MIDI clips."
         case .splitOutOfBounds:
             return "Move the playhead inside the clip to split it. Splitting at the start or end would leave an empty half."
         }
@@ -427,6 +436,7 @@ public extension Project {
             startBeat: original.startBeat,
             lengthBeats: leftLen,
             mediaFile: nil,
+            mediaStartSeconds: 0,
             midiNotes: leftNotes
         )
         let right = Clip(
@@ -436,7 +446,55 @@ public extension Project {
             startBeat: playhead,
             lengthBeats: rightLen,
             mediaFile: nil,
+            mediaStartSeconds: 0,
             midiNotes: rightNotes
+        )
+
+        tracks[loc.trackIndex].clips.remove(at: loc.clipIndex)
+        tracks[loc.trackIndex].clips.insert(left, at: loc.clipIndex)
+        tracks[loc.trackIndex].clips.insert(right, at: loc.clipIndex + 1)
+        return (left, right)
+    }
+
+    /// Split an audio clip at an arrangement-absolute beat into two abutting halves on the
+    /// same track. The left half keeps `mediaStartSeconds`; the right half advances it by
+    /// the left duration in seconds (from project tempo). Both result clips get fresh UUIDs.
+    /// MIDI is refused (use `splitClip`); a split at or outside the clip bounds is refused.
+    @discardableResult
+    mutating func splitAudioClip(id: UUID, atBeat playhead: Double) throws -> (left: Clip, right: Clip) {
+        guard let loc = clipLocation(id: id) else { throw MutationError.clipNotFound }
+        let original = tracks[loc.trackIndex].clips[loc.clipIndex]
+        guard original.kind == .audio else { throw MutationError.cannotSplitNonAudioClip }
+        let local = playhead - original.startBeat
+        guard local > 0, local < original.lengthBeats else {
+            throw MutationError.splitOutOfBounds
+        }
+
+        let leftLen = local
+        let rightLen = original.lengthBeats - local
+        let bpm = tempoBPM ?? 120
+        let secondsPerBeat = 60.0 / bpm
+        let advancedMediaStart = original.mediaStartSeconds + leftLen * secondsPerBeat
+
+        let left = Clip(
+            id: UUID(),
+            kind: .audio,
+            name: original.name,
+            startBeat: original.startBeat,
+            lengthBeats: leftLen,
+            mediaFile: original.mediaFile,
+            mediaStartSeconds: original.mediaStartSeconds,
+            midiNotes: nil
+        )
+        let right = Clip(
+            id: UUID(),
+            kind: .audio,
+            name: original.name,
+            startBeat: playhead,
+            lengthBeats: rightLen,
+            mediaFile: original.mediaFile,
+            mediaStartSeconds: advancedMediaStart,
+            midiNotes: nil
         )
 
         tracks[loc.trackIndex].clips.remove(at: loc.clipIndex)

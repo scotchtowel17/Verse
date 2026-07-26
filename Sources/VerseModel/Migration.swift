@@ -17,26 +17,55 @@ public enum Migration {
         guard var obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return data // not an object; let the decoder produce a clean error
         }
-        var version = (obj["schemaVersion"] as? Int) ?? 1
+        // Missing key defaults to v1 (oldest known). Wrong type is left for the decoder
+        // so a string/bool schemaVersion cannot be "repaired" into a loadable project.
+        let version: Int
+        if let v = obj["schemaVersion"] as? Int {
+            version = v
+        } else if obj["schemaVersion"] == nil {
+            version = 1
+        } else {
+            return data
+        }
         if version > Schema.current {
             throw MigrationError.unsupportedFutureVersion(version)
         }
         guard version < Schema.current else { return data }
 
-        while version < Schema.current {
-            guard let step = steps[version] else {
-                throw MigrationError.noPathFrom(version)
+        var migrating = version
+        while migrating < Schema.current {
+            guard let step = steps[migrating] else {
+                throw MigrationError.noPathFrom(migrating)
             }
             obj = try step(obj)
-            version += 1
-            obj["schemaVersion"] = version
+            migrating += 1
+            obj["schemaVersion"] = migrating
         }
         return try JSONSerialization.data(withJSONObject: obj)
     }
 
     /// Registered migration steps keyed by the *source* schema version.
-    /// (None yet — v1 is the initial schema. Add `1: { v1ToV2($0) }` etc. as the schema evolves.)
-    static let steps: [Int: ([String: Any]) throws -> [String: Any]] = [:]
+    /// After each step, `migrateRawIfNeeded` sets `schemaVersion` to `source + 1`.
+    static let steps: [Int: ([String: Any]) throws -> [String: Any]] = [
+        1: { try v1ToV2($0) },
+    ]
+
+    /// v1 → v2: additive `Clip.mediaStartSeconds` (default 0). Existing clips had no file offset.
+    private static func v1ToV2(_ obj: [String: Any]) throws -> [String: Any] {
+        var result = obj
+        guard var tracks = result["tracks"] as? [[String: Any]] else { return result }
+        for ti in tracks.indices {
+            guard var clips = tracks[ti]["clips"] as? [[String: Any]] else { continue }
+            for ci in clips.indices {
+                if clips[ci]["mediaStartSeconds"] == nil {
+                    clips[ci]["mediaStartSeconds"] = 0.0
+                }
+            }
+            tracks[ti]["clips"] = clips
+        }
+        result["tracks"] = tracks
+        return result
+    }
 
     public enum MigrationError: Error, LocalizedError, CustomStringConvertible {
         case noPathFrom(Int)
