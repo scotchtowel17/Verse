@@ -9,12 +9,12 @@ public struct ContentView: View {
     @Environment(AppStore.self) private var store
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             header
             TransportBar()
             TrackListView()
-            // Arrangement expands into leftover height so tracks keep their min size.
-            ArrangementView()
+            // Shared arrangement + inline piano roll (one time axis, one H scroll).
+            TimelineWorkspaceView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             if !store.takes.isEmpty { takesList }
             keyboardHint
@@ -69,15 +69,7 @@ public struct ContentView: View {
         .sheet(isPresented: Binding(get: { store.showTools }, set: { store.showTools = $0 })) {
             ToolsPanel()
         }
-        .sheet(isPresented: Binding(
-            get: { store.showPianoRoll },
-            set: { newValue in
-                store.showPianoRoll = newValue
-                if !newValue { store.pianoRollClipID = nil }
-            }
-        )) {
-            PianoRollView()
-        }
+        // Piano roll is inline in TimelineWorkspaceView (no modal sheet).
     }
 
     private var header: some View {

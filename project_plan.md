@@ -1127,7 +1127,7 @@ you cannot see how the notes you are editing line up against the other tracks' c
 makes the main transport unreachable (which is why S1 had to duplicate transport controls into
 the roll).
 
-## Step T1 — Inline, aligned piano roll — PENDING
+## Step T1 — Inline, aligned piano roll — DONE
 
 1. **Remove the sheet.** The piano roll becomes a pane inside the main window, below the
    arrangement, with the Tracks list and Arrangement still visible above it. No modal
@@ -1157,3 +1157,25 @@ the roll).
    horizontal axis.
 
 No schema change. Selection stays view-local.
+
+## Step T2 — Inline roll opens unusable (found by running it) — PENDING
+
+The core of T1 works and was verified live: the roll is inline, the arrangement stays visible
+above it, the shared beat axis lines up (a clip at bars 3-5 has its notes directly beneath it),
+the clip's active region is shaded in the roll, and one playhead spans both. Two problems make
+it unusable on open.
+
+1. **The roll does not centre vertically on the selected clip's notes.** Opening the Lead clip
+   (4 notes at pitches 72-76) shows an EMPTY grid parked around C6 while the header says
+   "4 notes". This is the same defect fixed once already in P2b, reintroduced when the roll
+   became inline. Centre the pitch viewport on the clip's notes when a clip is selected, falling
+   back to middle C for an empty clip.
+2. **The default roll height is far too short**: roughly seven pitch rows, which is not enough to
+   edit anything. Give the expanded roll a sensible default height (enough for about two octaves)
+   while still respecting the minimums for the Tracks list and Arrangement above it. Dragging the
+   divider taller works and should be kept.
+3. **The roll's own toolbar row (Snap control and note count) disappears** once the divider is
+   dragged to enlarge the grid. It must stay pinned and visible at every pane height.
+
+Do not change the shared-axis behaviour or any Phase S editing behaviour; these are layout and
+viewport fixes.

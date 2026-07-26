@@ -2,12 +2,69 @@ import AppKit
 import SwiftUI
 import VerseModel
 
-/// Piano-roll editor for a MIDI clip: pitch × time grid, piano-key gutter, note blocks,
-/// snap control, and standard DAW editing (add / move / resize / delete / copy-paste)
-/// with multi-note selection and one undo entry per completed gesture.
-struct PianoRollView: View {
+// MARK: - Chrome (header / snap / collapse) above or below the shared grid band
+
+/// Piano-roll controls that sit outside the shared horizontal scroll so they do not drift.
+struct PianoRollChrome: View {
     @Environment(AppStore.self) private var store
-    @Environment(\.dismiss) private var dismiss
+
+    private var clip: Clip? {
+        guard let id = store.pianoRollClipID,
+              let loc = store.project.clipLocation(id: id) else { return nil }
+        let c = store.project.tracks[loc.trackIndex].clips[loc.clipIndex]
+        return c.kind == .midi ? c : nil
+    }
+
+    private var trackName: String {
+        guard let id = store.pianoRollClipID,
+              let loc = store.project.clipLocation(id: id) else { return "" }
+        return store.project.tracks[loc.trackIndex].name
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Label("Piano roll", systemImage: "rectangle.split.2x1")
+                .font(.subheadline.weight(.semibold))
+            if let clip {
+                Text("· \(clip.name.isEmpty ? "MIDI clip" : clip.name)")
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                if !trackName.isEmpty {
+                    Text("on \(trackName)")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+            } else {
+                Text("Click a MIDI clip above to edit its notes")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Button {
+                store.pianoRollAuditionStop()
+                store.showPianoRoll = false
+            } label: {
+                Label("Collapse", systemImage: "chevron.down")
+            }
+            .controlSize(.small)
+            .help("Hide the piano roll (clip stays selected)")
+        }
+    }
+}
+
+// MARK: - Embedded roll grid (shared BeatTimeline + parent H scroll)
+
+/// Note grid for the open MIDI clip. Horizontal time uses `BeatTimeline` in arrangement-
+/// absolute coordinates so notes line up under the arrangement lanes. Vertical pitch scroll
+/// is owned by the parent workspace band.
+struct PianoRollEmbeddedView: View {
+    @Environment(AppStore.self) private var store
+
+    let contentBeats: Double
+    let totalWidth: CGFloat
+    let showsGutter: Bool
 
     /// Snap grid in beats: 0 (Off), 1 (1/4), 0.5 (1/8), 0.25 (1/16). Default 1/16.
     @State private var snapBeats: Double = 0.25
@@ -35,9 +92,6 @@ struct PianoRollView: View {
     @State private var lastEmptyClickPoint: CGPoint?
 
     private static let rowHeight: CGFloat = 18
-    private static let beatWidth: CGFloat = 56
-    private static let gutterWidth: CGFloat = 48
-    private static let rulerHeight: CGFloat = 22
     private static let clickSlop: CGFloat = 4
     private static let doubleClickSeconds: TimeInterval = 0.4
 
@@ -46,26 +100,16 @@ struct PianoRollView: View {
     private var clip: Clip? {
         guard let clipID else { return nil }
         guard let loc = store.project.clipLocation(id: clipID) else { return nil }
-        return store.project.tracks[loc.trackIndex].clips[loc.clipIndex]
+        let c = store.project.tracks[loc.trackIndex].clips[loc.clipIndex]
+        return c.kind == .midi ? c : nil
     }
 
-    private var trackName: String {
-        guard let clipID, let loc = store.project.clipLocation(id: clipID) else { return "" }
-        return store.project.tracks[loc.trackIndex].name
-    }
+    private var clipStart: Double { clip?.startBeat ?? 0 }
 
     private var notes: [Note] { clip?.midiNotes ?? [] }
 
     private var beatsPerBar: Int {
         max(1, store.project.timeSignature.num)
-    }
-
-    /// Horizontal content length in beats: at least the clip length, any note end, and 4 bars.
-    private var contentBeats: Double {
-        let clipLen = clip?.lengthBeats ?? 0
-        let noteEnd = notes.map { $0.startBeat + $0.lengthBeats }.max() ?? 0
-        let fourBars = Double(beatsPerBar * 4)
-        return max(clipLen, noteEnd, fourBars, 4)
     }
 
     /// Inclusive pitch rows drawn on the roll. All notes always fall inside this range so
@@ -79,30 +123,44 @@ struct PianoRollView: View {
     private var pitchCount: Int { pitchHigh - pitchLow + 1 }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
-            if clip == nil {
-                ContentUnavailableView(
-                    "No clip to show",
-                    systemImage: "music.note.list",
-                    description: Text("Open the piano roll from an instrument track. A brand-new project creates an empty MIDI clip for you.")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
+        let rowH = Self.rowHeight
+        let gridHeight = CGFloat(max(1, pitchCount)) * rowH
+
+        VStack(alignment: .leading, spacing: 0) {
+            if clip != nil {
                 snapBar
-                rollScroll
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+            }
+            HStack(alignment: .top, spacing: 0) {
+                if showsGutter {
+                    pianoGutter(rowHeight: rowH, totalHeight: gridHeight)
+                }
+                ZStack(alignment: .topLeading) {
+                    if clip == nil {
+                        emptyClipPlaceholder(totalHeight: max(gridHeight, 80))
+                    } else {
+                        gridLayer(rowHeight: rowH, totalHeight: gridHeight)
+                        // Clip span highlight under notes (arrangement-absolute).
+                        clipSpanOverlay(totalHeight: gridHeight)
+                        emptyGridHitTarget(rowHeight: rowH, totalHeight: gridHeight)
+                        notesLayer(rowHeight: rowH)
+                        marqueeOverlay()
+                    }
+                }
+                .frame(width: totalWidth, height: max(gridHeight, 80), alignment: .topLeading)
+                .coordinateSpace(name: "pianoRollGrid")
             }
         }
-        .padding(16)
-        .frame(minWidth: 960, idealWidth: 1100, maxWidth: .infinity,
-               minHeight: 640, idealHeight: 720, maxHeight: .infinity)
+        .frame(width: (showsGutter ? BeatTimeline.gutterWidth : 0) + totalWidth,
+               alignment: .topLeading)
         .focusable()
         .focused($isFocused)
         .focusEffectDisabled()
         .onAppear { isFocused = true }
-        .onExitCommand {
-            store.pianoRollAuditionStop()
-            dismiss()
+        .onChange(of: clipID) { _, _ in
+            selectedNoteIDs = []
+            isFocused = true
         }
         .onDeleteCommand { deleteSelection() }
         .onKeyPress(.delete) {
@@ -137,67 +195,9 @@ struct PianoRollView: View {
         }
     }
 
-    private var header: some View {
-        HStack {
-            Label("Piano roll", systemImage: "rectangle.split.2x1")
-                .font(.title3.bold())
-            if let clip {
-                Text("· \(clip.name.isEmpty ? "MIDI clip" : clip.name)")
-                    .foregroundStyle(.secondary)
-                if !trackName.isEmpty {
-                    Text("on \(trackName)")
-                        .font(.callout)
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            Spacer()
-            rollTransport
-            Spacer().frame(width: 12)
-            Button("Done") {
-                store.pianoRollAuditionStop()
-                dismiss()
-            }
-            .keyboardShortcut(.cancelAction)
-        }
-    }
-
-    /// Play / pause / rewind / loop inside the sheet so the main transport bar is not needed.
-    private var rollTransport: some View {
-        HStack(spacing: 8) {
-            Button {
-                store.rewindToStart()
-            } label: {
-                Image(systemName: "backward.end.fill")
-            }
-            .help("Rewind to start")
-            .disabled(store.copilotPreviewBlocksTransport)
-
-            Button {
-                if store.isPlaying {
-                    store.pausePlayback()
-                } else {
-                    store.startPlayback()
-                }
-            } label: {
-                Image(systemName: store.isPlaying ? "pause.fill" : "play.fill")
-            }
-            .help(store.isPlaying ? "Pause (hold position)" : "Play from playhead")
-            .disabled(store.copilotPreviewBlocksTransport)
-
-            Toggle(isOn: Binding(get: { store.loopOn }, set: { store.loopOn = $0 })) {
-                Image(systemName: "repeat")
-            }
-            .toggleStyle(.button)
-            .help("Loop")
-            .disabled(store.copilotPreviewBlocksTransport)
-        }
-        .buttonStyle(.borderless)
-    }
-
     private var snapBar: some View {
         HStack(spacing: 10) {
             Text("Snap").font(.callout).foregroundStyle(.secondary)
-            // labelsHidden avoids the duplicate “Snap Snap …” toolbar reading.
             Picker("Snap", selection: $snapBeats) {
                 Text("Off").tag(0.0)
                 Text("1/4").tag(1.0)
@@ -225,122 +225,30 @@ struct PianoRollView: View {
         }
     }
 
-    private var rollScroll: some View {
-        let rowH = Self.rowHeight
-        let beatW = Self.beatWidth
-        let gridHeight = CGFloat(pitchCount) * rowH
-        let totalWidth = CGFloat(contentBeats) * beatW
-        // Ruler + grid share the playhead height so the line spans both.
-        let totalHeight = Self.rulerHeight + gridHeight
-
-        return ScrollView([.horizontal, .vertical]) {
-            HStack(alignment: .top, spacing: 0) {
-                // Gutter under a blank ruler corner so keys stay aligned with pitch rows.
-                VStack(alignment: .leading, spacing: 0) {
-                    Color.clear.frame(width: Self.gutterWidth, height: Self.rulerHeight)
-                    pianoGutter(rowHeight: rowH, totalHeight: gridHeight)
-                }
-                ZStack(alignment: .topLeading) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        beatRuler(beatWidth: beatW, totalWidth: totalWidth)
-                        ZStack(alignment: .topLeading) {
-                            gridLayer(beatWidth: beatW, rowHeight: rowH,
-                                      totalWidth: totalWidth, totalHeight: gridHeight)
-                            // Empty-grid: double-click adds, drag marquees, click clears.
-                            emptyGridHitTarget(beatWidth: beatW, rowHeight: rowH,
-                                               totalWidth: totalWidth, totalHeight: gridHeight)
-                            notesLayer(beatWidth: beatW, rowHeight: rowH)
-                            marqueeOverlay()
-                        }
-                        .frame(width: totalWidth, height: gridHeight, alignment: .topLeading)
-                        .coordinateSpace(name: "pianoRollGrid")
-                    }
-                    // Playhead over ruler + grid (playing, paused, or scrubbed).
-                    playheadLayer(beatWidth: beatW, totalHeight: totalHeight)
-                }
-                .frame(width: totalWidth, height: totalHeight, alignment: .topLeading)
-            }
+    private func emptyClipPlaceholder(totalHeight: CGFloat) -> some View {
+        ZStack {
+            gridLayer(rowHeight: Self.rowHeight, totalHeight: totalHeight)
+            Text("Click a MIDI clip in the arrangement to edit notes here")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .padding(12)
         }
-        .background(Color(nsColor: .textBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.black.opacity(0.12)))
-    }
-
-    // MARK: - Beat ruler (scrub)
-
-    /// Click or drag the ruler to move the playhead. Position is arrangement-absolute
-    /// (clip start + local beat). Does not record undo.
-    private func beatRuler(beatWidth: CGFloat, totalWidth: CGFloat) -> some View {
-        Canvas { context, size in
-            let beatCount = Int(ceil(contentBeats))
-            for b in 0...beatCount {
-                let x = CGFloat(b) * beatWidth
-                let isBar = b % beatsPerBar == 0
-                if isBar {
-                    var line = Path()
-                    line.move(to: CGPoint(x: x, y: size.height * 0.25))
-                    line.addLine(to: CGPoint(x: x, y: size.height))
-                    context.stroke(line, with: .color(Color.black.opacity(0.35)), lineWidth: 1)
-                    let barNumber = (b / beatsPerBar) + 1
-                    context.draw(
-                        Text("\(barNumber)")
-                            .font(.system(size: 9, weight: .medium, design: .monospaced))
-                            .foregroundColor(Color.secondary),
-                        at: CGPoint(x: x + 3, y: 2),
-                        anchor: .topLeading
-                    )
-                } else {
-                    var line = Path()
-                    line.move(to: CGPoint(x: x, y: size.height * 0.55))
-                    line.addLine(to: CGPoint(x: x, y: size.height))
-                    context.stroke(line, with: .color(Color.black.opacity(0.12)), lineWidth: 0.5)
-                }
-            }
-        }
-        .frame(width: totalWidth, height: Self.rulerHeight)
-        .background(Color.black.opacity(0.04))
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.black.opacity(0.15)).frame(height: 0.5)
-        }
-        .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { value in
-                    scrub(atX: value.location.x, beatWidth: beatWidth)
-                }
-                .onEnded { value in
-                    scrub(atX: value.location.x, beatWidth: beatWidth)
-                }
-        )
-        .help("Click or drag to move the playhead")
-    }
-
-    private func scrub(atX x: CGFloat, beatWidth: CGFloat) {
-        guard let clip else { return }
-        let local = max(0, min(contentBeats, Double(x / beatWidth)))
-        let arrangement = clip.startBeat + local
-        store.scrubPlayhead(to: arrangement)
-    }
-
-    /// Vertical playhead at the transport’s arrangement beat, mapped into clip-local time.
-    /// Drawn while playing, paused, or after a scrub (not only during playback).
-    @ViewBuilder
-    private func playheadLayer(beatWidth: CGFloat, totalHeight: CGFloat) -> some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !store.isPlaying)) { _ in
-            if let beat = store.playbackBeat,
-               let clip {
-                let local = beat - clip.startBeat
-                if local >= 0 && local <= contentBeats {
-                    let x = CGFloat(local) * beatWidth
-                    Rectangle()
-                        .fill(Color.red.opacity(0.85))
-                        .frame(width: 1.5, height: totalHeight)
-                        .offset(x: x)
-                        .allowsHitTesting(false)
-                }
-            }
-        }
+        .frame(width: totalWidth, height: totalHeight)
         .allowsHitTesting(false)
+    }
+
+    /// Dim the region outside the open clip so its span lines up with the arrangement block.
+    @ViewBuilder
+    private func clipSpanOverlay(totalHeight: CGFloat) -> some View {
+        if let clip {
+            let x = BeatTimeline.x(forBeat: clip.startBeat)
+            let w = max(BeatTimeline.width(forBeats: clip.lengthBeats), 2)
+            Rectangle()
+                .fill(Color.accentColor.opacity(0.06))
+                .frame(width: w, height: totalHeight)
+                .offset(x: x)
+                .allowsHitTesting(false)
+        }
     }
 
     // MARK: - Gutter (piano keys)
@@ -351,7 +259,7 @@ struct PianoRollView: View {
                 let y = yForPitch(pitch, rowHeight: rowHeight)
                 Rectangle()
                     .fill(Self.isBlackKey(pitch) ? Color.black.opacity(0.78) : Color.white)
-                    .frame(width: Self.gutterWidth, height: rowHeight)
+                    .frame(width: BeatTimeline.gutterWidth, height: rowHeight)
                     .overlay(alignment: .bottom) {
                         Rectangle()
                             .fill(Color.black.opacity(0.12))
@@ -370,16 +278,15 @@ struct PianoRollView: View {
                     .offset(y: y)
             }
         }
-        .frame(width: Self.gutterWidth, height: totalHeight, alignment: .topLeading)
+        .frame(width: BeatTimeline.gutterWidth, height: totalHeight, alignment: .topLeading)
         .overlay(alignment: .trailing) {
             Rectangle().fill(Color.black.opacity(0.2)).frame(width: 1)
         }
     }
 
-    // MARK: - Grid
+    // MARK: - Grid (arrangement-absolute beat columns)
 
-    private func gridLayer(beatWidth: CGFloat, rowHeight: CGFloat,
-                           totalWidth: CGFloat, totalHeight: CGFloat) -> some View {
+    private func gridLayer(rowHeight: CGFloat, totalHeight: CGFloat) -> some View {
         Canvas { context, size in
             for pitch in pitchLow...pitchHigh {
                 let y = yForPitch(pitch, rowHeight: rowHeight)
@@ -395,7 +302,7 @@ struct PianoRollView: View {
 
             let beatCount = Int(ceil(contentBeats))
             for b in 0...beatCount {
-                let x = CGFloat(b) * beatWidth
+                let x = CGFloat(b) * BeatTimeline.beatWidth
                 let isBar = b % beatsPerBar == 0
                 var line = Path()
                 line.move(to: CGPoint(x: x, y: 0))
@@ -413,8 +320,7 @@ struct PianoRollView: View {
 
     /// Empty grid: pure click clears selection; double-click adds a note; drag draws a
     /// marquee and selects every note it touches.
-    private func emptyGridHitTarget(beatWidth: CGFloat, rowHeight: CGFloat,
-                                    totalWidth: CGFloat, totalHeight: CGFloat) -> some View {
+    private func emptyGridHitTarget(rowHeight: CGFloat, totalHeight: CGFloat) -> some View {
         Color.clear
             .contentShape(Rectangle())
             .frame(width: totalWidth, height: totalHeight)
@@ -439,15 +345,14 @@ struct PianoRollView: View {
                             marqueeLive = false
                         }
                         if marqueeLive {
-                            applyMarqueeSelection(beatWidth: beatWidth, rowHeight: rowHeight)
+                            applyMarqueeSelection(rowHeight: rowHeight)
                             lastEmptyClickTime = nil
                             lastEmptyClickPoint = nil
                             return
                         }
                         let moved = hypot(value.translation.width, value.translation.height)
                         guard moved < Self.clickSlop else { return }
-                        handleEmptyGridClick(at: value.location,
-                                             beatWidth: beatWidth, rowHeight: rowHeight)
+                        handleEmptyGridClick(at: value.location, rowHeight: rowHeight)
                     }
             )
     }
@@ -470,14 +375,13 @@ struct PianoRollView: View {
         }
     }
 
-    private func handleEmptyGridClick(at location: CGPoint,
-                                      beatWidth: CGFloat, rowHeight: CGFloat) {
+    private func handleEmptyGridClick(at location: CGPoint, rowHeight: CGFloat) {
         let now = Date()
         if let lastTime = lastEmptyClickTime,
            let lastPoint = lastEmptyClickPoint,
            now.timeIntervalSince(lastTime) <= Self.doubleClickSeconds,
            hypot(location.x - lastPoint.x, location.y - lastPoint.y) < Self.clickSlop * 2 {
-            addNote(at: location, beatWidth: beatWidth, rowHeight: rowHeight)
+            addNote(at: location, rowHeight: rowHeight)
             lastEmptyClickTime = nil
             lastEmptyClickPoint = nil
             return
@@ -488,33 +392,39 @@ struct PianoRollView: View {
         lastEmptyClickPoint = location
     }
 
-    private func applyMarqueeSelection(beatWidth: CGFloat, rowHeight: CGFloat) {
+    private func applyMarqueeSelection(rowHeight: CGFloat) {
         guard let start = marqueeStart, let current = marqueeCurrent else { return }
-        let beatA = Double(start.x / beatWidth)
-        let beatB = Double(current.x / beatWidth)
+        // Grid x is arrangement-absolute; selection helpers use clip-local starts.
+        let localA = BeatTimeline.localBeat(
+            absolute: BeatTimeline.beat(atX: start.x), clipStart: clipStart)
+        let localB = BeatTimeline.localBeat(
+            absolute: BeatTimeline.beat(atX: current.x), clipStart: clipStart)
         let pitchA = pitchAt(y: start.y, rowHeight: rowHeight)
         let pitchB = pitchAt(y: current.y, rowHeight: rowHeight)
         let ids = PianoRollSelection.notesTouchingMarquee(
-            notes: notes, beatA: beatA, beatB: beatB, pitchA: pitchA, pitchB: pitchB
+            notes: notes, beatA: localA, beatB: localB, pitchA: pitchA, pitchB: pitchB
         )
         selectedNoteIDs = Set(ids)
     }
 
     // MARK: - Notes
 
-    private func notesLayer(beatWidth: CGFloat, rowHeight: CGFloat) -> some View {
+    private func notesLayer(rowHeight: CGFloat) -> some View {
         ZStack(alignment: .topLeading) {
             ForEach(notes) { note in
-                noteBlock(note, beatWidth: beatWidth, rowHeight: rowHeight)
+                noteBlock(note, rowHeight: rowHeight)
             }
         }
     }
 
     @ViewBuilder
-    private func noteBlock(_ note: Note, beatWidth: CGFloat, rowHeight: CGFloat) -> some View {
-        let x = CGFloat(note.startBeat) * beatWidth
+    private func noteBlock(_ note: Note, rowHeight: CGFloat) -> some View {
+        // Arrangement-absolute x so beat N sits under arrangement beat N.
+        let absStart = BeatTimeline.absoluteStart(
+            clipStart: clipStart, noteLocalStart: note.startBeat)
+        let x = BeatTimeline.x(forBeat: absStart)
         let y = yForPitch(note.pitch, rowHeight: rowHeight)
-        let w = max(CGFloat(note.lengthBeats) * beatWidth, 6)
+        let w = max(BeatTimeline.width(forBeats: note.lengthBeats), 6)
         let h = max(rowHeight - 2, 6)
         let selected = selectedNoteIDs.contains(note.id)
         // Proportional, capped resize zone so short notes (default 1/16) keep a move body.
@@ -540,20 +450,19 @@ struct PianoRollView: View {
                         NSCursor.pop()
                     }
                 }
-                .highPriorityGesture(resizeGesture(for: note, beatWidth: beatWidth))
+                .highPriorityGesture(resizeGesture(for: note))
         }
         .frame(width: w, height: h)
         .contentShape(Rectangle())
         .offset(x: x, y: y + 1)
         .help("Pitch \(note.pitch) · beat \(formatBeat(note.startBeat)) · len \(formatBeat(note.lengthBeats))")
         // Move/select on the body. Pure click (below slop) selects + auditions without undo.
-        .gesture(moveGesture(for: note, beatWidth: beatWidth, rowHeight: rowHeight))
+        .gesture(moveGesture(for: note, rowHeight: rowHeight))
     }
 
     // MARK: - Gestures
 
-    private func moveGesture(for note: Note, beatWidth: CGFloat,
-                             rowHeight: CGFloat) -> some Gesture {
+    private func moveGesture(for note: Note, rowHeight: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .named("pianoRollGrid"))
             .onChanged { value in
                 let moved = hypot(value.translation.width, value.translation.height)
@@ -588,7 +497,7 @@ struct PianoRollView: View {
                 // Same pitch and time delta for every selected note (formation preserved).
                 // Snap the primary note’s start; apply that beat delta to the whole group.
                 let pitchDelta = Int((-value.translation.height / rowHeight).rounded())
-                let beatDeltaRaw = Double(value.translation.width / beatWidth)
+                let beatDeltaRaw = Double(value.translation.width / BeatTimeline.beatWidth)
                 guard let primary = origin.notes.first(where: { $0.id == origin.primaryID })
                         ?? origin.notes.first else { return }
                 let snappedPrimaryStart = PianoRollLayout.snap(
@@ -645,7 +554,7 @@ struct PianoRollView: View {
         }
     }
 
-    private func resizeGesture(for note: Note, beatWidth: CGFloat) -> some Gesture {
+    private func resizeGesture(for note: Note) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .named("pianoRollGrid"))
             .onChanged { value in
                 if resizeOrigin == nil {
@@ -663,7 +572,7 @@ struct PianoRollView: View {
                     continuousGestureLive = true
                 }
                 guard let origin = resizeOrigin, origin.noteID == note.id else { return }
-                let deltaBeats = Double(value.translation.width / beatWidth)
+                let deltaBeats = Double(value.translation.width / BeatTimeline.beatWidth)
                 let raw = origin.lengthBeats + deltaBeats
                 let snapped = max(Project.minimumNoteLengthBeats,
                                   PianoRollLayout.snap(raw, to: snapBeats))
@@ -682,9 +591,16 @@ struct PianoRollView: View {
 
     // MARK: - Actions
 
-    private func addNote(at location: CGPoint, beatWidth: CGFloat, rowHeight: CGFloat) {
+    private func addNote(at location: CGPoint, rowHeight: CGFloat) {
         let pitch = pitchAt(y: location.y, rowHeight: rowHeight)
-        let start = max(0, PianoRollLayout.snap(Double(location.x / beatWidth), to: snapBeats))
+        let absBeat = BeatTimeline.beat(atX: location.x)
+        let localRaw = BeatTimeline.localBeat(absolute: absBeat, clipStart: clipStart)
+        // Notes before the clip start cannot be stored (model uses clip-local ≥ 0).
+        guard localRaw >= -0.000_1 else {
+            store.statusMessage = "Notes must sit inside the clip’s time range."
+            return
+        }
+        let start = max(0, PianoRollLayout.snap(localRaw, to: snapBeats))
         let length = PianoRollLayout.newNoteLengthBeats(snapBeats: snapBeats,
                                                         lastGridBeats: lastGridSnapBeats)
         if let id = store.pianoRollAddNote(pitch: pitch, startBeat: start, lengthBeats: length) {
@@ -917,13 +833,13 @@ public enum PianoRollSelection {
         clipboardStarts: [Double],
         playheadLocalBeat: Double
     ) -> [Double] {
-        guard let anchor = clipboardStarts.min() else { return [] }
-        return clipboardStarts.map { playheadLocalBeat + ($0 - anchor) }
+        guard let earliest = clipboardStarts.min() else { return [] }
+        let delta = playheadLocalBeat - earliest
+        return clipboardStarts.map { $0 + delta }
     }
 
-    /// Apply one pitch delta and one beat delta to every origin. Returns `nil` if any
-    /// result would leave MIDI 0–127 or start before beat 0 (whole selection rejected).
-    /// Formation (relative pitch and time) is preserved when the result is non-nil.
+    /// Apply the same pitch and beat delta to every origin. Returns nil if any result would
+    /// leave MIDI pitch 0…127 or start before beat 0 (whole group rejected, formation kept).
     public static func applyGroupDelta(
         origins: [(pitch: Int, startBeat: Double)],
         pitchDelta: Int,
@@ -932,10 +848,10 @@ public enum PianoRollSelection {
         var result: [(pitch: Int, startBeat: Double)] = []
         result.reserveCapacity(origins.count)
         for o in origins {
-            let pitch = o.pitch + pitchDelta
-            let start = o.startBeat + beatDelta
-            guard (0...127).contains(pitch), start >= 0 else { return nil }
-            result.append((pitch: pitch, startBeat: start))
+            let p = o.pitch + pitchDelta
+            let s = o.startBeat + beatDelta
+            guard p >= 0, p <= 127, s >= 0 else { return nil }
+            result.append((pitch: p, startBeat: s))
         }
         return result
     }
