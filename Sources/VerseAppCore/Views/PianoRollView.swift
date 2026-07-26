@@ -129,6 +129,21 @@ struct PianoRollEmbeddedView: View {
 
     private var notes: [Note] { clip?.midiNotes ?? [] }
 
+    /// Identity colour of the track that owns the open clip (notes match that track at a glance).
+    private var trackColorIndex: Int {
+        if let clipID, let loc = store.project.clipLocation(id: clipID) {
+            return store.project.tracks[loc.trackIndex].colorIndex
+        }
+        if let t = store.project.track(id: store.rollTrackID) {
+            return t.colorIndex
+        }
+        return 0
+    }
+
+    private var trackIdentity: TrackIdentityColor.Swatch {
+        TrackIdentityColor.swatch(for: trackColorIndex)
+    }
+
     private var beatsPerBar: Int {
         max(1, store.project.timeSignature.num)
     }
@@ -376,7 +391,7 @@ struct PianoRollEmbeddedView: View {
             let x = BeatTimeline.x(forBeat: clip.startBeat)
             let w = max(BeatTimeline.width(forBeats: clip.lengthBeats), 2)
             Rectangle()
-                .fill(Color.accentColor.opacity(0.06))
+                .fill(trackIdentity.solid.opacity(0.08))
                 .frame(width: w, height: totalHeight)
                 .offset(x: x)
                 .allowsHitTesting(false)
@@ -619,11 +634,12 @@ struct PianoRollEmbeddedView: View {
         let handleW = PianoRollLayout.resizeHandleWidth(noteWidth: w)
 
         ZStack(alignment: .trailing) {
+            // Note fill matches track identity; selection is a border (system accent), not identity.
             RoundedRectangle(cornerRadius: 3)
-                .fill(Color.accentColor.opacity(selected ? 1.0 : 0.85))
+                .fill(selected ? trackIdentity.solid.opacity(0.92) : trackIdentity.fill)
                 .overlay(
                     RoundedRectangle(cornerRadius: 3)
-                        .strokeBorder(selected ? Color.primary.opacity(0.55) : Color.accentColor,
+                        .strokeBorder(selected ? Color.accentColor : trackIdentity.solid.opacity(0.7),
                                       lineWidth: selected ? 1.5 : 0.5)
                 )
             // Right-edge resize handle (high priority so it wins over body move).

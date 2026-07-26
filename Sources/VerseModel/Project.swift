@@ -10,7 +10,28 @@ import Foundation
 
 public enum Schema {
     /// Bump on any breaking change to the persisted shape; `Migration` chains forward.
-    public static let current: Int = 2
+    public static let current: Int = 3
+}
+
+// MARK: - Track colour identity (schema v3)
+
+/// Fixed 8-slot palette indices for track identity colour.
+/// Actual display colours live in the UI layer so themes stay coherent; the model
+/// only stores which slot. Semantic colours (record, play, selection, warning) are
+/// never drawn from this palette.
+public enum TrackPalette {
+    public static let count = 8
+
+    /// Wrap any stored index into `0..<count`.
+    public static func normalized(_ index: Int) -> Int {
+        let m = index % count
+        return m >= 0 ? m : m + count
+    }
+
+    /// Next colour for a newly appended track (round-robin by current track count).
+    public static func colorIndexForNewTrack(existingCount: Int) -> Int {
+        normalized(existingCount)
+    }
 }
 
 // MARK: - Musical value types
@@ -116,15 +137,19 @@ public struct Track: Codable, Sendable, Identifiable, Hashable {
     public var pan: Double       // -1…1
     public var mute: Bool
     public var solo: Bool
+    /// Index into the fixed 8-colour identity palette (schema v3). Not a semantic state colour.
+    public var colorIndex: Int
     public var instrument: Instrument?
     public var inserts: [AudioUnitRef]
     public var clips: [Clip]
     public init(id: UUID = UUID(), kind: TrackKind, name: String,
                 volume: Double = 0.8, pan: Double = 0,
                 mute: Bool = false, solo: Bool = false,
+                colorIndex: Int = 0,
                 instrument: Instrument? = nil, inserts: [AudioUnitRef] = [], clips: [Clip] = []) {
         self.id = id; self.kind = kind; self.name = name
         self.volume = volume; self.pan = pan; self.mute = mute; self.solo = solo
+        self.colorIndex = TrackPalette.normalized(colorIndex)
         self.instrument = instrument; self.inserts = inserts; self.clips = clips
     }
 }
@@ -164,7 +189,14 @@ public struct Project: Codable, Sendable, Identifiable {
     /// A fresh untitled project seeded with one piano instrument track (the default new doc).
     public static func newUntitled() -> Project {
         Project(title: "Untitled",
-                tracks: [Track(kind: .instrument, name: "Piano", instrument: .grandPiano)])
+                tracks: [Track(kind: .instrument, name: "Piano",
+                               colorIndex: TrackPalette.colorIndexForNewTrack(existingCount: 0),
+                               instrument: .grandPiano)])
+    }
+
+    /// Round-robin colour for the next track appended to this project.
+    public var nextTrackColorIndex: Int {
+        TrackPalette.colorIndexForNewTrack(existingCount: tracks.count)
     }
 
     // MARK: Convenience lookups

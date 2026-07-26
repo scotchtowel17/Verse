@@ -1043,7 +1043,7 @@ public final class AppStore {
 
     func recordingsTrackIndex() -> Int {
         if let i = project.tracks.firstIndex(where: { $0.kind == .audio && $0.name == "Recordings" }) { return i }
-        let t = Track(kind: .audio, name: "Recordings")
+        let t = Track(kind: .audio, name: "Recordings", colorIndex: project.nextTrackColorIndex)
         project.tracks.append(t)
         engine.addAudioTrack(id: t.id)
         return project.tracks.count - 1
@@ -1186,7 +1186,9 @@ public final class AppStore {
         let end = result.notes.map { $0.startBeat + $0.lengthBeats }.max() ?? 4
         let clip = Clip(kind: .midi, name: "Hum melody", startBeat: 0,
                         lengthBeats: max(4, end), midiNotes: result.notes)
-        let track = Track(kind: .instrument, name: "Hum melody", instrument: .grandPiano, clips: [clip])
+        let track = Track(kind: .instrument, name: "Hum melody",
+                          colorIndex: project.nextTrackColorIndex,
+                          instrument: .grandPiano, clips: [clip])
         project.tracks.append(track)
         engine.addInstrumentTrack(id: track.id, instrument: track.instrument)
         engine.applyMix(track)

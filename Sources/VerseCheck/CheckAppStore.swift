@@ -234,6 +234,39 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         tk.expect(!AppStore.isDefaultTrackName("Grand Piano"), "preset-style name is not default")
     }
 
+    tk.suite("AppStore X1: track colour round-robin on add; setTrackColorIndex undoes") {
+        tk.expectEqual(TrackIdentityColor.swatches.count, TrackPalette.count,
+                       "UI swatches match palette size")
+
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // newUntitled seed is colour 0; first added track is 1, then 2.
+        tk.expectEqual(store.project.tracks[0].colorIndex, 0, "seed track colour 0")
+        store.addInstrumentTrack()
+        tk.expectEqual(store.project.tracks.last?.colorIndex, 1, "first add gets colour 1")
+        store.addAudioTrack()
+        tk.expectEqual(store.project.tracks.last?.colorIndex, 2, "second add gets colour 2")
+
+        let tid = store.project.tracks[0].id
+        store.setTrackColorIndex(5, tid)
+        tk.expectEqual(store.project.track(id: tid)?.colorIndex, 5, "colour set to 5")
+        tk.expectEqual(store.undoName, "Track Colour", "setTrackColorIndex labels undo")
+
+        // Same index is a no-op (no extra undo entry).
+        let depth = undoDepth(of: store)
+        store.setTrackColorIndex(5, tid)
+        tk.expectEqual(undoDepth(of: store), depth, "same colour does not push undo")
+
+        store.setTrackColorIndex(99, tid)
+        tk.expectEqual(store.project.track(id: tid)?.colorIndex, 99 % 8,
+                       "out-of-range colour is normalized")
+
+        store.undo()
+        tk.expectEqual(store.project.track(id: tid)?.colorIndex, 5,
+                       "undo restores previous colour")
+    }
+
     tk.suite("AppStore undo: setVolume / setPan never push (stack protection)") {
         let (store, dir) = makeTestStore()
         defer { try? FileManager.default.removeItem(at: dir) }

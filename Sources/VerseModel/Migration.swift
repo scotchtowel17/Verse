@@ -48,6 +48,7 @@ public enum Migration {
     /// After each step, `migrateRawIfNeeded` sets `schemaVersion` to `source + 1`.
     static let steps: [Int: ([String: Any]) throws -> [String: Any]] = [
         1: { try v1ToV2($0) },
+        2: { try v2ToV3($0) },
     ]
 
     /// v1 → v2: additive `Clip.mediaStartSeconds` (default 0). Existing clips had no file offset.
@@ -62,6 +63,20 @@ public enum Migration {
                 }
             }
             tracks[ti]["clips"] = clips
+        }
+        result["tracks"] = tracks
+        return result
+    }
+
+    /// v2 → v3: additive `Track.colorIndex` (fixed 8-colour identity palette).
+    /// Existing tracks get a round-robin index by position so reopened songs stay stable.
+    private static func v2ToV3(_ obj: [String: Any]) throws -> [String: Any] {
+        var result = obj
+        guard var tracks = result["tracks"] as? [[String: Any]] else { return result }
+        for ti in tracks.indices {
+            if tracks[ti]["colorIndex"] == nil {
+                tracks[ti]["colorIndex"] = TrackPalette.colorIndexForNewTrack(existingCount: ti)
+            }
         }
         result["tracks"] = tracks
         return result

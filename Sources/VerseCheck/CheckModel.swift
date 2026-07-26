@@ -37,8 +37,9 @@ func runModelChecks(_ tk: TestKit) {
     }
 
     // MARK: - Step V6: schema v2 mediaStartSeconds + v1→v2 migration
+    // (Chain now continues to current schema; mediaStartSeconds assertions unchanged.)
 
-    tk.suite("Model V6: v1 fixture opens as v2 with mediaStartSeconds 0; re-saves as v2") {
+    tk.suite("Model V6: v1 fixture opens as current with mediaStartSeconds 0; re-saves as current") {
         // Hand-built v1 JSON: no mediaStartSeconds on the audio clip.
         let v1JSON = """
         {
@@ -77,26 +78,154 @@ func runModelChecks(_ tk: TestKit) {
         let data = Data(v1JSON.utf8)
         let opened = try Project.fromJSON(data)
         tk.expectEqual(opened.schemaVersion, Schema.current, "v1 opens as schema \(Schema.current)")
-        tk.expectEqual(opened.schemaVersion, 2, "current schema is 2")
+        tk.expectEqual(opened.schemaVersion, 3, "current schema is 3")
         tk.expectEqual(opened.tracks.count, 1, "track preserved")
         tk.expectEqual(opened.tracks[0].clips.count, 1, "clip preserved")
         tk.expectEqual(opened.tracks[0].clips[0].mediaStartSeconds, 0,
                        "migrated clip defaults mediaStartSeconds to 0")
         tk.expectEqual(opened.tracks[0].clips[0].mediaFile, "take.caf", "media path preserved")
         tk.expectEqual(opened.title, "Legacy Song", "title preserved")
+        tk.expectEqual(opened.tracks[0].colorIndex, 0, "v1 track gets colorIndex 0 via v2→v3")
 
-        // Re-save is schema v2 and includes the field.
+        // Re-save is current schema and includes the field.
         let resaved = try opened.jsonData()
         let resavedObj = try JSONSerialization.jsonObject(with: resaved) as? [String: Any]
-        tk.expectEqual(resavedObj?["schemaVersion"] as? Int, 2, "re-save writes schemaVersion 2")
+        tk.expectEqual(resavedObj?["schemaVersion"] as? Int, Schema.current,
+                       "re-save writes schemaVersion \(Schema.current)")
         let clips = (resavedObj?["tracks"] as? [[String: Any]])?.first?["clips"] as? [[String: Any]]
         let mediaStart = clips?.first?["mediaStartSeconds"] as? Double
         tk.expectEqual(mediaStart, 0, "re-save includes mediaStartSeconds: 0")
 
         let roundTrip = try Project.fromJSON(resaved)
-        tk.expectEqual(roundTrip.schemaVersion, 2, "v2 re-opens as v2")
+        tk.expectEqual(roundTrip.schemaVersion, Schema.current, "re-opens as current schema")
         tk.expectEqual(roundTrip.tracks[0].clips[0].mediaStartSeconds, 0,
                        "round-trip keeps mediaStartSeconds")
+    }
+
+    // MARK: - Step X1: schema v3 track colour identity + v2→v3 migration
+
+    tk.suite("Model X1: palette has 8 slots; new tracks round-robin; seed is 0") {
+        tk.expectEqual(TrackPalette.count, 8, "fixed 8-colour palette")
+        tk.expectEqual(TrackPalette.normalized(0), 0, "0 stays 0")
+        tk.expectEqual(TrackPalette.normalized(8), 0, "8 wraps to 0")
+        tk.expectEqual(TrackPalette.normalized(-1), 7, "negative wraps")
+        tk.expectEqual(TrackPalette.normalized(15), 7, "15 wraps to 7")
+
+        let seed = Project.newUntitled()
+        tk.expectEqual(seed.schemaVersion, 3, "new project is schema 3")
+        tk.expectEqual(seed.tracks[0].colorIndex, 0, "seed piano is colour 0")
+        tk.expectEqual(seed.nextTrackColorIndex, 1, "next after one track is 1")
+
+        var p = Project(title: "colours")
+        for i in 0..<10 {
+            p.tracks.append(Track(kind: .instrument, name: "T\(i)",
+                                  colorIndex: p.nextTrackColorIndex,
+                                  instrument: .grandPiano))
+        }
+        for i in 0..<10 {
+            tk.expectEqual(p.tracks[i].colorIndex, i % 8,
+                           "track \(i) colour is \(i % 8)")
+        }
+
+        // Out-of-range init is normalized.
+        let wide = Track(kind: .audio, name: "X", colorIndex: 99)
+        tk.expectEqual(wide.colorIndex, 99 % 8, "init normalizes colorIndex")
+    }
+
+    tk.suite("Model X1: v2 fixture opens as v3 with colorIndex by position; re-saves as v3") {
+        // Hand-built v2 JSON: has mediaStartSeconds, no colorIndex.
+        let v2JSON = """
+        {
+          "schemaVersion": 2,
+          "id": "00000000-0000-4000-8000-0000000000D1",
+          "title": "Coloured",
+          "tempoBPM": 100,
+          "timeSignature": { "num": 4, "den": 4 },
+          "tracks": [
+            {
+              "id": "00000000-0000-4000-8000-0000000000E1",
+              "kind": "instrument",
+              "name": "Keys",
+              "volume": 0.8,
+              "pan": 0,
+              "mute": false,
+              "solo": false,
+              "inserts": [],
+              "clips": []
+            },
+            {
+              "id": "00000000-0000-4000-8000-0000000000E2",
+              "kind": "audio",
+              "name": "Rec",
+              "volume": 0.8,
+              "pan": 0,
+              "mute": false,
+              "solo": false,
+              "inserts": [],
+              "clips": [
+                {
+                  "id": "00000000-0000-4000-8000-0000000000F1",
+                  "kind": "audio",
+                  "name": "take",
+                  "startBeat": 0,
+                  "lengthBeats": 4,
+                  "mediaFile": "take.caf",
+                  "mediaStartSeconds": 0.5
+                }
+              ]
+            },
+            {
+              "id": "00000000-0000-4000-8000-0000000000E3",
+              "kind": "instrument",
+              "name": "Bass",
+              "volume": 0.7,
+              "pan": 0,
+              "mute": false,
+              "solo": false,
+              "inserts": [],
+              "clips": []
+            }
+          ],
+          "masterVolume": 0.85,
+          "createdAt": "1970-01-01T00:00:00Z",
+          "modifiedAt": "1970-01-01T00:00:00Z"
+        }
+        """
+        let data = Data(v2JSON.utf8)
+        let opened = try Project.fromJSON(data)
+        tk.expectEqual(opened.schemaVersion, 3, "v2 opens as schema 3")
+        tk.expectEqual(opened.tracks.count, 3, "three tracks preserved")
+        tk.expectEqual(opened.tracks[0].colorIndex, 0, "position 0 → colour 0")
+        tk.expectEqual(opened.tracks[1].colorIndex, 1, "position 1 → colour 1")
+        tk.expectEqual(opened.tracks[2].colorIndex, 2, "position 2 → colour 2")
+        tk.expectEqual(opened.tracks[1].clips[0].mediaStartSeconds, 0.5,
+                       "v2 mediaStartSeconds preserved through v3")
+        tk.expectEqual(opened.title, "Coloured", "title preserved")
+
+        let resaved = try opened.jsonData()
+        let resavedObj = try JSONSerialization.jsonObject(with: resaved) as? [String: Any]
+        tk.expectEqual(resavedObj?["schemaVersion"] as? Int, 3, "re-save writes schemaVersion 3")
+        let tracks = resavedObj?["tracks"] as? [[String: Any]]
+        tk.expectEqual(tracks?[0]["colorIndex"] as? Int, 0, "re-save includes colorIndex 0")
+        tk.expectEqual(tracks?[1]["colorIndex"] as? Int, 1, "re-save includes colorIndex 1")
+        tk.expectEqual(tracks?[2]["colorIndex"] as? Int, 2, "re-save includes colorIndex 2")
+
+        let roundTrip = try Project.fromJSON(resaved)
+        tk.expectEqual(roundTrip.schemaVersion, 3, "v3 re-opens as v3")
+        tk.expectEqual(roundTrip.tracks.map(\.colorIndex), [0, 1, 2],
+                       "round-trip keeps colour indices")
+    }
+
+    tk.suite("Model X1: colorIndex round-trips in JSON") {
+        var p = Project(title: "rt")
+        p.tracks = [
+            Track(kind: .instrument, name: "A", colorIndex: 3, instrument: .grandPiano),
+            Track(kind: .audio, name: "B", colorIndex: 7),
+        ]
+        let back = try Project.fromJSON(try p.jsonData())
+        tk.expectEqual(back.schemaVersion, Schema.current, "saved as current")
+        tk.expectEqual(back.tracks[0].colorIndex, 3, "index 3 round-trips")
+        tk.expectEqual(back.tracks[1].colorIndex, 7, "index 7 round-trips")
     }
 
     tk.suite("Model V6: new clips default mediaStartSeconds to 0; non-zero round-trips") {

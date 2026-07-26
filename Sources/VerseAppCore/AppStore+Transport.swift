@@ -90,7 +90,8 @@ extension AppStore {
     public func addInstrumentTrack() {
         history.record(project, name: "Add Track")
         let n = project.tracks.filter { $0.kind == .instrument }.count + 1
-        let t = Track(kind: .instrument, name: "Instrument \(n)", instrument: .grandPiano)
+        let t = Track(kind: .instrument, name: "Instrument \(n)",
+                      colorIndex: project.nextTrackColorIndex, instrument: .grandPiano)
         project.tracks.append(t)
         engine.addInstrumentTrack(id: t.id, instrument: t.instrument)
         engine.applyMix(t)
@@ -102,10 +103,23 @@ extension AppStore {
     public func addAudioTrack() {
         history.record(project, name: "Add Track")
         let n = project.tracks.filter { $0.kind == .audio }.count + 1
-        let t = Track(kind: .audio, name: "Audio \(n)")
+        let t = Track(kind: .audio, name: "Audio \(n)", colorIndex: project.nextTrackColorIndex)
         project.tracks.append(t)
         engine.addAudioTrack(id: t.id)
         engine.applyMix(t)
+        recovery.autosave(project)
+    }
+
+    /// Change a track's identity colour (one undo entry). Index is wrapped into the fixed palette.
+    public func setTrackColorIndex(_ index: Int, _ id: UUID) {
+        guard project.trackIndex(id: id) != nil else {
+            statusMessage = "That track isn’t in this project."
+            return
+        }
+        let normalized = TrackPalette.normalized(index)
+        if project.track(id: id)?.colorIndex == normalized { return }
+        history.record(project, name: "Track Colour")
+        mutate(id) { $0.colorIndex = normalized }
         recovery.autosave(project)
     }
 

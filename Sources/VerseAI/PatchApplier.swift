@@ -40,7 +40,9 @@ public enum PatchApplier {
                 project.timeSignature = TimeSignature(num: n, den: d)
             case .createTrack(let tempId, let kind, let name, let inst):
                 let instrument = (kind == .instrument) ? (inst ?? .grandPiano) : inst
-                let t = Track(kind: kind, name: name, instrument: instrument)
+                let t = Track(kind: kind, name: name,
+                              colorIndex: project.nextTrackColorIndex,
+                              instrument: instrument)
                 project.tracks.append(t)
                 tempTrack[tempId] = t.id
             case .renameTrack(let ref, let name):

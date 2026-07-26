@@ -224,7 +224,7 @@ Audit first. Several things read as "aesthetics" but are missing functionality:
   fine edits cannot be made close up.
 - **No per-track colour.** `Track` has no colour field.
 
-## Step X1 — Track colour identity — PENDING
+## Step X1 — Track colour identity — DONE
 
 Every serious DAW gives each track a colour and carries it through the whole UI. That is the
 single biggest "know what I'm looking at" win and it is what the owner is asking for.

@@ -320,15 +320,22 @@ struct TimelineWorkspaceView: View {
         let laneH = ArrangementLanesView.laneHeight
         return VStack(alignment: .leading, spacing: 0) {
             ForEach(store.project.tracks) { track in
-                Text(track.name)
-                    .font(.caption)
-                    .lineLimit(1)
-                    .frame(width: BeatTimeline.gutterWidth, height: laneH, alignment: .leading)
-                    .padding(.leading, 4)
-                    .background(Color.black.opacity(0.03))
-                    .overlay(alignment: .bottom) {
-                        Rectangle().fill(Color.black.opacity(0.08)).frame(height: 0.5)
-                    }
+                HStack(spacing: 0) {
+                    // Thin identity accent on the lane header.
+                    Rectangle()
+                        .fill(TrackIdentityColor.solid(for: track.colorIndex))
+                        .frame(width: 4)
+                    Text(track.name)
+                        .font(.caption)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.leading, 4)
+                }
+                .frame(width: BeatTimeline.gutterWidth, height: laneH, alignment: .leading)
+                .background(Color.black.opacity(0.03))
+                .overlay(alignment: .bottom) {
+                    Rectangle().fill(Color.black.opacity(0.08)).frame(height: 0.5)
+                }
             }
         }
     }
@@ -481,9 +488,11 @@ struct ArrangementLanesView: View {
         let w = max(BeatTimeline.width(forBeats: clip.lengthBeats), 6)
         let h = Self.laneHeight - 8
         let handleW = ArrangementLayout.resizeHandleWidth(clipWidth: w)
-        let fill = clip.kind == .midi
-            ? Color.accentColor.opacity(0.88)
-            : Color.orange.opacity(0.82)
+        let colorIndex = store.project.tracks.indices.contains(trackIndex)
+            ? store.project.tracks[trackIndex].colorIndex : 0
+        let identity = TrackIdentityColor.swatch(for: colorIndex)
+        // Identity fill (soft), not kind-based accent/orange. Selection stays a border.
+        let fill = identity.fill
         let label = clip.name.isEmpty
             ? (clip.kind == .midi ? "MIDI" : "Audio")
             : clip.name
@@ -493,11 +502,18 @@ struct ArrangementLanesView: View {
         ZStack(alignment: .trailing) {
             RoundedRectangle(cornerRadius: 4)
                 .fill(fill)
+                .overlay(alignment: .leading) {
+                    // Thin solid identity strip on the clip leading edge.
+                    Rectangle()
+                        .fill(identity.solid)
+                        .frame(width: 3)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
                 .overlay(
                     RoundedRectangle(cornerRadius: 4)
                         .strokeBorder(
                             selected
-                                ? Color.white.opacity(0.95)
+                                ? Color.accentColor
                                 : (openInRoll
                                    ? Color.primary.opacity(0.55)
                                    : Color.primary.opacity(0.25)),
@@ -507,9 +523,10 @@ struct ArrangementLanesView: View {
                 .overlay(alignment: .leading) {
                     Text(label)
                         .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(identity.label)
                         .lineLimit(1)
                         .padding(.horizontal, 6)
+                        .padding(.leading, 3)
                         .padding(.trailing, handleW + 2)
                 }
             Rectangle()
