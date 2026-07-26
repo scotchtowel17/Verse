@@ -3,17 +3,29 @@ import SwiftUI
 // MARK: - Layout (testable)
 
 /// Pure layout helpers for the on-screen piano. Free of SwiftUI so VerseCheck can lock
-/// adaptive octave count and proportions without rendering.
+/// adaptive octave count, proportions, and MIDI-safe pitch ranges without rendering.
 ///
 /// Keys fill the available width exactly for the chosen octave count, so white-key width
 /// lands near `targetWhiteKeyWidth` instead of stretching two hard-coded octaves across
 /// the whole window.
+///
+/// Pitch range (Y1): every rendered key must land in MIDI 0...127. The leftmost C is derived
+/// from the preferred base and the octave count so the trailing C never exceeds 127; Z/X
+/// shift is clamped the same way so it stops at the ends instead of producing dead keys.
 public enum PianoKeyboardLayout {
     /// White-key width that reads correctly on screen (~real white keys are ~23mm).
     public static let targetWhiteKeyWidth: CGFloat = 26
 
+    /// MIDI pitch floor / ceiling for note numbers.
+    public static let midiMinPitch = 0
+    public static let midiMaxPitch = 127
+
+    /// Most octaves that fit when the left edge is C0 (pitch 0): floor(127/12).
+    public static let maxOctavesFittingMIDI = midiMaxPitch / 12
+
     public static let minOctaves = 1
-    public static let maxOctaves = 7
+    /// Hard UI cap. Also never above what fits in MIDI from C0 (see `maxOctavesFittingMIDI`).
+    public static let maxOctaves = min(7, maxOctavesFittingMIDI)
 
     /// White-key height as a multiple of white-key width (keeps short, fat keys from looking wrong).
     public static let whiteKeyHeightRatio: CGFloat = 5.0
@@ -24,14 +36,84 @@ public enum PianoKeyboardLayout {
     /// Cap so a maxed-out wide window does not dominate the workspace.
     public static let maxKeyboardHeight: CGFloat = 160
 
+    /// Semitone offsets of white keys within one octave (C D E F G A B).
+    public static let whiteSemitones = [0, 2, 4, 5, 7, 9, 11]
+
+    /// White-key indices (within an octave) that have a black key to their upper-right.
+    public static let blackAfterWhite = [0, 1, 3, 4, 5]
+
     /// White keys for `octaves` spans, including the trailing C: 7n + 1.
     public static func whiteKeyCount(octaves: Int) -> Int {
         let n = max(0, octaves)
         return n * 7 + 1
     }
 
+    /// Semitone span from the leftmost C to the trailing C (highest white key).
+    public static func pitchSpan(octaves: Int) -> Int {
+        max(0, octaves) * 12
+    }
+
+    /// Highest white-key pitch for a keyboard starting at `baseC` with `octaves` spans.
+    public static func highestPitch(baseC: Int, octaves: Int) -> Int {
+        baseC + pitchSpan(octaves: octaves)
+    }
+
+    /// Lowest allowed leftmost C (MIDI floor).
+    public static func minBaseC(octaves: Int = 0) -> Int {
+        _ = octaves
+        return midiMinPitch
+    }
+
+    /// Highest allowed leftmost C so `baseC + octaves*12` stays ≤ 127.
+    public static func maxBaseC(octaves: Int) -> Int {
+        max(midiMinPitch, midiMaxPitch - pitchSpan(octaves: octaves))
+    }
+
+    /// Clamp a preferred leftmost C so every key of an `octaves` keyboard is in 0...127.
+    public static func clampedBaseC(_ preferred: Int, octaves: Int) -> Int {
+        let lo = minBaseC(octaves: octaves)
+        let hi = maxBaseC(octaves: octaves)
+        return min(hi, max(lo, preferred))
+    }
+
+    /// Z/X octave shift: move by `deltaOctaves` twelfths, then clamp for the rendered span.
+    public static func shiftedBaseC(_ current: Int, deltaOctaves: Int, octaves: Int) -> Int {
+        clampedBaseC(current + deltaOctaves * 12, octaves: octaves)
+    }
+
+    /// White-key MIDI pitches for a keyboard (includes trailing C).
+    public static func whitePitches(baseC: Int, octaves: Int) -> [Int] {
+        let count = whiteKeyCount(octaves: octaves)
+        return (0..<count).map { i in
+            baseC + (i / 7) * 12 + whiteSemitones[i % 7]
+        }
+    }
+
+    /// Black-key MIDI pitches for a keyboard.
+    public static func blackPitches(baseC: Int, octaves: Int) -> [Int] {
+        var out: [Int] = []
+        let n = max(0, octaves)
+        for oct in 0..<n {
+            for wi in blackAfterWhite {
+                out.append(baseC + oct * 12 + whiteSemitones[wi] + 1)
+            }
+        }
+        return out
+    }
+
+    /// Every pitch the on-screen keyboard would render (white + black).
+    public static func allPitches(baseC: Int, octaves: Int) -> [Int] {
+        whitePitches(baseC: baseC, octaves: octaves) + blackPitches(baseC: baseC, octaves: octaves)
+    }
+
+    /// True when every rendered key is inside MIDI 0...127.
+    public static func pitchesAreInMIDIRange(baseC: Int, octaves: Int) -> Bool {
+        allPitches(baseC: baseC, octaves: octaves).allSatisfy { $0 >= midiMinPitch && $0 <= midiMaxPitch }
+    }
+
     /// Octave span that best matches `availableWidth` at `targetWhiteKeyWidth`, clamped to
-    /// `minOctaves`...`maxOctaves`. Pure and side-effect free.
+    /// `minOctaves`...`maxOctaves` and never above what can fit in MIDI 0...127.
+    /// Pure and side-effect free.
     public static func octaveCount(
         availableWidth: CGFloat,
         targetWhiteKeyWidth: CGFloat = targetWhiteKeyWidth,
@@ -39,7 +121,8 @@ public enum PianoKeyboardLayout {
         maxOctaves: Int = maxOctaves
     ) -> Int {
         let lo = max(1, min(minOctaves, maxOctaves))
-        let hi = max(lo, max(minOctaves, maxOctaves))
+        // Cap by MIDI width from C0 as well as the caller's max.
+        let hi = min(max(lo, max(minOctaves, maxOctaves)), maxOctavesFittingMIDI)
         let target = max(targetWhiteKeyWidth, 1)
         let width = max(availableWidth, 0)
         // whiteCount = 7n + 1; choose n so count * target ≈ width.
@@ -99,15 +182,17 @@ public enum PianoKeyboardLayout {
 /// Layout: `GeometryReader` is the container. Octave count comes from `geo.size.width`
 /// directly (no preference round-trip). Height is a constant from `targetWhiteKeyWidth`,
 /// so it never depends on measured width and cannot form a layout cycle.
+///
+/// `preferredBaseC` is the user's Z/X preference. The left edge actually drawn is
+/// `clampedBaseC(preferredBaseC, octaves:)` so the whole span stays inside MIDI 0...127.
 struct PianoKeyboardView: View {
-    let baseC: Int                 // MIDI pitch of the leftmost C
+    /// Preferred MIDI pitch of the leftmost C (before range clamp).
+    let preferredBaseC: Int
     let held: Set<Int>
     var noteOn: (Int) -> Void
     var noteOff: (Int) -> Void
-
-    private static let whiteSemis = [0, 2, 4, 5, 7, 9, 11]
-    // White-key indices (within an octave) that have a black key to their upper-right.
-    private static let blackAfter = [0, 1, 3, 4, 5]
+    /// Reports the live octave count so Z/X shift can clamp against the same span.
+    var onOctavesChanged: ((Int) -> Void)? = nil
 
     var body: some View {
         let height = PianoKeyboardLayout.fixedKeyboardHeight
@@ -116,24 +201,27 @@ struct PianoKeyboardView: View {
             // Degenerate first pass: width not yet known. Draw nothing; next pass fills in.
             if width > 0 {
                 let m = PianoKeyboardLayout.metrics(availableWidth: width)
+                let baseC = PianoKeyboardLayout.clampedBaseC(preferredBaseC, octaves: m.octaves)
+                let whites = PianoKeyboardLayout.whitePitches(baseC: baseC, octaves: m.octaves)
                 ZStack(alignment: .topLeading) {
                     // White keys
                     HStack(spacing: 0) {
-                        ForEach(0..<m.whiteCount, id: \.self) { i in
-                            let pitch = whitePitch(i)
+                        ForEach(Array(whites.enumerated()), id: \.offset) { _, pitch in
                             PianoKey(isBlack: false, isHeld: held.contains(pitch),
                                      onPress: { noteOn(pitch) }, onRelease: { noteOff(pitch) })
                                 .frame(width: m.keyWidth, height: height)
                         }
                     }
                     // Black keys overlaid
-                    ForEach(blackPitches(octaves: m.octaves), id: \.pitch) { item in
+                    ForEach(blackKeyItems(baseC: baseC, octaves: m.octaves), id: \.pitch) { item in
                         PianoKey(isBlack: true, isHeld: held.contains(item.pitch),
                                  onPress: { noteOn(item.pitch) }, onRelease: { noteOff(item.pitch) })
                             .frame(width: m.keyWidth * 0.62, height: height * 0.62)
                             .offset(x: CGFloat(item.whiteIndex + 1) * m.keyWidth - (m.keyWidth * 0.31), y: 0)
                     }
                 }
+                .onAppear { onOctavesChanged?(m.octaves) }
+                .onChange(of: m.octaves) { _, n in onOctavesChanged?(n) }
             }
         }
         .frame(maxWidth: .infinity)
@@ -143,21 +231,17 @@ struct PianoKeyboardView: View {
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.black.opacity(0.15)))
     }
 
-    private func whitePitch(_ i: Int) -> Int {
-        // Trailing C is the first white key of the next octave (i / 7 * 12 + C).
-        baseC + (i / 7) * 12 + Self.whiteSemis[i % 7]
-    }
-
-    private func blackPitches(octaves: Int) -> [(pitch: Int, whiteIndex: Int)] {
-        var out: [(Int, Int)] = []
-        for oct in 0..<octaves {
-            for wi in Self.blackAfter {
+    private func blackKeyItems(baseC: Int, octaves: Int) -> [(pitch: Int, whiteIndex: Int)] {
+        var out: [(pitch: Int, whiteIndex: Int)] = []
+        let n = max(0, octaves)
+        for oct in 0..<n {
+            for wi in PianoKeyboardLayout.blackAfterWhite {
                 let whiteIndex = oct * 7 + wi
-                let pitch = baseC + oct * 12 + Self.whiteSemis[wi] + 1
-                out.append((pitch, whiteIndex))
+                let pitch = baseC + oct * 12 + PianoKeyboardLayout.whiteSemitones[wi] + 1
+                out.append((pitch: pitch, whiteIndex: whiteIndex))
             }
         }
-        return out.map { (pitch: $0.0, whiteIndex: $0.1) }
+        return out
     }
 }
 

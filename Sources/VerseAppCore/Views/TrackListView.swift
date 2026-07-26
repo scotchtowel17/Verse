@@ -41,22 +41,23 @@ private struct TrackRow: View {
     @Environment(AppStore.self) private var store
     let track: Track
 
-    private var isActive: Bool { track.id == store.activeTrackID && track.kind == .instrument }
+    /// Working track (Y2): roll binding from track-row selection, instrument or audio.
+    private var isSelected: Bool { track.id == store.rollTrackID }
     private var identity: TrackIdentityColor.Swatch { TrackIdentityColor.swatch(for: track.colorIndex) }
 
     var body: some View {
         HStack(spacing: 10) {
-            // Thin identity accent strip (not a large saturated block).
+            // Identity strip: thicker when selected so the working track is obvious (Y2).
             RoundedRectangle(cornerRadius: 2)
                 .fill(identity.solid)
-                .frame(width: 4)
+                .frame(width: isSelected ? 6 : 4)
                 .padding(.vertical, 2)
 
             Image(systemName: track.kind == .instrument ? "pianokeys" : "waveform")
-                .foregroundStyle(isActive ? Color.accentColor : .secondary)
+                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(track.name).font(.callout).fontWeight(isActive ? .semibold : .regular)
+                Text(track.name).font(.callout).fontWeight(isSelected ? .semibold : .regular)
                 MeterBar(level: store.trackLevel(track.id), height: 5,
                          identityColor: identity.solid)
                     .frame(width: 130)
@@ -107,9 +108,20 @@ private struct TrackRow: View {
                 .buttonStyle(.borderless).controlSize(.small)
         }
         .padding(8)
-        // Active / selection chrome stays system accent; identity is the strip only.
-        .background(isActive ? Color.accentColor.opacity(0.10) : Color.black.opacity(0.04),
-                    in: RoundedRectangle(cornerRadius: 6))
+        // Selected: track colour + system accent. Unselected rows stay fully legible (Y2).
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isSelected
+                      ? identity.solid.opacity(0.16)
+                      : Color.black.opacity(0.04))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(
+                    isSelected ? Color.accentColor.opacity(0.85) : Color.clear,
+                    lineWidth: isSelected ? 1.5 : 0
+                )
+        )
     }
 
     /// Eight-slot identity colour menu. Does not offer semantic colours (record/play/selection).

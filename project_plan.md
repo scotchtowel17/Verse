@@ -344,3 +344,73 @@ Fix the layout, not the function:
    proportions, `baseOctaveC` and Z/X shift and held-note highlighting all still working.
 5. Add an assertion that a realistic width yields more than one octave, so a collapse to the
    minimum is caught rather than merely looking wrong on screen.
+
+---
+
+# Phase Y — Track focus, keyboard fixes, and roll zoom
+
+Four items from real use.
+
+## Step Y1 — Upper keys are silent, and the keyboard needs a hide toggle — DONE
+
+**The bug.** `baseC` is `baseOctaveC`, which defaults to 60 (middle C). X4 made the keyboard
+adaptive and it now renders about 7 octaves, so the top white key maps to roughly pitch 144,
+well past the MIDI ceiling of 127. The engine takes `UInt8(clamping:)`, so every key above the
+ceiling collapses onto pitch 127, which on a piano sample is effectively inaudible. That is why
+the upper half of the keyboard makes no sound.
+
+1. The rendered range must always fit within MIDI 0-127. Derive the lowest C from the octave
+   count so the whole keyboard fits, rather than always starting at `baseOctaveC`, and cap the
+   octave count so the range can never exceed the ceiling.
+2. `baseOctaveC` and the Z/X octave shift should still move the range, but clamped so it can
+   never push notes out of range. Shifting at the top or bottom should stop, not silently
+   produce dead keys.
+3. Add an assertion that **every key the keyboard renders maps to a pitch within 0-127**, at
+   every octave count and every shift position. A dead key must fail a test, not just feel wrong.
+4. **Hide toggle.** The owner does not need the on-screen keyboard while working in the piano
+   roll. Add a way to hide and show it, remembered for the session, and give the space back to
+   the roll and arrangement when hidden.
+
+## Step Y2 — Track focus, and zoom inside the piano roll — DONE
+
+1. **Selecting a track must be obvious.** The owner wants to work on one track while still
+   seeing the others. Make the selected track unmistakable: a clear selected state on the track
+   row and its arrangement lane, using the track's own colour plus the selection accent, while
+   every other track stays visible and legible rather than hidden or greyed into uselessness.
+2. **Context in the roll.** When editing one track's clip, optionally draw the notes of other
+   tracks' clips that overlap the same time range as dimmed, non-interactive ghosts behind the
+   grid, in their own track colours. This is what lets someone write a part against what is
+   already there. It must be clearly subordinate to the editable notes and must never be
+   selectable or draggable. Provide a toggle, default on.
+3. **Zoom in the roll.** X2 added a shared timeline zoom driven from the action bar, but it is
+   not discoverable from the roll and there is no vertical zoom. Add zoom controls to the roll
+   itself for the horizontal (time) axis, sharing the same value as the arrangement so the two
+   stay aligned, and add a separate vertical zoom that changes pitch row height so more or fewer
+   pitches are visible. Both need sensible clamps.
+4. Vertical zoom must keep the bounded-window invariant from T4: the number of rows drawn always
+   equals the span the range label reports, at every zoom level.
+
+## Step Y3 — Roll toolbar is overcrowded, and ghosts are unconfirmed — DONE
+
+Y2's substance works and was verified live: the selected track is unmistakable (selection ring
+on the row, tinted lane) while the other tracks stay fully legible, the roll carries its own
+time and pitch zoom, and the keyboard hide toggle works. Two problems.
+
+1. **The roll toolbar has outgrown its row.** It now holds Snap with four options, octave
+   up/down, a zoom percentage, four magnifier buttons, a Ghosts checkbox and a note count. The
+   "Ghosts" label is squeezed so hard it renders **one letter per line vertically**, which looks
+   broken. Reorganise the toolbar so it fits at realistic widths: group related controls, use
+   icons with tooltips instead of words where the meaning is obvious, and let low-priority items
+   collapse into an overflow rather than deform. Nothing may render vertically or clip.
+2. **Ghost notes could not be confirmed on screen.** With the Lead clip open (notes 72-79) the
+   ghosts from Chords (60-69) and Bass (36, 43) sit outside the visible pitch window, and
+   zooming out vertically did not bring them into view. Determine whether ghosts render at all,
+   and make the vertical zoom-out actually widen the pitch window as expected. Add an assertion
+   that with ghosts enabled and an overlapping clip on another track, the ghost set is non-empty
+   and excludes the edited clip's own notes.
+3. While reorganising, confirm the two zoom axes are clearly distinguishable. Four adjacent
+   magnifier icons with no labels are ambiguous; time zoom and pitch zoom should be visibly
+   different controls.
+
+Keep every Y2 behaviour: shared horizontal zoom with the arrangement, the T4 invariant that rows
+drawn equals the range label span at every row height, and ghosts non-interactive.
