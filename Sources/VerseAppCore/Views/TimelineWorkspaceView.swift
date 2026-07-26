@@ -156,12 +156,25 @@ struct TimelineWorkspaceView: View {
         let gutter = BeatTimeline.gutterWidth
         let rulerH = BeatTimeline.rulerHeight
         let totalW = totalWidth
-        let arrH = arrangementBandHeight
-        let rollH = rollExpanded ? rollBandHeight : 0
         let dividerH: CGFloat = rollExpanded ? 8 : 0
-        let stackH = rulerH + arrH + dividerH + rollH
 
         return GeometryReader { geo in
+            // Fit preferred band heights to the real viewport so the roll is not laid out
+            // taller than the pane and then clipped (X3: range label vs visible rows).
+            let fitted = PianoRollLayout.fitBandHeights(
+                availableHeight: geo.size.height,
+                rulerHeight: rulerH,
+                dividerHeight: dividerH,
+                rollExpanded: rollExpanded,
+                preferredArrangement: arrangementBandHeight,
+                preferredRoll: rollBandHeight,
+                minArrangement: Self.arrangementMinHeight,
+                minRoll: Self.rollMinHeight
+            )
+            let arrH = fitted.arrangement
+            let rollH = fitted.roll
+            let stackH = rulerH + arrH + dividerH + rollH
+
             ScrollView(.horizontal, showsIndicators: true) {
                 ZStack(alignment: .topLeading) {
                     VStack(alignment: .leading, spacing: 0) {

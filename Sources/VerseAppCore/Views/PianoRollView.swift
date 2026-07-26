@@ -166,6 +166,10 @@ struct PianoRollEmbeddedView: View {
 
     /// Inclusive pitch rows drawn on the roll. Pure function of focus, pane height, and
     /// row height: no scroll offset, so expand / resize cannot go stale.
+    ///
+    /// Uses the measured pitch-pane height only (never a larger default while a shorter pane
+    /// is what was drawn). Until the first measure, falls back to the default pane so the
+    /// chrome has a stable label.
     private var pitchRange: ClosedRange<Int> {
         let h = pitchPaneHeight > 0 ? pitchPaneHeight : PianoRollLayout.defaultPitchPaneHeight
         return PianoRollLayout.visiblePitchRange(
@@ -187,6 +191,8 @@ struct PianoRollEmbeddedView: View {
                     .padding(.vertical, 4)
             }
             GeometryReader { geo in
+                // Measure first, then derive the range from that height so the label
+                // (via pitchPaneHeight) and the grid always share one row count (X3).
                 let paneH = geo.size.height
                 let range = PianoRollLayout.visiblePitchRange(
                     focusPitch: windowCenterPitch,
@@ -210,6 +216,11 @@ struct PianoRollEmbeddedView: View {
                 }
                 .onChange(of: geo.size.height) { _, newHeight in
                     pitchPaneHeight = newHeight
+                }
+                // Keep the measured height in sync when the reader reports a non-zero size
+                // on the first layout pass (onAppear can race a zero proposal).
+                .onChange(of: paneH) { _, newHeight in
+                    if newHeight > 0 { pitchPaneHeight = newHeight }
                 }
             }
         }
@@ -429,21 +440,22 @@ struct PianoRollEmbeddedView: View {
         ZStack(alignment: .topLeading) {
             ForEach((pitchLow...pitchHigh).reversed(), id: \.self) { pitch in
                 let y = yForPitch(pitch, pitchHigh: pitchHigh, rowHeight: rowHeight)
+                let black = Self.isBlackKey(pitch)
                 Rectangle()
-                    .fill(Self.isBlackKey(pitch) ? Color.black.opacity(0.78) : Color.white)
+                    // Quiet reference strip (X3): soft surfaces, not pure white/black that
+                    // dominate the pane in dark mode or wash out in light mode.
+                    .fill(black ? Self.gutterBlackKey : Self.gutterWhiteKey)
                     .frame(width: BeatTimeline.gutterWidth, height: rowHeight)
                     .overlay(alignment: .bottom) {
                         Rectangle()
-                            .fill(Color.black.opacity(0.12))
+                            .fill(Color.primary.opacity(0.12))
                             .frame(height: 0.5)
                     }
                     .overlay(alignment: .trailing) {
                         if pitch % 12 == 0 {
                             Text(PianoRollLayout.pitchLabel(pitch))
                                 .font(.system(size: 9, weight: .medium, design: .monospaced))
-                                .foregroundStyle(Self.isBlackKey(pitch)
-                                                 ? Color.white.opacity(0.85)
-                                                 : Color.black.opacity(0.55))
+                                .foregroundStyle(Color.primary.opacity(black ? 0.75 : 0.45))
                                 .padding(.trailing, 4)
                         }
                     }
@@ -454,7 +466,7 @@ struct PianoRollEmbeddedView: View {
         .contentShape(Rectangle())
         .gesture(gutterPitchDragGesture(rowHeight: rowHeight))
         .overlay(alignment: .trailing) {
-            Rectangle().fill(Color.black.opacity(0.2)).frame(width: 1)
+            Rectangle().fill(Color.primary.opacity(0.18)).frame(width: 1)
         }
         .help("Drag up or down to shift the pitch window")
     }
@@ -485,17 +497,22 @@ struct PianoRollEmbeddedView: View {
         pitchLow: Int,
         pitchHigh: Int
     ) -> some View {
+        // Adaptive strokes/fills (Color.primary) so rows read in both light and dark (X3).
+        // Fixed Color.black.opacity(...) vanishes on a dark text background.
         Canvas { context, size in
+            // Base fill so the note grid is the readable surface, not a black void.
+            context.fill(Path(CGRect(origin: .zero, size: size)),
+                         with: .color(Self.gridBaseFill))
             for pitch in pitchLow...pitchHigh {
                 let y = yForPitch(pitch, pitchHigh: pitchHigh, rowHeight: rowHeight)
                 if Self.isBlackKey(pitch) {
                     let rect = CGRect(x: 0, y: y, width: size.width, height: rowHeight)
-                    context.fill(Path(rect), with: .color(Color.black.opacity(0.06)))
+                    context.fill(Path(rect), with: .color(Color.primary.opacity(0.07)))
                 }
                 var rowLine = Path()
                 rowLine.move(to: CGPoint(x: 0, y: y + rowHeight))
                 rowLine.addLine(to: CGPoint(x: size.width, y: y + rowHeight))
-                context.stroke(rowLine, with: .color(Color.black.opacity(0.06)), lineWidth: 0.5)
+                context.stroke(rowLine, with: .color(Color.primary.opacity(0.14)), lineWidth: 0.5)
             }
 
             let beatCount = Int(ceil(contentBeats))
@@ -507,7 +524,7 @@ struct PianoRollEmbeddedView: View {
                 line.addLine(to: CGPoint(x: x, y: size.height))
                 context.stroke(
                     line,
-                    with: .color(Color.black.opacity(isBar ? 0.28 : 0.10)),
+                    with: .color(Color.primary.opacity(isBar ? 0.30 : 0.12)),
                     lineWidth: isBar ? 1.2 : 0.6
                 )
             }
@@ -921,6 +938,38 @@ struct PianoRollEmbeddedView: View {
         }
     }
 
+    // MARK: - Appearance-aware roll colours (light and dark)
+
+    /// Soft white-key surface for the gutter (not pure white, which blinds in dark mode).
+    private static var gutterWhiteKey: Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+                return NSColor(calibratedWhite: 0.30, alpha: 1)
+            }
+            return NSColor(calibratedWhite: 0.93, alpha: 1)
+        })
+    }
+
+    /// Soft black-key surface for the gutter (quiet reference strip, not the main event).
+    private static var gutterBlackKey: Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+                return NSColor(calibratedWhite: 0.14, alpha: 1)
+            }
+            return NSColor(calibratedWhite: 0.22, alpha: 1)
+        })
+    }
+
+    /// Note-grid base fill: readable in both appearances (slightly lifted off pure black/white).
+    private static var gridBaseFill: Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+                return NSColor(calibratedWhite: 0.11, alpha: 1)
+            }
+            return NSColor(calibratedWhite: 0.99, alpha: 1)
+        })
+    }
+
     // MARK: - Gesture origin snapshots
 
     private struct MoveOrigin {
@@ -966,6 +1015,64 @@ public enum PianoRollLayout {
         defaultPitchPaneHeight + snapToolbarHeight
     }
 
+    /// Whole pitch rows that fit in `paneHeight` at `rowHeight` (at least one).
+    ///
+    /// This is the count of rows the roll will draw, and must equal the span of
+    /// `visiblePitchRange` (and therefore of `rangeLabel`) for the same inputs (X3).
+    public static func drawnRowCount(paneHeight: CGFloat, rowHeight: CGFloat) -> Int {
+        let rh = max(rowHeight, 1)
+        return max(1, Int(floor(paneHeight / rh)))
+    }
+
+    /// Shrink preferred arrangement/roll band heights so the shared timeline stack fits the
+    /// workspace viewport. Without this, a tall default roll (plus the X2 action bar and other
+    /// chrome) is laid out full-size and then clipped by the workspace, so the range label
+    /// claims more rows than the user can see.
+    ///
+    /// When `rollExpanded` is false, all band budget goes to the arrangement.
+    /// When the budget is tight, both bands share it proportionally above their minima;
+    /// if even the minima cannot fit, the budget is split by the minima ratio so the stack
+    /// height never exceeds the viewport (honest range, no clipped half-rows).
+    public static func fitBandHeights(
+        availableHeight: CGFloat,
+        rulerHeight: CGFloat,
+        dividerHeight: CGFloat,
+        rollExpanded: Bool,
+        preferredArrangement: CGFloat,
+        preferredRoll: CGFloat,
+        minArrangement: CGFloat,
+        minRoll: CGFloat
+    ) -> (arrangement: CGFloat, roll: CGFloat) {
+        let arrPref = max(minArrangement, preferredArrangement)
+        if !rollExpanded {
+            let budget = max(0, availableHeight - rulerHeight)
+            return (min(arrPref, max(minArrangement, budget)), 0)
+        }
+        let rollPref = max(minRoll, preferredRoll)
+        let budget = max(0, availableHeight - rulerHeight - dividerHeight)
+        if arrPref + rollPref <= budget {
+            return (arrPref, rollPref)
+        }
+        let minSum = minArrangement + minRoll
+        if budget <= minSum {
+            guard budget > 0, minSum > 0 else {
+                return (max(0, budget), 0)
+            }
+            let arrShare = budget * (minArrangement / minSum)
+            return (arrShare, budget - arrShare)
+        }
+        // Keep minima; distribute remaining pixels by how far each preferred sits above min.
+        let extra = budget - minSum
+        let arrHeadroom = arrPref - minArrangement
+        let rollHeadroom = rollPref - minRoll
+        let headroom = arrHeadroom + rollHeadroom
+        if headroom <= 0 {
+            return (minArrangement, minRoll)
+        }
+        let arrExtra = extra * (arrHeadroom / headroom)
+        return (minArrangement + arrExtra, minRoll + (extra - arrExtra))
+    }
+
     /// Max pixel width of the right-edge resize handle on a note block.
     public static let resizeHandleMaxWidth: CGFloat = 10
     /// Fraction of note width used for resize when the note is shorter than the fixed max.
@@ -1008,8 +1115,7 @@ public enum PianoRollLayout {
         paneHeight: CGFloat,
         rowHeight: CGFloat
     ) -> ClosedRange<Int> {
-        let rh = max(rowHeight, 1)
-        let rowCount = max(1, Int(floor(paneHeight / rh)))
+        let rowCount = drawnRowCount(paneHeight: paneHeight, rowHeight: rowHeight)
         let focus = min(127, max(0, focusPitch))
         // Prefer equal space above and below; when odd count, the extra row sits below.
         let below = (rowCount - 1) / 2

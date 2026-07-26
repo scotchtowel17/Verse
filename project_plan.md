@@ -264,7 +264,7 @@ single biggest "know what I'm looking at" win and it is what the owner is asking
 
 Keep every existing behaviour and shortcut working. No regressions in the shared time axis.
 
-## Step X3 — Visual regressions found by running X1/X2 — PENDING
+## Step X3 — Visual regressions found by running X1/X2 — DONE
 
 The colour identity works and reads well: blue, amber and green carry from the track rows
 through the lane headers, the clips and the notes in the roll. Three problems, found by looking.

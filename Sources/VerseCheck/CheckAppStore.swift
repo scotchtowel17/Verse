@@ -517,6 +517,109 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
                   "default band is at least ~2 octaves plus the pinned toolbar")
     }
 
+    tk.suite("Piano roll layout: drawn row count equals range-label pitch count (X3)") {
+        // Correctness: whatever pane height the grid is given, the number of rows drawn
+        // must equal the number of pitches in the range the label reports. The live bug was
+        // a half-height clip: label said 24 (D#4-D6) while ~12 rows were visible.
+        let rowH = PianoRollLayout.rowHeight
+        let focus = 75  // mean of a lead-ish cluster; range label lands near D#4-D6 at 24 rows
+        for rows in [1, 6, 12, 16, 24, 36] {
+            let paneH = rowH * CGFloat(rows)
+            let range = PianoRollLayout.visiblePitchRange(
+                focusPitch: focus, paneHeight: paneH, rowHeight: rowH)
+            let drawn = PianoRollLayout.drawnRowCount(paneHeight: paneH, rowHeight: rowH)
+            let labelled = range.upperBound - range.lowerBound + 1
+            tk.expectEqual(drawn, rows,
+                           "pane of \(rows) row-heights draws \(rows) rows (got \(drawn))")
+            tk.expectEqual(labelled, drawn,
+                           "range label span equals drawn rows at \(rows) (label \(labelled), drawn \(drawn), range \(PianoRollLayout.rangeLabel(range)))")
+            // rangeLabel is pure formatting of the same range the grid uses.
+            tk.expectEqual(
+                PianoRollLayout.rangeLabel(range),
+                "\(PianoRollLayout.pitchLabel(range.lowerBound))-\(PianoRollLayout.pitchLabel(range.upperBound))",
+                "rangeLabel is exactly low-high of the drawn range"
+            )
+        }
+        // Partial row of height does not invent an extra drawn row (floor, not ceil).
+        let partial = rowH * 12 + rowH * 0.4
+        let partialRange = PianoRollLayout.visiblePitchRange(
+            focusPitch: focus, paneHeight: partial, rowHeight: rowH)
+        tk.expectEqual(
+            partialRange.upperBound - partialRange.lowerBound + 1,
+            PianoRollLayout.drawnRowCount(paneHeight: partial, rowHeight: rowH),
+            "partial-row pane: drawn count matches labelled span"
+        )
+        tk.expectEqual(
+            PianoRollLayout.drawnRowCount(paneHeight: partial, rowHeight: rowH),
+            12,
+            "0.4 of a row does not add a 13th drawn row"
+        )
+    }
+
+    tk.suite("Piano roll layout: fitBandHeights keeps stack inside the viewport (X3)") {
+        let ruler: CGFloat = BeatTimeline.rulerHeight
+        let divider: CGFloat = 8
+        let minArr: CGFloat = 100
+        let minRoll: CGFloat = 140
+        let prefArr: CGFloat = 150
+        let prefRoll = PianoRollLayout.defaultBandHeight  // ~2 octaves + snap bar
+
+        // Plenty of room: preferred sizes win.
+        let roomy = PianoRollLayout.fitBandHeights(
+            availableHeight: 900,
+            rulerHeight: ruler,
+            dividerHeight: divider,
+            rollExpanded: true,
+            preferredArrangement: prefArr,
+            preferredRoll: prefRoll,
+            minArrangement: minArr,
+            minRoll: minRoll
+        )
+        tk.expectEqual(roomy.arrangement, prefArr, "roomy viewport keeps preferred arrangement")
+        tk.expectEqual(roomy.roll, prefRoll, "roomy viewport keeps preferred roll")
+
+        // Tight viewport (action bar + chrome steal height): stack must fit, no clip.
+        let tightBudget: CGFloat = 280
+        let tight = PianoRollLayout.fitBandHeights(
+            availableHeight: tightBudget,
+            rulerHeight: ruler,
+            dividerHeight: divider,
+            rollExpanded: true,
+            preferredArrangement: prefArr,
+            preferredRoll: prefRoll,
+            minArrangement: minArr,
+            minRoll: minRoll
+        )
+        let tightStack = ruler + tight.arrangement + divider + tight.roll
+        tk.expect(tightStack <= tightBudget + 0.5,
+                  "tight stack \(tightStack) fits viewport \(tightBudget)")
+        tk.expect(tight.roll > 0, "tight viewport still gives the roll some height")
+        // The pitch pane inside the roll is (roll - snap bar); row count from that pane
+        // must equal the labelled span (same invariant as the draw path).
+        let pane = max(0, tight.roll - PianoRollLayout.snapToolbarHeight)
+        let range = PianoRollLayout.visiblePitchRange(
+            focusPitch: 75, paneHeight: pane, rowHeight: PianoRollLayout.rowHeight)
+        let drawn = PianoRollLayout.drawnRowCount(
+            paneHeight: pane, rowHeight: PianoRollLayout.rowHeight)
+        tk.expectEqual(range.upperBound - range.lowerBound + 1, drawn,
+                       "after fit, labelled pitch count equals drawn rows")
+
+        // Collapsed roll: all band budget goes to arrangement.
+        let collapsed = PianoRollLayout.fitBandHeights(
+            availableHeight: 300,
+            rulerHeight: ruler,
+            dividerHeight: 0,
+            rollExpanded: false,
+            preferredArrangement: prefArr,
+            preferredRoll: prefRoll,
+            minArrangement: minArr,
+            minRoll: minRoll
+        )
+        tk.expectEqual(collapsed.roll, 0, "collapsed roll gets zero band height")
+        tk.expect(collapsed.arrangement <= 300 - ruler + 0.5,
+                  "collapsed arrangement fits remaining budget")
+    }
+
     tk.suite("Piano roll layout: visible range contains lead-cluster notes (T4)") {
         // Lead-style clip: four notes at 72–76. Opening centres on the mean, so both the
         // short pane and the default ~2-octave pane must include the whole cluster.

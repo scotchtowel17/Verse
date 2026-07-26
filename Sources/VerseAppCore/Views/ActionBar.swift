@@ -279,10 +279,16 @@ struct ActionBar: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 13, weight: .semibold))
+                // Explicit contrast (X3): borderless buttons otherwise look uniformly dim,
+                // so enabled and disabled were indistinguishable.
+                .foregroundStyle(state.enabled
+                                 ? Color.primary
+                                 : Color.primary.opacity(0.28))
                 .frame(width: 28, height: 24)
+                .contentShape(Rectangle())
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(.plain)
         .disabled(!state.enabled)
         .help(state.help)
     }
