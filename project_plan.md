@@ -290,3 +290,30 @@ through the lane headers, the clips and the notes in the roll. Three problems, f
    honest; right now nothing looks available.
 
 Keep the palette, the semantic-colour separation, and every behaviour from X1 and X2.
+
+## Step X4 — On-screen keyboard keys are far too wide — PENDING
+
+Owner: "add another octave range to the piano keys below, or shorten the width. Right now it
+looks weird having them so big."
+
+`ContentView` passes `octaves: 2` as a hard-coded constant and `PianoKeyboardView` divides the
+full window width by 15 white keys. At the window sizes actually in use that is roughly 90pt per
+white key, several times the proportions of a real keyboard, which is why it looks wrong.
+
+Do not simply swap 2 for a larger constant: that just moves the problem to a different window
+size. Make the octave count adaptive.
+
+1. Add a pure, testable function that picks the octave count from the available width and a
+   target white-key width (about 26pt reads correctly on screen; a real white key is around
+   23mm). Clamp to a sensible range, roughly 1 to 7 octaves, so a very narrow window still shows
+   something playable and a very wide one does not become absurd.
+2. The keys then fill the available width exactly with that octave count, so the resulting key
+   width lands near the target without leaving a gap or stretching.
+3. Keep the keyboard's height proportionate to the new key width; very wide, very short keys are
+   part of what looks wrong today. Black keys keep their usual proportion of white-key width and
+   height.
+4. `baseOctaveC` and the Z/X octave shift must keep working, and the held-note highlighting from
+   both the mouse and MIDI must keep working across the new range.
+5. Tests on the pure function: a narrow width yields the minimum, a wide width yields more
+   octaves rather than wider keys, the resulting key width stays within a sane band across a
+   range of widths, and the clamp holds at both ends.
