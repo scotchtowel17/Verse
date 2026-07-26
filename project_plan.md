@@ -1226,3 +1226,39 @@ to be corrected after every layout change. That removes the timing dependency en
 the visible range directly assertable.
 
 Until then the workaround is to scroll the roll manually, which does work.
+
+## Step T4 (implementation) — Bounded pitch window, no inner scroll — DONE
+
+Approved re-decomposition. Do NOT attempt another `scrollTo` fix.
+
+The roll currently lays out all 128 pitch rows inside a vertical `ScrollView` and tries to
+correct the scroll offset after layout. That is why three attempts passed tests and failed
+live: the harness cannot observe the real scroll offset, so a green assertion proves intent
+rather than result.
+
+Replace it with a window that is computed, not scrolled.
+
+1. **Remove the inner vertical `ScrollView` from the pitch grid entirely.** The grid renders
+   only the rows that fit the pane.
+2. Add a pure, testable function, for example
+   `PianoRollLayout.visiblePitchRange(focusPitch:paneHeight:rowHeight:) -> ClosedRange<Int>`.
+   It returns the contiguous pitch range to draw: as many whole rows as fit the pane height,
+   centred on `focusPitch`, clamped so the range never leaves 0-127 (when clamped at either end
+   it shifts rather than shrinking, so the pane stays full). This function is the single source
+   of truth and the thing tests assert.
+3. The view renders exactly that range. There is no scroll offset state anywhere in the pitch
+   axis, so nothing can be stale after a layout change. Resizing the pane or expanding from
+   collapsed simply recomputes the range from the new height.
+4. **Explicit pitch navigation** replaces scrolling: octave up and octave down controls in the
+   roll's toolbar, and dragging vertically on the piano-key gutter shifts the window. Keep a
+   small label showing the current range, for example "C4-C6".
+5. When a clip is selected, `focusPitch` stays the mean of its notes (unchanged), so the window
+   opens centred on the actual music.
+6. **Preserve every Phase S editing behaviour and the shared horizontal axis exactly**:
+   double-click to add, marquee, shift-click, whole-selection move, Cmd-C/X/V, Delete, and one
+   undo entry per gesture. Note hit-testing must use the same range function so clicks map to
+   the correct pitch.
+7. Tests must assert the actual visible range, which is now possible: a clip whose notes sit at
+   pitches 36 and 41 in a pane of a given height yields a range containing both; a clip at
+   72-76 yields a range containing those; the range never exceeds 0-127 and is never shorter
+   than the pane can show when clamped at an edge.
