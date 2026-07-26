@@ -1321,7 +1321,7 @@ No schema change in either step.
 
 # Phase V — Headless hardening and AI parity
 
-## Step V1 — Undo round-trip property test — PENDING
+## Step V1 — Undo round-trip property test — DONE
 
 The strongest invariant in the app is untested as a whole: **any sequence of N operations
 followed by N undos must restore the project exactly.** Undo is currently tested per operation,
@@ -1341,6 +1341,14 @@ which does not catch interactions between them, and a great many gesture APIs la
    keeping the suite fast.
 6. If this finds a real defect, write it up under a new heading and report it rather than
    silently fixing it.
+
+**Resolution (V1):** Harness suite `V1 undo round-trip property` in
+`Sources/VerseCheck/CheckUndoRoundTrip.swift` (seed `0x51EED001`). Each trial seeds a
+three-track project (two instrument + one audio, with MIDI clips and notes), applies at least
+10 ops drawn from the full undo-recording surface (including continuous piano-roll and
+arrangement gestures and a one-group Claude patch commit), snapshots via `Project.jsonData()`,
+asserts undo depth equals recorded count, then redo-forward and undo-back with full JSON
+identity at every step. **50/50 trials passed. No defects found.**
 
 ## Step V2 — Prove MIDI capture end to end — PENDING
 
