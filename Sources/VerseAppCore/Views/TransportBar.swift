@@ -7,14 +7,14 @@ struct TransportBar: View {
     var body: some View {
         HStack(spacing: 12) {
             Button { store.togglePlay() } label: {
-                Image(systemName: store.isPlaying ? "stop.fill" : "play.fill")
+                Image(systemName: store.isPlaying ? "pause.fill" : "play.fill")
                     .font(.title2)
             }
             .keyboardShortcut(.space, modifiers: [])
             .disabled(store.copilotPreviewBlocksTransport)
             .help(store.copilotPreviewBlocksTransport
                   ? "Unavailable while reviewing Claude changes"
-                  : (store.isPlaying ? "Stop (Space)" : "Play (Space)"))
+                  : (store.isPlaying ? "Pause (Space)" : "Play (Space)"))
 
             recordButton
 

@@ -1073,7 +1073,7 @@ Move/resize undo grouping unchanged.
 Owner feedback after actually playing with the roll. All three are standard DAW behaviour that
 the current roll lacks.
 
-## Step S1 — Transport inside the piano roll — PENDING
+## Step S1 — Transport inside the piano roll — DONE
 
 The roll is a modal sheet, so the transport bar is behind it and unreachable. You cannot hear
 what you are editing without closing the roll. Owner calls this a huge must.
@@ -1091,7 +1091,7 @@ what you are editing without closing the roll. Owner calls this a huge must.
    playback.
 6. Undo must not record anything for transport actions. Moving the playhead is not an edit.
 
-## Step S2 — Selection, double-click to add, and copy/paste — PENDING
+## Step S2 — Selection, double-click to add, and copy/paste — DONE
 
 Three related changes to the roll's interaction model.
 

@@ -44,6 +44,9 @@ public final class Transport {
     private var playStartBeat: Double = 0
     private var playBPM: Double = 120
     private var playLead: Double = 0.12
+    /// Beat captured at the most recent `stop()` (manual or auto). Used by AppStore pause
+    /// / auto-stop so the playhead can hold position after `currentBeat` becomes nil.
+    public private(set) var stoppedAtBeat: Double = 0
 
     public var onStop: (() -> Void)?
     public var metronomeEnabled = false
@@ -240,6 +243,10 @@ public final class Transport {
     }
 
     public func stop() {
+        // Capture playhead before clearing wall-clock state so pause / auto-stop can hold it.
+        if let beat = currentBeat {
+            stoppedAtBeat = max(0, beat)
+        }
         midiWork.forEach { $0.cancel() }
         midiWork.removeAll()
         autoStop?.cancel(); autoStop = nil

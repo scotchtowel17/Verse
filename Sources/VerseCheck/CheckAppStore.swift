@@ -47,6 +47,20 @@ private func undoDepth(of store: AppStore) -> Int {
     return depth
 }
 
+/// Spin the main run loop until `predicate` is true or `timeout` seconds elapse.
+/// Timeout is only a wait bound (not an asserted upper performance limit).
+@discardableResult
+@MainActor
+private func waitUntilAppStore(timeout: TimeInterval, predicate: () -> Bool) -> Bool {
+    if predicate() { return true }
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        if predicate() { return true }
+    }
+    return predicate()
+}
+
 @MainActor
 private func runAppStoreChecksOnMain(_ tk: TestKit) {
 
@@ -706,10 +720,352 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         tk.expectEqual(liveNotes[0].pitch, 64, "new note pitch is visible")
     }
 
-    tk.suite("AppStore piano roll: playbackBeat is nil when stopped") {
+    tk.suite("AppStore piano roll: playbackBeat holds scrubbed position when stopped") {
         let (store, dir) = makeTestStore()
         defer { try? FileManager.default.removeItem(at: dir) }
-        tk.expect(store.playbackBeat == nil, "no playhead beat while stopped")
+        tk.expectEqual(store.playbackBeat, 0, "playhead starts at beat 0")
+        store.scrubPlayhead(to: 3.5)
+        tk.expectEqual(store.playbackBeat, 3.5, "scrubbed playhead is visible while stopped")
+        tk.expect(!store.isPlaying, "scrub does not start playback")
+    }
+
+    // MARK: - Step S1: transport inside piano roll (pause / resume / scrub / no undo)
+
+    tk.suite("AppStore S1: pause holds position; play resumes from there") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.startEngineIfNeeded()
+        // Seed a long MIDI clip so playback has room to advance.
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 32,
+                        midiNotes: [Note(startBeat: 0, lengthBeats: 16, pitch: 60, velocity: 100)])
+        store.project.tracks[0].clips = [clip]
+
+        store.scrubPlayhead(to: 2.0)
+        store.startPlayback()
+        tk.expect(store.isPlaying, "playing after start from scrubbed beat")
+        // Allow the playhead past the 0.12s lead so musical time has moved.
+        let advanced = waitUntilAppStore(timeout: 1.5) { (store.playbackBeat ?? 0) > 2.15 }
+        tk.expect(advanced, "playhead advanced past resume point while playing")
+
+        let beforePause = store.playbackBeat ?? 0
+        store.pausePlayback()
+        tk.expect(!store.isPlaying, "paused")
+        let held = store.playheadBeat
+        tk.expect(held >= beforePause - 0.05,
+                  "pause holds near the live beat (held \(held), was \(beforePause))")
+        tk.expectEqual(store.playbackBeat, held, "playbackBeat reports held position while paused")
+
+        store.startPlayback()
+        tk.expect(store.isPlaying, "resumed after pause")
+        // Immediately after resume, beat should be at (or very near) the held position, not 0.
+        if let resumeBeat = store.playbackBeat {
+            tk.expect(resumeBeat >= held - 0.05,
+                      "resume starts from held beat, not zero (got \(resumeBeat), held \(held))")
+            tk.expect(resumeBeat < held + 1.0,
+                      "resume does not jump far ahead of held beat (got \(resumeBeat), held \(held))")
+        } else {
+            tk.expect(false, "playbackBeat non-nil while playing after resume")
+        }
+        store.pausePlayback()
+    }
+
+    tk.suite("AppStore S1: rewind returns to beat 0; distinct from pause") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.startEngineIfNeeded()
+        store.scrubPlayhead(to: 5.0)
+        tk.expectEqual(store.playheadBeat, 5.0, "scrub set playhead")
+        store.rewindToStart()
+        tk.expectEqual(store.playheadBeat, 0, "rewind returns to beat 0")
+        tk.expect(!store.isPlaying, "rewind leaves transport stopped")
+
+        // Pause mid-play then rewind: position goes to 0, not the paused beat.
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 32,
+                        midiNotes: [Note(startBeat: 0, lengthBeats: 16, pitch: 60, velocity: 100)])
+        store.project.tracks[0].clips = [clip]
+        store.startPlayback()
+        _ = waitUntilAppStore(timeout: 1.0) { (store.playbackBeat ?? 0) > 0.2 }
+        store.pausePlayback()
+        tk.expect(store.playheadBeat > 0, "pause left playhead past zero")
+        store.rewindToStart()
+        tk.expectEqual(store.playheadBeat, 0, "rewind after pause returns to zero")
+        tk.expect(!store.isPlaying, "still stopped after rewind")
+    }
+
+    tk.suite("AppStore S1: scrub while playing stops and sets playhead") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.startEngineIfNeeded()
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 32,
+                        midiNotes: [Note(startBeat: 0, lengthBeats: 16, pitch: 60, velocity: 100)])
+        store.project.tracks[0].clips = [clip]
+        store.startPlayback()
+        tk.expect(store.isPlaying, "playing before scrub")
+        store.scrubPlayhead(to: 7.25)
+        tk.expect(!store.isPlaying, "scrub stops playback")
+        tk.expectEqual(store.playheadBeat, 7.25, "scrubbed position held")
+        tk.expectEqual(store.playbackBeat, 7.25, "draw position matches scrub")
+    }
+
+    tk.suite("AppStore S1: transport actions never record undo") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.startEngineIfNeeded()
+        // One real edit so the stack is non-empty and we can detect accidental pushes.
+        store.addInstrumentTrack()
+        let depthBefore = undoDepth(of: store)
+        tk.expect(depthBefore >= 1, "baseline undo depth after add track")
+
+        store.scrubPlayhead(to: 4.0)
+        store.startPlayback()
+        store.pausePlayback()
+        store.rewindToStart()
+        store.scrubPlayhead(to: 1.5)
+        store.togglePlay()
+        store.togglePlay()
+
+        let depthAfter = undoDepth(of: store)
+        tk.expectEqual(depthAfter, depthBefore,
+                       "play/pause/rewind/scrub/toggle must not push undo entries")
+    }
+
+    tk.suite("AppStore S1: play from non-zero playhead uses Transport from:") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.startEngineIfNeeded()
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 32,
+                        midiNotes: [Note(startBeat: 0, lengthBeats: 16, pitch: 60, velocity: 90)])
+        store.project.tracks[0].clips = [clip]
+        store.scrubPlayhead(to: 4.0)
+        store.startPlayback()
+        tk.expect(store.isPlaying, "playing")
+        // During the scheduling lead, currentBeat reports the start beat (not zero).
+        if let beat = store.playbackBeat {
+            tk.expect(beat >= 3.9,
+                      "play begins at scrubbed beat, not arrangement start (got \(beat))")
+        } else {
+            tk.expect(false, "playbackBeat while playing")
+        }
+        store.pausePlayback()
+    }
+
+    // MARK: - Step S2: selection helpers, group move, copy/paste, multi-delete
+
+    tk.suite("Piano roll S2: marquee selects notes it touches") {
+        let a = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        let b = Note(startBeat: 2, lengthBeats: 0.5, pitch: 64, velocity: 100)
+        let c = Note(startBeat: 4, lengthBeats: 1, pitch: 72, velocity: 100)
+        let notes = [a, b, c]
+
+        // Marquee over pitch 60–65 and beats 0–3: hits a and b, not c.
+        let hit = PianoRollSelection.notesTouchingMarquee(
+            notes: notes, beatA: 0, beatB: 3, pitchA: 60, pitchB: 65)
+        tk.expectEqual(Set(hit), Set([a.id, b.id]), "marquee touches low chord notes")
+
+        // Edge touch: marquee starts exactly at note end should not count as overlap
+        // (half-open style: noteBeatHi > beatLo requires beatLo < end).
+        let edge = PianoRollSelection.noteTouchesMarquee(
+            note: a, beatA: 1, beatB: 2, pitchA: 60, pitchB: 60)
+        tk.expect(!edge, "marquee starting at note end does not touch")
+
+        // Touch at note start edge does hit.
+        let startEdge = PianoRollSelection.noteTouchesMarquee(
+            note: a, beatA: 0.5, beatB: 1.5, pitchA: 60, pitchB: 60)
+        tk.expect(startEdge, "marquee overlapping note body touches")
+
+        // Vertical line marquee (same beat, pitch span) still hits notes covering that beat.
+        let vertical = PianoRollSelection.noteTouchesMarquee(
+            note: a, beatA: 0.25, beatB: 0.25, pitchA: 59, pitchB: 61)
+        tk.expect(vertical, "vertical marquee through note body touches")
+
+        // Completely outside pitch range does not hit.
+        let missPitch = PianoRollSelection.noteTouchesMarquee(
+            note: a, beatA: 0, beatB: 1, pitchA: 70, pitchB: 72)
+        tk.expect(!missPitch, "marquee on other pitches does not touch")
+    }
+
+    tk.suite("Piano roll S2: group move preserves formation or rejects whole") {
+        let origins: [(pitch: Int, startBeat: Double)] = [
+            (pitch: 60, startBeat: 0),
+            (pitch: 64, startBeat: 0.5),
+            (pitch: 67, startBeat: 1.0),
+        ]
+        let up = PianoRollSelection.applyGroupDelta(origins: origins, pitchDelta: 2, beatDelta: 1.0)
+        tk.expect(up != nil, "in-range group move accepted")
+        tk.expectEqual(up![0].pitch, 62, "primary pitch shifted")
+        tk.expectEqual(up![1].pitch, 66, "chord interval preserved")
+        tk.expectEqual(up![2].pitch, 69, "top of chord shifted")
+        tk.expectEqual(up![0].startBeat, 1.0, "time delta applied")
+        tk.expectEqual(up![1].startBeat, 1.5, "relative time preserved")
+        tk.expectEqual(up![2].startBeat, 2.0, "relative time preserved on third")
+
+        // Pitch out of range on any note rejects the whole group.
+        let tooHigh = PianoRollSelection.applyGroupDelta(
+            origins: origins, pitchDelta: 70, beatDelta: 0)
+        tk.expect(tooHigh == nil, "pitch overflow rejects whole selection")
+
+        let tooLow = PianoRollSelection.applyGroupDelta(
+            origins: [(pitch: 1, startBeat: 0), (pitch: 60, startBeat: 1)],
+            pitchDelta: -2, beatDelta: 0)
+        tk.expect(tooLow == nil, "pitch underflow rejects whole selection")
+
+        // Start before beat 0 rejects the whole group (no partial move).
+        let beforeZero = PianoRollSelection.applyGroupDelta(
+            origins: origins, pitchDelta: 0, beatDelta: -0.75)
+        tk.expect(beforeZero == nil, "negative start rejects whole selection")
+
+        // Boundary pitches still valid.
+        let edge = PianoRollSelection.applyGroupDelta(
+            origins: [(pitch: 0, startBeat: 0), (pitch: 127, startBeat: 1)],
+            pitchDelta: 0, beatDelta: 0)
+        tk.expect(edge != nil, "0 and 127 stay valid with zero delta")
+    }
+
+    tk.suite("Piano roll S2: paste offsets preserve relative starts at playhead") {
+        let starts = [2.0, 2.5, 4.0]
+        let pasted = PianoRollSelection.pasteStartBeats(
+            clipboardStarts: starts, playheadLocalBeat: 8.0)
+        tk.expectEqual(pasted, [8.0, 8.5, 10.0],
+                       "earliest maps to playhead; others keep offsets")
+
+        let empty = PianoRollSelection.pasteStartBeats(
+            clipboardStarts: [], playheadLocalBeat: 3)
+        tk.expectEqual(empty.count, 0, "empty clipboard yields empty paste starts")
+
+        // Playhead at 0 with clipboard starting mid-clip.
+        let atZero = PianoRollSelection.pasteStartBeats(
+            clipboardStarts: [1.0, 3.0], playheadLocalBeat: 0)
+        tk.expectEqual(atZero, [0.0, 2.0], "paste at beat 0 keeps spacing")
+    }
+
+    tk.suite("AppStore S2: multi-delete is one undo entry") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let n1 = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        let n2 = Note(startBeat: 1, lengthBeats: 1, pitch: 64, velocity: 100)
+        let n3 = Note(startBeat: 2, lengthBeats: 1, pitch: 67, velocity: 100)
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 8,
+                        midiNotes: [n1, n2, n3])
+        store.project.tracks[0].clips = [clip]
+        store.openPianoRoll(clipID: clip.id)
+
+        store.pianoRollDeleteNotes(ids: [n1.id, n2.id])
+        tk.expectEqual(store.project.tracks[0].clips[0].midiNotes?.count, 1,
+                       "two notes deleted, one remains")
+        tk.expectEqual(store.project.tracks[0].clips[0].midiNotes?[0].id, n3.id,
+                       "remaining note is the untouched one")
+        tk.expectEqual(undoDepth(of: store), 1, "multi-delete is exactly one undo entry")
+        tk.expectEqual(store.undoName, "Delete Notes", "multi-delete label")
+
+        store.undo()
+        tk.expectEqual(store.project.tracks[0].clips[0].midiNotes?.count, 3,
+                       "one undo restores both deleted notes")
+    }
+
+    tk.suite("AppStore S2: group move is one undo; rejects partial out-of-range") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let low = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        let high = Note(startBeat: 0.5, lengthBeats: 1, pitch: 120, velocity: 100)
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 8,
+                        midiNotes: [low, high])
+        store.project.tracks[0].clips = [clip]
+        store.openPianoRoll(clipID: clip.id)
+
+        store.beginPianoRollGesture(name: "Move Notes")
+        // Valid group move: both up a whole step.
+        for _ in 1...10 {
+            store.pianoRollMoveNotes([
+                (id: low.id, toPitch: 62, toStartBeat: 1.0),
+                (id: high.id, toPitch: 122, toStartBeat: 1.5),
+            ])
+        }
+        // Out-of-range for high (130): whole update rejected; notes stay at last valid.
+        store.pianoRollMoveNotes([
+            (id: low.id, toPitch: 70, toStartBeat: 2.0),
+            (id: high.id, toPitch: 130, toStartBeat: 2.5),
+        ])
+        store.endPianoRollGesture()
+
+        let after = store.project.tracks[0].clips[0].midiNotes!
+        let lowAfter = after.first { $0.id == low.id }!
+        let highAfter = after.first { $0.id == high.id }!
+        tk.expectEqual(lowAfter.pitch, 62, "low kept last valid pitch (not partial 70)")
+        tk.expectEqual(highAfter.pitch, 122, "high kept last valid pitch")
+        tk.expectEqual(lowAfter.startBeat, 1.0, "low kept last valid start")
+        tk.expectEqual(highAfter.startBeat, 1.5, "high kept last valid start")
+        tk.expectEqual(undoDepth(of: store), 1, "many group updates are one undo entry")
+        tk.expectEqual(store.undoName, "Move Notes", "group move label")
+
+        store.undo()
+        let restored = store.project.tracks[0].clips[0].midiNotes!
+        tk.expectEqual(restored.first { $0.id == low.id }!.pitch, 60,
+                       "one undo restores original pitches")
+        tk.expectEqual(restored.first { $0.id == high.id }!.pitch, 120,
+                       "one undo restores both notes")
+    }
+
+    tk.suite("AppStore S2: paste at playhead is one undo; leaves new notes") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 2, lengthBeats: 16,
+                        midiNotes: [])
+        store.project.tracks[0].clips = [clip]
+        store.openPianoRoll(clipID: clip.id)
+        store.scrubPlayhead(to: 6.0) // arrangement beat 6 → clip-local 4
+
+        // Clipboard-like relative group: earliest at 0 offset after pasteStartBeats.
+        let starts = PianoRollSelection.pasteStartBeats(
+            clipboardStarts: [1.0, 1.5, 2.0], playheadLocalBeat: 4.0)
+        tk.expectEqual(starts, [4.0, 4.5, 5.0], "playhead-local paste anchors")
+
+        let ids = store.pianoRollPasteNotes([
+            (pitch: 60, startBeat: starts[0], lengthBeats: 0.5, velocity: 100),
+            (pitch: 64, startBeat: starts[1], lengthBeats: 0.5, velocity: 90),
+            (pitch: 67, startBeat: starts[2], lengthBeats: 0.5, velocity: 80),
+        ])
+        tk.expectEqual(ids.count, 3, "paste returns three new ids")
+        tk.expectEqual(store.project.tracks[0].clips[0].midiNotes?.count, 3, "three notes in clip")
+        tk.expectEqual(undoDepth(of: store), 1, "paste is exactly one undo entry")
+        tk.expectEqual(store.undoName, "Paste Notes", "paste undo label")
+
+        let pasted = store.project.tracks[0].clips[0].midiNotes!
+        tk.expectEqual(pasted.map(\.startBeat).sorted(), [4.0, 4.5, 5.0],
+                       "relative offsets preserved at playhead")
+        tk.expectEqual(Set(pasted.map(\.id)), Set(ids), "returned ids match live notes")
+
+        store.undo()
+        tk.expectEqual(store.project.tracks[0].clips[0].midiNotes?.count ?? 0, 0,
+                       "one undo removes the whole paste")
+    }
+
+    tk.suite("AppStore S2: cut is one undo; single delete label still singular") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let n1 = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        let n2 = Note(startBeat: 1, lengthBeats: 1, pitch: 64, velocity: 100)
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 8,
+                        midiNotes: [n1, n2])
+        store.project.tracks[0].clips = [clip]
+        store.openPianoRoll(clipID: clip.id)
+
+        store.pianoRollDeleteNotes(ids: [n1.id, n2.id], undoName: "Cut Notes")
+        tk.expectEqual(store.undoName, "Cut Notes", "cut uses Cut Notes label")
+        tk.expectEqual(undoDepth(of: store), 1, "cut is one undo entry")
+        store.undo()
+
+        store.pianoRollDeleteNotes(ids: [n1.id])
+        tk.expectEqual(store.undoName, "Delete Note", "single delete stays singular")
+        tk.expectEqual(store.project.tracks[0].clips[0].midiNotes?.count, 1, "one note left")
     }
 
     // MARK: - Phase R2: arrangement view (move / resize undo grouping + layout)
