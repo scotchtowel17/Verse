@@ -1176,6 +1176,296 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         tk.expectEqual(store.project.tracks[0].clips[0].midiNotes?.count, 1, "one note left")
     }
 
+    // MARK: - Step U1: clip selection helpers, multi-move, paste, delete
+
+    tk.suite("Arrangement U1: marquee selects clips it touches") {
+        let a = UUID()
+        let b = UUID()
+        let c = UUID()
+        let clips: [(id: UUID, startBeat: Double, lengthBeats: Double, trackIndex: Int)] = [
+            (id: a, startBeat: 0, lengthBeats: 2, trackIndex: 0),
+            (id: b, startBeat: 4, lengthBeats: 2, trackIndex: 0),
+            (id: c, startBeat: 0, lengthBeats: 2, trackIndex: 1),
+        ]
+        // Beats 0–3 on track 0 only: hits a, not b or c.
+        let hit = ArrangementSelection.clipsTouchingMarquee(
+            clips: clips, beatA: 0, beatB: 3, trackA: 0, trackB: 0)
+        tk.expectEqual(Set(hit), Set([a]), "marquee on track 0 early beats hits only a")
+
+        // Vertical marquee covering both tracks at beat 0–1: hits a and c.
+        let both = ArrangementSelection.clipsTouchingMarquee(
+            clips: clips, beatA: 0, beatB: 1, trackA: 0, trackB: 1)
+        tk.expectEqual(Set(both), Set([a, c]), "vertical marquee hits both tracks")
+
+        // Edge: marquee starting exactly at clip end does not touch.
+        let edge = ArrangementSelection.clipTouchesMarquee(
+            startBeat: 0, lengthBeats: 2, trackIndex: 0,
+            beatA: 2, beatB: 4, trackA: 0, trackB: 0)
+        tk.expect(!edge, "marquee at clip end does not touch")
+    }
+
+    tk.suite("Arrangement U1: group move preserves formation or rejects whole") {
+        let origins: [(startBeat: Double, trackIndex: Int)] = [
+            (startBeat: 1, trackIndex: 0),
+            (startBeat: 3, trackIndex: 1),
+        ]
+        let ok = ArrangementSelection.applyGroupDelta(
+            origins: origins, beatDelta: 2, trackDelta: 0, trackCount: 3)
+        tk.expect(ok != nil, "in-range group time move accepted")
+        tk.expectEqual(ok![0].startBeat, 3, "primary time shifted")
+        tk.expectEqual(ok![1].startBeat, 5, "relative time preserved")
+
+        let up = ArrangementSelection.applyGroupDelta(
+            origins: origins, beatDelta: 0, trackDelta: 1, trackCount: 3)
+        tk.expect(up != nil, "in-range track delta accepted")
+        tk.expectEqual(up![0].trackIndex, 1, "track 0 → 1")
+        tk.expectEqual(up![1].trackIndex, 2, "track 1 → 2")
+
+        let beforeZero = ArrangementSelection.applyGroupDelta(
+            origins: origins, beatDelta: -2, trackDelta: 0, trackCount: 3)
+        tk.expect(beforeZero == nil, "start before 0 rejects whole selection")
+
+        let offTracks = ArrangementSelection.applyGroupDelta(
+            origins: origins, beatDelta: 0, trackDelta: 2, trackCount: 3)
+        tk.expect(offTracks == nil, "track out of range rejects whole selection")
+    }
+
+    tk.suite("Arrangement U1: paste offsets preserve relative starts at playhead") {
+        let starts = [2.0, 2.5, 5.0]
+        let pasted = ArrangementSelection.pasteStartBeats(
+            clipboardStarts: starts, playheadBeat: 8.0)
+        tk.expectEqual(pasted, [8.0, 8.5, 11.0],
+                       "earliest maps to playhead; others keep offsets")
+        let empty = ArrangementSelection.pasteStartBeats(
+            clipboardStarts: [], playheadBeat: 3)
+        tk.expectEqual(empty.count, 0, "empty clipboard yields empty paste starts")
+    }
+
+    tk.suite("Arrangement U1: placementsCompatible enforces kind rules") {
+        let kinds: [TrackKind] = [.instrument, .audio, .instrument]
+        tk.expect(
+            ArrangementSelection.placementsCompatible(
+                clipKinds: [.midi, .midi],
+                trackKinds: kinds,
+                trackIndices: [0, 2]),
+            "MIDI on two instrument tracks ok")
+        tk.expect(
+            !ArrangementSelection.placementsCompatible(
+                clipKinds: [.midi],
+                trackKinds: kinds,
+                trackIndices: [1]),
+            "MIDI on audio track rejected")
+        tk.expect(
+            !ArrangementSelection.placementsCompatible(
+                clipKinds: [.audio],
+                trackKinds: kinds,
+                trackIndices: [0]),
+            "audio on instrument track rejected")
+        tk.expect(
+            ArrangementSelection.placementsCompatible(
+                clipKinds: [.audio],
+                trackKinds: kinds,
+                trackIndices: [1]),
+            "audio on audio track ok")
+    }
+
+    tk.suite("AppStore U1: multi-delete is one undo entry") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let c1 = Clip(kind: .midi, name: "a", startBeat: 0, lengthBeats: 2, midiNotes: [])
+        let c2 = Clip(kind: .midi, name: "b", startBeat: 4, lengthBeats: 2, midiNotes: [])
+        let c3 = Clip(kind: .midi, name: "c", startBeat: 8, lengthBeats: 2, midiNotes: [])
+        store.project.tracks[0].clips = [c1, c2, c3]
+        store.openPianoRoll(clipID: c1.id)
+
+        store.arrangementDeleteClips(ids: [c1.id, c2.id])
+        tk.expectEqual(store.project.tracks[0].clips.count, 1, "two clips deleted, one remains")
+        tk.expectEqual(store.project.tracks[0].clips[0].id, c3.id, "remaining is the untouched one")
+        tk.expectEqual(undoDepth(of: store), 1, "multi-delete is exactly one undo entry")
+        tk.expectEqual(store.undoName, "Delete Clips", "multi-delete label")
+        tk.expect(store.pianoRollClipID == nil, "open roll cleared when its clip was deleted")
+
+        store.undo()
+        tk.expectEqual(store.project.tracks[0].clips.count, 3, "one undo restores both deleted clips")
+    }
+
+    tk.suite("AppStore U1: group move is one undo; kind mismatch refuses whole") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.addAudioTrack()
+        store.addInstrumentTrack()
+        // tracks: [0 instrument Piano, 1 audio, 2 instrument]
+        let midiA = Clip(kind: .midi, name: "a", startBeat: 0, lengthBeats: 2,
+                         midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
+        let midiB = Clip(kind: .midi, name: "b", startBeat: 2, lengthBeats: 2,
+                         midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 64, velocity: 100)])
+        store.project.tracks[0].clips = [midiA, midiB]
+        let depthAfterTracks = undoDepth(of: store)
+
+        store.beginArrangementGesture(name: "Move Clips")
+        for _ in 1...8 {
+            store.arrangementMoveClips([
+                (id: midiA.id, startBeat: 1, trackIndex: 0),
+                (id: midiB.id, startBeat: 3, trackIndex: 0),
+            ])
+        }
+        // Kind mismatch: MIDI onto audio track. Whole update rejected.
+        store.arrangementMoveClips([
+            (id: midiA.id, startBeat: 1, trackIndex: 1),
+            (id: midiB.id, startBeat: 3, trackIndex: 1),
+        ])
+        store.endArrangementGesture()
+
+        tk.expectEqual(store.project.tracks[0].clips.count, 2, "MIDI still on instrument after refuse")
+        tk.expectEqual(store.project.tracks[1].clips.count, 0, "audio track did not receive MIDI")
+        let aAfter = store.project.tracks[0].clips.first { $0.id == midiA.id }!
+        let bAfter = store.project.tracks[0].clips.first { $0.id == midiB.id }!
+        tk.expectEqual(aAfter.startBeat, 1, "kept last valid start for A")
+        tk.expectEqual(bAfter.startBeat, 3, "kept last valid start for B")
+        // Capture before undoDepth: that helper undoes/redoes and rewrites statusMessage.
+        let refuseStatus = store.statusMessage
+        tk.expect(refuseStatus != nil, "kind refusal sets a clear status message")
+        tk.expect(refuseStatus!.contains("MIDI") || refuseStatus!.contains("audio"),
+                  "status names the kind problem")
+        tk.expectEqual(store.undoName, "Move Clips", "group move label")
+        tk.expectEqual(undoDepth(of: store), depthAfterTracks + 1,
+                       "many group updates are one undo entry")
+
+        let depthAfterFirstMove = undoDepth(of: store)
+        // Valid cross-track move onto the other instrument track.
+        store.beginArrangementGesture(name: "Move Clips")
+        store.arrangementMoveClips([
+            (id: midiA.id, startBeat: 4, trackIndex: 2),
+            (id: midiB.id, startBeat: 6, trackIndex: 2),
+        ])
+        store.endArrangementGesture()
+        tk.expectEqual(store.project.tracks[0].clips.count, 0, "source emptied")
+        tk.expectEqual(store.project.tracks[2].clips.count, 2, "both on Lead instrument")
+        tk.expectEqual(undoDepth(of: store), depthAfterFirstMove + 1,
+                       "second gesture is a second undo entry")
+
+        store.undo()
+        tk.expectEqual(store.project.tracks[0].clips.count, 2, "undo restores prior track placement")
+    }
+
+    tk.suite("AppStore U1: paste at playhead is one undo; deep-copies UUIDs") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let n1 = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        let n2 = Note(startBeat: 1, lengthBeats: 1, pitch: 64, velocity: 90)
+        let src = Clip(kind: .midi, name: "phrase", startBeat: 2, lengthBeats: 4,
+                       midiNotes: [n1, n2])
+        store.project.tracks[0].clips = [src]
+        store.scrubPlayhead(to: 10.0)
+
+        let starts = ArrangementSelection.pasteStartBeats(
+            clipboardStarts: [2.0], playheadBeat: 10.0)
+        tk.expectEqual(starts, [10.0], "playhead anchors the earliest clip")
+
+        let ids = store.arrangementPasteClips([
+            (clip: src, startBeat: starts[0], trackIndex: 0),
+        ])
+        tk.expectEqual(ids.count, 1, "paste returns one new id")
+        tk.expectEqual(store.project.tracks[0].clips.count, 2, "original + paste")
+        tk.expect(ids[0] != src.id, "pasted clip has a fresh UUID")
+        let pasted = store.project.tracks[0].clips.first { $0.id == ids[0] }!
+        tk.expectEqual(pasted.startBeat, 10.0, "paste at playhead")
+        tk.expectEqual(pasted.midiNotes?.count, 2, "notes pasted")
+        let origNoteIDs = Set([n1.id, n2.id])
+        let pasteNoteIDs = Set((pasted.midiNotes ?? []).map(\.id))
+        tk.expect(origNoteIDs.isDisjoint(with: pasteNoteIDs), "note UUIDs regenerated via deepCopy")
+        tk.expectEqual(undoDepth(of: store), 1, "paste is exactly one undo entry")
+        tk.expectEqual(store.undoName, "Paste Clips", "paste undo label")
+
+        store.undo()
+        tk.expectEqual(store.project.tracks[0].clips.count, 1, "one undo removes the whole paste")
+    }
+
+    tk.suite("AppStore U1: paste kind mismatch refuses; cut is one undo") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.addAudioTrack()
+        let midi = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 2, midiNotes: [])
+        store.project.tracks[0].clips = [midi]
+        let depthAfterTracks = undoDepth(of: store)
+
+        let refused = store.arrangementPasteClips([
+            (clip: midi, startBeat: 4, trackIndex: 1), // audio track
+        ])
+        tk.expectEqual(refused.count, 0, "MIDI paste onto audio returns no ids")
+        tk.expectEqual(store.project.tracks[1].clips.count, 0, "audio track unchanged")
+        tk.expectEqual(undoDepth(of: store), depthAfterTracks,
+                       "refused paste records no undo")
+        tk.expect(store.statusMessage != nil, "refused paste sets status")
+
+        let depthBeforeCut = undoDepth(of: store)
+        store.arrangementDeleteClips(ids: [midi.id], undoName: "Cut Clips")
+        tk.expectEqual(store.undoName, "Cut Clips", "cut uses Cut Clips label")
+        tk.expectEqual(undoDepth(of: store), depthBeforeCut + 1, "cut is one undo entry")
+        tk.expectEqual(store.project.tracks[0].clips.count, 0, "clip removed by cut")
+    }
+
+    tk.suite("AppStore U2: split clip is one undo; audio and edges refused") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let crossing = Note(startBeat: 1, lengthBeats: 2, pitch: 60, velocity: 100)
+        let midi = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 4,
+                        midiNotes: [crossing])
+        store.project.tracks[0].clips = [midi]
+        store.openPianoRoll(clipID: midi.id)
+
+        let pair = store.arrangementSplitClip(id: midi.id, atArrangementBeat: 2)
+        tk.expect(pair != nil, "MIDI split returns new ids")
+        tk.expectEqual(store.project.tracks[0].clips.count, 2, "two halves after split")
+        tk.expectEqual(store.undoName, "Split Clip", "split undo label")
+        tk.expectEqual(undoDepth(of: store), 1, "split is exactly one undo entry")
+        tk.expectEqual(store.pianoRollClipID, pair!.left, "open roll retargets to left half")
+        let left = store.project.tracks[0].clips[0]
+        let right = store.project.tracks[0].clips[1]
+        tk.expectEqual(left.lengthBeats, 2, "left half length")
+        tk.expectEqual(right.startBeat, 2, "right half start")
+        tk.expectEqual(left.midiNotes?.count, 1, "left has first part of crossing")
+        tk.expectEqual(right.midiNotes?.count, 1, "right has second part of crossing")
+        tk.expectEqual(
+            (left.midiNotes![0].lengthBeats) + (right.midiNotes![0].lengthBeats),
+            2,
+            "crossing parts sum to original")
+
+        store.undo()
+        tk.expectEqual(store.project.tracks[0].clips.count, 1, "one undo restores original")
+        tk.expectEqual(store.project.tracks[0].clips[0].id, midi.id, "original clip id restored")
+        tk.expectEqual(store.project.tracks[0].clips[0].midiNotes?.count, 1,
+                       "original notes restored")
+
+        // Edge refuse: no undo, clear message.
+        store.statusMessage = nil
+        let atStart = store.arrangementSplitClip(id: midi.id, atArrangementBeat: 0)
+        tk.expect(atStart == nil, "split at start returns nil")
+        tk.expectEqual(store.project.tracks[0].clips.count, 1, "edge refuse leaves one clip")
+        tk.expect(store.statusMessage != nil, "edge refuse sets status")
+        tk.expectEqual(undoDepth(of: store), 0, "refused split records no undo after undo")
+
+        // Audio refuse.
+        store.addAudioTrack()
+        let audio = Clip(kind: .audio, name: "take", startBeat: 0, lengthBeats: 4,
+                         mediaFile: "t.wav")
+        store.project.tracks[1].clips = [audio]
+        store.statusMessage = nil
+        let audioSplit = store.arrangementSplitClip(id: audio.id, atArrangementBeat: 2)
+        tk.expect(audioSplit == nil, "audio split returns nil")
+        tk.expectEqual(store.project.tracks[1].clips.count, 1, "audio clip still there")
+        let audioStatus = store.statusMessage
+        tk.expect(audioStatus != nil, "audio refuse sets status")
+        tk.expect(
+            audioStatus!.localizedCaseInsensitiveContains("audio"),
+            "audio refuse message names audio")
+    }
+
     // MARK: - Phase R2: arrangement view (move / resize undo grouping + layout)
 
     tk.suite("AppStore arrangement: drag move is one undo for many updates") {

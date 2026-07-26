@@ -1271,7 +1271,7 @@ Owner: copy and paste a clip within a track and into another track, move clips b
 and segment (split) a clip. MIDI only for now; audio split is deferred by explicit decision
 because it would need a start-offset field on `Clip` that the schema does not have.
 
-## Step U1 — Clip selection, copy/paste, and moving between tracks — PENDING
+## Step U1 — Clip selection, copy/paste, and moving between tracks — DONE
 
 1. **Clip selection.** Click selects a clip, shift-click toggles, dragging on empty arrangement
    background draws a marquee that selects the clips it touches. Selection is view-local.
@@ -1296,7 +1296,7 @@ because it would need a start-offset field on `Clip` that the schema does not ha
 7. Undo: exactly one entry per completed operation, labelled "Move Clips", "Paste Clips",
    "Delete Clips", "Cut Clips". Never per clip, never per drag update.
 
-## Step U2 — Split a MIDI clip — PENDING
+## Step U2 — Split a MIDI clip — DONE
 
 1. Split the selected MIDI clip at the playhead into two clips, both on the same track, with no
    gap and no overlap: the first runs from the original start to the playhead, the second from
