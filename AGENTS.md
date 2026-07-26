@@ -103,6 +103,12 @@ When a step adds behavior, add assertions to the matching `Check*.swift` file. T
 
 Never mark a step complete on a build alone. Build success is not test success.
 
+**To check a change in the running app, use `scripts/run.sh`.** `swift build` refreshes
+`.build/debug/Verse`, but the app that launches by name is the bundle at `build/Verse.app`,
+which `swift build` does not touch. Screenshotting after a bare `swift build` shows the previous
+bundle, so a working fix looks like it did nothing and a broken one looks fine. `scripts/run.sh`
+runs `make-app.sh` first, so the bundle and the binary always agree.
+
 **No wall-clock upper bounds in tests.** CI runners are loaded and slow, so an assertion like
 "this finished within N seconds" measures machine load, not behavior, and will fail randomly.
 If timing matters, record when the event actually fired (in its callback) and assert only the
