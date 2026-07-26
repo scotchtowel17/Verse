@@ -1262,3 +1262,57 @@ Replace it with a window that is computed, not scrolled.
    pitches 36 and 41 in a pane of a given height yields a range containing both; a clip at
    72-76 yields a range containing those; the range never exceeds 0-127 and is never shorter
    than the pane can show when clamped at an edge.
+
+---
+
+# Phase U — Clip-level editing in the arrangement
+
+Owner: copy and paste a clip within a track and into another track, move clips between tracks,
+and segment (split) a clip. MIDI only for now; audio split is deferred by explicit decision
+because it would need a start-offset field on `Clip` that the schema does not have.
+
+## Step U1 — Clip selection, copy/paste, and moving between tracks — PENDING
+
+1. **Clip selection.** Click selects a clip, shift-click toggles, dragging on empty arrangement
+   background draws a marquee that selects the clips it touches. Selection is view-local.
+   Selected clips are visually distinct.
+2. **Move the whole selection together in time**, preserving relative offsets, same rule as the
+   piano roll: rejected as a whole if any clip would start before beat 0, never partially.
+3. **Drag vertically to move a clip to another track.** A MIDI clip may only land on an
+   instrument track and an audio clip only on an audio track; an incompatible drop is refused
+   with clear feedback rather than silently dropped or half-applied. Moving keeps the clip's
+   `startBeat` unless the user also moved horizontally.
+4. **Copy, cut and paste clips.** Cmd-C / Cmd-X / Cmd-V. Paste places the copied clips at the
+   playhead, preserving relative offsets between them, on the track they came from unless a
+   different track is selected, in which case paste targets that track (respecting the same
+   kind-compatibility rule). Pasted clips get fresh UUIDs for the clip **and** every contained
+   note; reuse the existing `Project.duplicateClip` deep-copy behaviour rather than writing a
+   second copy path. Leave pasted clips selected.
+5. **Cmd-C/X/V routing must be explicit.** The piano roll already owns those shortcuts for
+   notes. Route by focus: when the roll has keyboard focus the shortcuts act on notes, when the
+   arrangement has focus they act on clips. Whichever surface is focused must be visually
+   obvious. Do not let one silently shadow the other.
+6. **Delete removes the selected clips.**
+7. Undo: exactly one entry per completed operation, labelled "Move Clips", "Paste Clips",
+   "Delete Clips", "Cut Clips". Never per clip, never per drag update.
+
+## Step U2 — Split a MIDI clip — PENDING
+
+1. Split the selected MIDI clip at the playhead into two clips, both on the same track, with no
+   gap and no overlap: the first runs from the original start to the playhead, the second from
+   the playhead to the original end.
+2. **Notes are divided by the split point.** A note entirely before it stays in the first clip,
+   entirely after it moves to the second (with its `startBeat` rebased to the new clip), and a
+   note crossing it is **split into two notes**, one ending at the boundary and one starting
+   there, so nothing is silently lost or lengthened.
+3. Both halves get fresh clip UUIDs and fresh note UUIDs.
+4. **Audio clips cannot be split yet.** Offer no split action for them, or disable it with a
+   plain-language reason. Never silently do nothing.
+5. Refuse a split at or outside the clip's own bounds, since that would produce a zero-length
+   clip. Say why.
+6. One undo entry, "Split Clip".
+7. Tests: note counts and total note duration are preserved across a split; a crossing note
+   becomes two whose lengths sum to the original; rebased start beats are correct; splitting at
+   the exact start or end is refused; audio is refused.
+
+No schema change in either step.
