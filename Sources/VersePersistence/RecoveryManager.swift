@@ -61,8 +61,13 @@ public final class RecoveryManager {
         /// Present when `autosave-project.json` exists but could not be decoded (for example a
         /// future schemaVersion). Keeps the failure readable instead of pretending nothing was found.
         public let projectLoadFailureMessage: String?
+        /// Present when `journal.json` exists but could not be read or decoded. A missing journal
+        /// is normal (no recording in progress) and stays a silent no-op; only a corrupt file
+        /// is surfaced.
+        public let journalLoadFailureMessage: String?
         public var hasSomething: Bool {
-            project != nil || inProgressTakeURL != nil || projectLoadFailureMessage != nil
+            project != nil || inProgressTakeURL != nil
+                || projectLoadFailureMessage != nil || journalLoadFailureMessage != nil
         }
     }
 
@@ -78,38 +83,48 @@ public final class RecoveryManager {
                 project = try Project.fromJSON(data)
             } catch {
                 // Keep the autosave on disk; surface why it could not be opened.
-                projectLoadFailureMessage = Self.readableLoadFailure(error)
+                projectLoadFailureMessage = Self.readableLoadFailure(
+                    error, fallback: "Couldn’t restore the autosaved project.")
             }
         }
         var takeName: String?
         var takeURL: URL?
-        if let jdata = try? Data(contentsOf: journalURL),
-           let journal = try? JSONDecoder().decode(Journal.self, from: jdata),
-           journal.recording, let name = journal.takeFilename {
-            let url = mediaDir.appendingPathComponent(name)
-            if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-               (attrs[.size] as? Int ?? 0) > 0 {
-                takeName = name
-                takeURL = url
+        var journalLoadFailureMessage: String?
+        // Missing journal is normal (no recording in progress): silent no-op.
+        // A journal that exists but fails to read/decode is a distinct failure.
+        if FileManager.default.fileExists(atPath: journalURL.path) {
+            do {
+                let jdata = try Data(contentsOf: journalURL)
+                let journal = try JSONDecoder().decode(Journal.self, from: jdata)
+                if journal.recording, let name = journal.takeFilename {
+                    let url = mediaDir.appendingPathComponent(name)
+                    if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                       (attrs[.size] as? Int ?? 0) > 0 {
+                        takeName = name
+                        takeURL = url
+                    }
+                }
+            } catch {
+                journalLoadFailureMessage = Self.readableLoadFailure(
+                    error, fallback: "Couldn’t read the recovery journal for an in-progress recording.")
             }
         }
         let info = RecoveryInfo(
             project: project,
             inProgressTakeFilename: takeName,
             inProgressTakeURL: takeURL,
-            projectLoadFailureMessage: projectLoadFailureMessage
+            projectLoadFailureMessage: projectLoadFailureMessage,
+            journalLoadFailureMessage: journalLoadFailureMessage
         )
         return info.hasSomething ? info : nil
     }
 
-    private static func readableLoadFailure(_ error: Error) -> String {
+    private static func readableLoadFailure(_ error: Error, fallback: String) -> String {
         if let e = error as? LocalizedError, let d = e.errorDescription, !d.isEmpty {
             return d
         }
         let s = error.localizedDescription
-        return s.isEmpty
-            ? "Couldn’t restore the autosaved project."
-            : s
+        return s.isEmpty ? fallback : s
     }
 
     // MARK: - Session lifecycle
@@ -136,7 +151,10 @@ public final class RecoveryManager {
     /// directory or unrelated takes from other projects.
     public func discardRecovery() {
         var orphanTake: String?
-        if let jdata = try? Data(contentsOf: journalURL),
+        // Missing journal: nothing to name. Present but unreadable: still clean up below;
+        // orphan take name is best-effort only when decode succeeds.
+        if FileManager.default.fileExists(atPath: journalURL.path),
+           let jdata = try? Data(contentsOf: journalURL),
            let journal = try? JSONDecoder().decode(Journal.self, from: jdata),
            journal.recording, let name = journal.takeFilename {
             orphanTake = name

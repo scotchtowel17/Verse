@@ -108,7 +108,7 @@ public final class AppStore {
     }
 
     /// Drop arm flags for tracks that no longer exist.
-    public func pruneArmedTracks() {
+    func pruneArmedTracks() {
         let live = Set(project.tracks.map(\.id))
         armedTrackIDs = armedTrackIDs.intersection(live)
     }
@@ -399,7 +399,7 @@ public final class AppStore {
     }
 
     /// Instrument track used for roll audition. Audio roll targets fall back to `activeTrackID`.
-    public var pianoRollTrackID: UUID? {
+    var pianoRollTrackID: UUID? {
         if let t = project.track(id: rollTrackID), t.kind == .instrument {
             return rollTrackID
         }

@@ -120,6 +120,45 @@ func runPersistenceChecks(_ tk: TestKit) {
         try? fm.removeItem(at: base)
     }
 
+    tk.suite("Recovery: missing journal is silent; corrupt journal is observable") {
+        let base = fm.temporaryDirectory.appendingPathComponent("verse-journal-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: base) }
+
+        // Unclean session + valid autosave, no journal file: normal silent no-op for journal.
+        let rec = RecoveryManager(baseDir: base)
+        rec.beginSession()
+        var edited = Project.newUntitled(); edited.title = "no journal"
+        rec.autosave(edited)
+        let noJournal = RecoveryManager(baseDir: base).detectRecovery()
+        tk.expect(noJournal != nil, "autosave alone still surfaces recovery")
+        tk.expectEqual(noJournal?.project?.title, "no journal", "autosave recovered without journal")
+        tk.expect(noJournal?.journalLoadFailureMessage == nil,
+                  "missing journal stays silent (no journalLoadFailureMessage)")
+        tk.expect(noJournal?.inProgressTakeURL == nil, "no take without journal")
+
+        // Same session: write a journal that exists but cannot decode.
+        let journalURL = rec.workspaceDir.appendingPathComponent("journal.json")
+        try "{not valid journal json".data(using: .utf8)!
+            .write(to: journalURL, options: [.atomic])
+        let corrupt = RecoveryManager(baseDir: base).detectRecovery()
+        tk.expect(corrupt != nil, "corrupt journal still surfaces recovery")
+        tk.expectEqual(corrupt?.project?.title, "no journal", "autosave still recovered with corrupt journal")
+        let jfail = corrupt?.journalLoadFailureMessage ?? ""
+        tk.expect(!jfail.isEmpty, "journalLoadFailureMessage is set for corrupt journal")
+        tk.expect(corrupt?.inProgressTakeURL == nil, "corrupt journal yields no take URL")
+        // Journal file retained (not treated as disposable garbage).
+        tk.expect(fm.fileExists(atPath: journalURL.path),
+                  "corrupt journal retained after detectRecovery")
+
+        // Corrupt journal alone (no autosave) must still be observable, not silent nothing.
+        try? fm.removeItem(at: rec.workspaceDir.appendingPathComponent("autosave-project.json"))
+        let journalOnly = RecoveryManager(baseDir: base).detectRecovery()
+        tk.expect(journalOnly != nil, "corrupt journal alone is observable recovery")
+        tk.expect(journalOnly?.project == nil, "no project without autosave")
+        tk.expect(!(journalOnly?.journalLoadFailureMessage ?? "").isEmpty,
+                  "journal-only corruption sets journalLoadFailureMessage")
+    }
+
     tk.suite("Recovery: discardRecovery leaves unrelated takes on disk") {
         let base = fm.temporaryDirectory.appendingPathComponent("verse-discard-\(UUID().uuidString)")
         let rec = RecoveryManager(baseDir: base)
