@@ -1443,7 +1443,7 @@ Fixed swallows (now set `statusMessage`):
 
 Tests: `AppStore V4:*` suites in `CheckAppStore.swift`.
 
-## Step V5 — Property-test the pure layout, selection and split functions — PENDING
+## Step V5 — Property-test the pure layout, selection and split functions — DONE
 
 Today's refactors left a large set of pure static functions in the view layer that are now
 directly testable, and several were written specifically to make behaviour assertable rather
@@ -1464,3 +1464,11 @@ than observable only on screen. Property-test them with the existing seeded gene
    up on screen.
 
 Seeded and deterministic. Report any defect rather than silently fixing it.
+
+**Resolution (V5):** Harness in `Sources/VerseCheck/CheckLayoutSelectionProperty.swift`
+(`runLayoutSelectionPropertyChecks`), wired from `main.swift`. Seeds `0xA5150001`…
+`0xA5150005`. Suites: `visiblePitchRange` (200 trials), split (120 trials + control crossing
+case), note and clip group-move (150 each), note and clip marquee (150 each + explicit zero
+width / zero height / inverted drag / point), `BeatTimeline` beat↔x (200 trials + absolute/local
+invert). Full harness: **1719 assertions, 0 failures. No defects found.** No production code
+changes.
