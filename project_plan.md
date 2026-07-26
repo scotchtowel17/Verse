@@ -318,7 +318,7 @@ size. Make the octave count adaptive.
    octaves rather than wider keys, the resulting key width stays within a sane band across a
    range of widths, and the clamp holds at both ends.
 
-## Step X5 — X4 broke the keyboard: it renders blank — PENDING
+## Step X5 — X4 broke the keyboard: it renders blank — DONE
 
 Verified live: the on-screen keyboard now draws as a flat empty bar with a single divider, no
 playable keys, at any window width.

@@ -111,13 +111,18 @@ func runPianoKeyboardLayoutChecks(_ tk: TestKit) {
         let hFat = PianoKeyboardLayout.keyboardHeight(whiteKeyWidth: 80)
         tk.expectEqual(hFat, maxH, "fat keys hit max height")
 
-        // Metrics package is consistent.
+        // Metrics package is consistent. Height is from target key width (X5: no layout cycle).
         let width: CGFloat = 780
         let m = PianoKeyboardLayout.metrics(availableWidth: width)
         tk.expectEqual(m.octaves, PianoKeyboardLayout.octaveCount(availableWidth: width), "metrics.octaves")
         tk.expectEqual(m.whiteCount, PianoKeyboardLayout.whiteKeyCount(octaves: m.octaves), "metrics.whiteCount")
         tk.expect(abs(m.keyWidth - width / CGFloat(m.whiteCount)) < 0.001, "metrics fills width exactly")
-        tk.expectEqual(m.height, PianoKeyboardLayout.keyboardHeight(whiteKeyWidth: m.keyWidth), "metrics.height")
+        tk.expectEqual(m.height, PianoKeyboardLayout.fixedKeyboardHeight, "metrics.height from target, not fitted key")
+        tk.expectEqual(
+            m.height,
+            PianoKeyboardLayout.keyboardHeight(whiteKeyWidth: target),
+            "fixed height matches target key width"
+        )
     }
 
     tk.suite("X4 PianoKeyboardLayout: fills available width exactly (no gap)") {
@@ -126,5 +131,20 @@ func runPianoKeyboardLayoutChecks(_ tk: TestKit) {
             let filled = m.keyWidth * CGFloat(m.whiteCount)
             tk.expect(abs(filled - width) < 0.001, "fill \(filled) == width \(width)")
         }
+    }
+
+    // X5: collapse-to-min was the blank-keyboard bug (width stuck at 0 → min octaves).
+    // A realistic window width must not clamp to the minimum.
+    tk.suite("X5 realistic width yields more than one octave") {
+        let realistic: CGFloat = 800
+        let n = PianoKeyboardLayout.octaveCount(availableWidth: realistic)
+        tk.expect(n > 1, "realistic width \(realistic) yields >1 octave (got \(n), min is \(minOct))")
+        let m = PianoKeyboardLayout.metrics(availableWidth: realistic)
+        tk.expect(m.octaves > 1, "metrics at \(realistic) also >1 octave")
+        tk.expectEqual(m.height, PianoKeyboardLayout.fixedKeyboardHeight,
+                       "height is constant (target-based), independent of width")
+        // Zero width still clamps to min (pure function); UI draws nothing instead of a bar.
+        tk.expectEqual(PianoKeyboardLayout.octaveCount(availableWidth: 0), minOct,
+                       "zero width still pure-clamps to min; view guards and draws nothing")
     }
 }

@@ -67,7 +67,15 @@ public enum PianoKeyboardLayout {
         return min(hi, max(lo, raw))
     }
 
+    /// Height used by the on-screen keyboard: from the constant target key width only.
+    /// Must not depend on measured container width (that would reintroduce a layout cycle).
+    public static var fixedKeyboardHeight: CGFloat {
+        keyboardHeight(whiteKeyWidth: targetWhiteKeyWidth)
+    }
+
     /// Full metrics for a given width: octave count, white count, key size, height.
+    /// Height is from the target key width (constant), not the fitted key width, so UI layout
+    /// never depends on measured width for its vertical size.
     public static func metrics(availableWidth: CGFloat) -> (
         octaves: Int,
         whiteCount: Int,
@@ -77,7 +85,7 @@ public enum PianoKeyboardLayout {
         let octaves = octaveCount(availableWidth: availableWidth)
         let whiteCount = whiteKeyCount(octaves: octaves)
         let keyWidth = whiteKeyWidth(availableWidth: availableWidth, octaves: octaves)
-        let height = keyboardHeight(whiteKeyWidth: keyWidth)
+        let height = fixedKeyboardHeight
         return (octaves, whiteCount, keyWidth, height)
     }
 }
@@ -87,48 +95,49 @@ public enum PianoKeyboardLayout {
 /// An on-screen piano. Click/hold a key to play; held notes (from mouse OR computer keyboard
 /// or MIDI) are highlighted. Octave count adapts to available width so keys stay near a
 /// natural width instead of stretching two hard-coded octaves across the window.
+///
+/// Layout: `GeometryReader` is the container. Octave count comes from `geo.size.width`
+/// directly (no preference round-trip). Height is a constant from `targetWhiteKeyWidth`,
+/// so it never depends on measured width and cannot form a layout cycle.
 struct PianoKeyboardView: View {
     let baseC: Int                 // MIDI pitch of the leftmost C
     let held: Set<Int>
     var noteOn: (Int) -> Void
     var noteOff: (Int) -> Void
 
-    /// Measured container width; starts at a mid-size default until the first layout pass.
-    @State private var availableWidth: CGFloat = 600
-
     private static let whiteSemis = [0, 2, 4, 5, 7, 9, 11]
     // White-key indices (within an octave) that have a black key to their upper-right.
     private static let blackAfter = [0, 1, 3, 4, 5]
 
     var body: some View {
-        let m = PianoKeyboardLayout.metrics(availableWidth: max(availableWidth, 1))
-        ZStack(alignment: .topLeading) {
-            // White keys
-            HStack(spacing: 0) {
-                ForEach(0..<m.whiteCount, id: \.self) { i in
-                    let pitch = whitePitch(i)
-                    PianoKey(isBlack: false, isHeld: held.contains(pitch),
-                             onPress: { noteOn(pitch) }, onRelease: { noteOff(pitch) })
-                        .frame(width: m.keyWidth, height: m.height)
+        let height = PianoKeyboardLayout.fixedKeyboardHeight
+        GeometryReader { geo in
+            let width = geo.size.width
+            // Degenerate first pass: width not yet known. Draw nothing; next pass fills in.
+            if width > 0 {
+                let m = PianoKeyboardLayout.metrics(availableWidth: width)
+                ZStack(alignment: .topLeading) {
+                    // White keys
+                    HStack(spacing: 0) {
+                        ForEach(0..<m.whiteCount, id: \.self) { i in
+                            let pitch = whitePitch(i)
+                            PianoKey(isBlack: false, isHeld: held.contains(pitch),
+                                     onPress: { noteOn(pitch) }, onRelease: { noteOff(pitch) })
+                                .frame(width: m.keyWidth, height: height)
+                        }
+                    }
+                    // Black keys overlaid
+                    ForEach(blackPitches(octaves: m.octaves), id: \.pitch) { item in
+                        PianoKey(isBlack: true, isHeld: held.contains(item.pitch),
+                                 onPress: { noteOn(item.pitch) }, onRelease: { noteOff(item.pitch) })
+                            .frame(width: m.keyWidth * 0.62, height: height * 0.62)
+                            .offset(x: CGFloat(item.whiteIndex + 1) * m.keyWidth - (m.keyWidth * 0.31), y: 0)
+                    }
                 }
-            }
-            // Black keys overlaid
-            ForEach(blackPitches(octaves: m.octaves), id: \.pitch) { item in
-                PianoKey(isBlack: true, isHeld: held.contains(item.pitch),
-                         onPress: { noteOn(item.pitch) }, onRelease: { noteOff(item.pitch) })
-                    .frame(width: m.keyWidth * 0.62, height: m.height * 0.62)
-                    .offset(x: CGFloat(item.whiteIndex + 1) * m.keyWidth - (m.keyWidth * 0.31), y: 0)
             }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: m.height)
-        .background(
-            GeometryReader { geo in
-                Color.clear
-                    .preference(key: PianoKeyboardWidthKey.self, value: geo.size.width)
-            }
-        )
-        .onPreferenceChange(PianoKeyboardWidthKey.self) { availableWidth = $0 }
+        .frame(height: height)
         .background(.black.opacity(0.06))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.black.opacity(0.15)))
@@ -149,13 +158,6 @@ struct PianoKeyboardView: View {
             }
         }
         return out.map { (pitch: $0.0, whiteIndex: $0.1) }
-    }
-}
-
-private struct PianoKeyboardWidthKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
     }
 }
 
