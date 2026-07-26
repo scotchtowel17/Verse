@@ -1472,3 +1472,43 @@ case), note and clip group-move (150 each), note and clip marquee (150 each + ex
 width / zero height / inverted drag / point), `BeatTimeline` beat↔x (200 trials + absolute/local
 invert). Full harness: **1719 assertions, 0 failures. No defects found.** No production code
 changes.
+
+## Step V6 — Audio split groundwork (model only) — PENDING
+
+Audio split was deferred because `Clip` cannot express "this clip plays from N seconds into the
+file". Do the model half now so audio split later is a small UI change rather than a schema
+migration under time pressure. **No UI in this step.**
+
+1. Add `mediaStartSeconds: Double` to `Clip`, defaulting to 0, meaning the offset into
+   `mediaFile` at which this clip begins. **Bump `Schema.current` to 2** and add the v1 to v2
+   migration step, which is purely additive: existing clips get 0.
+2. `Migration.steps` currently has no entries and `migrateRawIfNeeded` walks the chain; wire the
+   step in properly so a v1 project opens as v2 with the field defaulted, and the existing
+   future-version refusal from H4 still works.
+3. **Honour it in playback.** `Transport`'s audio scheduling already computes a frame count from
+   `lengthBeats`; the starting frame must now come from `mediaStartSeconds` rather than always
+   being the start of the file. Cap against the file length as it already does.
+4. Add `Project.splitAudioClip(id:atBeat:)` mirroring the MIDI split: two clips, no gap or
+   overlap, the second carrying `mediaStartSeconds` advanced by the split duration, both with
+   fresh UUIDs. Not exposed in the UI or as an AI op yet.
+5. Tests: a v1 fixture opens with `mediaStartSeconds` 0 and re-saves as v2; a clip with a
+   non-zero offset schedules from the right frame, asserted on rendered audio the way R1 does;
+   splitting an audio clip yields halves whose offsets and lengths tile the original exactly;
+   the future-schema refusal still works.
+
+## Step V7 — Compact project_plan.md — PENDING
+
+The plan is now roughly 1,470 lines of append-only log: completed phases, superseded steps,
+defect write-ups and resolutions all interleaved. It is still valuable as history but is no
+longer navigable.
+
+1. Rewrite `project_plan.md` as a **current-state document**: what Verse does today, the
+   standing constraints, the open items, and the known-unverified list (physical MPK mini,
+   audio split UI).
+2. Move the full historical log to `docs/history/project_plan_archive.md` unchanged. Do not
+   delete or rewrite history, and do not lose the defect write-ups; they are the record of what
+   went wrong and why.
+3. Keep the durable engineering lessons somewhere prominent rather than buried in the archive:
+   one undo entry per gesture, no wall-clock upper bounds in tests, assert what is observable
+   rather than the intent, validation must guarantee apply cannot fail, and never leave the UI
+   claiming something that did not happen.
