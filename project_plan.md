@@ -566,3 +566,11 @@ A control earns its place on screen or it moves into a menu. Judgement, not a fo
 
 Preserve every behaviour: shared time axis, ghosts, velocity editing, zoom on both axes, the T4
 row-count invariant, one undo entry per gesture, and the Cmd-C/V focus routing.
+
+## Step AA4 — Default split now starves the arrangement — PENDING
+
+AA1 recovered vertical space and gave essentially all of it to the roll. With three tracks the
+arrangement shows about two and a half rows and the third is clipped, so a song with more than a
+couple of parts cannot be seen at a glance. Choose a default split that shows roughly four track
+rows before the roll begins, keep the divider draggable, and let the arrangement scroll beyond
+that. Do not go back to starving the roll; both need a fair share.
