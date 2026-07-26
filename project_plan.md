@@ -1316,3 +1316,94 @@ because it would need a start-offset field on `Clip` that the schema does not ha
    the exact start or end is refused; audio is refused.
 
 No schema change in either step.
+
+---
+
+# Phase V — Headless hardening and AI parity
+
+## Step V1 — Undo round-trip property test — DONE
+
+The strongest invariant in the app is untested as a whole: **any sequence of N operations
+followed by N undos must restore the project exactly.** Undo is currently tested per operation,
+which does not catch interactions between them, and a great many gesture APIs landed recently.
+
+1. Seeded, deterministic generator (reuse `SeededRNG`) that builds a random project and then
+   applies a random sequence of operations drawn from everything that records undo: add/delete
+   track, select preset, set tempo/key, add/move/resize/delete/paste notes, move/resize/paste/
+   delete/split clips, move a clip to another track, and an applied Claude patch.
+2. After each operation, snapshot the project. Then undo all the way back, asserting after every
+   undo that the project equals the snapshot from before that operation. Compare on serialised
+   JSON so nothing is missed, not on a hand-written field list.
+3. Then redo all the way forward and assert it matches the final state.
+4. Assert the undo stack depth matches the number of recorded operations, so a gesture that
+   accidentally records twice, or not at all, is caught.
+5. Run enough trials to be meaningful (at least 50 sequences of at least 10 operations) while
+   keeping the suite fast.
+6. If this finds a real defect, write it up under a new heading and report it rather than
+   silently fixing it.
+
+**Resolution (V1):** Harness suite `V1 undo round-trip property` in
+`Sources/VerseCheck/CheckUndoRoundTrip.swift` (seed `0x51EED001`). Each trial seeds a
+three-track project (two instrument + one audio, with MIDI clips and notes), applies at least
+10 ops drawn from the full undo-recording surface (including continuous piano-roll and
+arrangement gestures and a one-group Claude patch commit), snapshots via `Project.jsonData()`,
+asserts undo depth equals recorded count, then redo-forward and undo-back with full JSON
+identity at every step. **50/50 trials passed. No defects found.**
+
+## Step V2 — Prove MIDI capture end to end — DONE
+
+`AppStore` MIDI capture into a clip has never been confirmed by hand; the physical controller
+has never been attached and the record-arm state was invisible at the time. It can still be
+proven headlessly.
+
+1. In the harness, create a virtual CoreMIDI source (`MIDISourceCreate` + `MIDIReceived`, the
+   pattern already used in `CheckMIDI`), arm recording on an instrument track, start the
+   transport, and send a short phrase with known pitches and timing.
+2. Assert the captured notes land in a MIDI clip on the armed track with correct pitches,
+   correct velocities, and start beats that match the transport position when each note arrived.
+3. Assert a note still held when the transport stops is closed out at the stop position rather
+   than left zero-length or unbounded.
+4. Assert the whole take is exactly one undo entry.
+5. Assert nothing is captured when record is not armed, and nothing when the transport is not
+   running.
+6. Timing assertions must be tolerant of scheduling jitter, and must never be wall-clock upper
+   bounds. Assert ordering and approximate beat position, not elapsed time.
+
+**Resolution (V2):** Harness suites in `Sources/VerseCheck/CheckMIDI.swift`
+(`runMIDICaptureV2Checks`): virtual CoreMIDI phrase C60@97 / E64@80 / G67@110 held until stop;
+asserts pitches, velocities, approximate start beats (±0.5 beat slack vs transport sample
+window), phrase ordering, held-note close-out near stop beat, exactly one “Record MIDI” undo
+(stack empty after one undo), and zero capture when unarmed or when the transport is not
+running. Physical controller remains unverified. **No defects found.**
+
+## Step V3 — AI capability parity with the UI — DONE
+
+The AI has 13 ops and is now materially behind what a user can do by hand. A person can split a
+clip, duplicate a clip, move a clip to another track, resize a clip, and delete or move
+individual notes; Claude can do none of those. `resizeClip` in particular was cut *because*
+clip length was inert, and R1 fixed that, so it has simply never been re-added.
+
+Add these ops, wired through `versePatchOps`, `TypedOp`, `RequestBuilder.capabilityOps`, the
+validator, the applier, and the preview renderer, reusing the existing `Project` helpers rather
+than writing second implementations:
+
+1. `resizeClip` — now meaningful because the transport honours `lengthBeats`. Enforce the
+   minimum clip length; reject rather than clamp.
+2. `duplicateClip` — reuse `Project.duplicateClip`, which already regenerates the clip UUID and
+   every note UUID.
+3. `splitClip` — MIDI only, at a given beat, reusing the U2 split. Reject audio clips and
+   out-of-bounds split points with the same readable reasons the UI gives.
+4. `moveClipToTrack` — enforce the same kind compatibility as the UI: a MIDI clip may only land
+   on an instrument track and audio only on audio.
+5. `deleteNote` and `moveNote` — addressing an individual note within a clip. Choose a note
+   addressing scheme consistent with the existing positional handle style (for example
+   `T2C1N3`), resolve it at validation time to a UUID exactly as clip handles are, and reject a
+   stale or mismatched reference.
+
+Requirements that do not change: validation resolves or rejects every reference before anything
+is applied, all errors are collected rather than early-returned, the whole patch remains one
+undo group, and the preview renderer describes each new op in plain English from the validated
+`TypedOp` and never from Claude's prose.
+
+Every new op needs the standard five tests: happy path, bad reference, out-of-range, undo
+restores exactly, and a multi-op patch containing one invalid op applies nothing.

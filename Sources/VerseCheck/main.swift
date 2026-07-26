@@ -25,5 +25,6 @@ runPluginChecks(tk)
 runHumToMIDIChecks(tk)
 runMIDIChecks(tk)
 runFuzzChecks(tk)
+runUndoRoundTripChecks(tk)
 
 tk.finish()

@@ -89,6 +89,42 @@ public enum PatchPreviewRenderer {
                 let track = trackLabel(ref, project: project, temps: tempTrackNames)
                 let clip = clipLabel(clipRef, project: project)
                 lines.append("Move \(clip) on \(track) to beat \(formatNumber(startBeat))")
+
+            case .resizeClip(let ref, let clipRef, let lengthBeats):
+                let track = trackLabel(ref, project: project, temps: tempTrackNames)
+                let clip = clipLabel(clipRef, project: project)
+                lines.append("Resize \(clip) on \(track) to \(formatNumber(lengthBeats)) beats")
+
+            case .duplicateClip(let ref, let clipRef):
+                let track = trackLabel(ref, project: project, temps: tempTrackNames)
+                let clip = clipLabel(clipRef, project: project)
+                lines.append("Duplicate \(clip) on \(track)")
+
+            case .splitClip(let ref, let clipRef, let atBeat):
+                let track = trackLabel(ref, project: project, temps: tempTrackNames)
+                let clip = clipLabel(clipRef, project: project)
+                lines.append("Split \(clip) on \(track) at beat \(formatNumber(atBeat))")
+
+            case .moveClipToTrack(let ref, let clipRef, let toTrack, let startBeat):
+                let from = trackLabel(ref, project: project, temps: tempTrackNames)
+                let to = trackLabel(toTrack, project: project, temps: tempTrackNames)
+                let clip = clipLabel(clipRef, project: project)
+                if let startBeat {
+                    lines.append("Move \(clip) from \(from) to \(to) at beat \(formatNumber(startBeat))")
+                } else {
+                    lines.append("Move \(clip) from \(from) to \(to)")
+                }
+
+            case .deleteNote(let ref, let clipRef, _):
+                let track = trackLabel(ref, project: project, temps: tempTrackNames)
+                let clip = clipLabel(clipRef, project: project)
+                lines.append("Delete a note in \(clip) on \(track)")
+
+            case .moveNote(let ref, let clipRef, _, let pitch, let startBeat):
+                let track = trackLabel(ref, project: project, temps: tempTrackNames)
+                let clip = clipLabel(clipRef, project: project)
+                lines.append(
+                    "Move a note in \(clip) on \(track) to pitch \(pitch) at beat \(formatNumber(startBeat))")
             }
         }
 
