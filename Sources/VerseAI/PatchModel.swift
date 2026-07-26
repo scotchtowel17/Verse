@@ -14,6 +14,11 @@ public enum ClipRef: Equatable {
     case existing(track: UUID, clip: UUID)     // resolved from a positional handle (T2C1, …)
 }
 
+/// A single note resolved from a positional handle (`T2C1N3`) at validation time.
+public enum NoteRef: Equatable {
+    case existing(track: UUID, clip: UUID, note: UUID)
+}
+
 public enum TypedOp {
     case setTempo(Double)
     case setKey(Tonic, Mode)
@@ -31,6 +36,18 @@ public enum TypedOp {
     case transposeNotes(track: TrackRef, clip: ClipRef, semitones: Int)
     /// Move a clip’s arrangement start. Works for MIDI and audio clips.
     case moveClip(track: TrackRef, clip: ClipRef, startBeat: Double)
+    /// Change a clip’s length. Below-minimum lengths are rejected (not clamped).
+    case resizeClip(track: TrackRef, clip: ClipRef, lengthBeats: Double)
+    /// Deep-copy a clip onto the same track, placed after the original.
+    case duplicateClip(track: TrackRef, clip: ClipRef)
+    /// Split a MIDI clip at an arrangement-absolute beat. Audio is refused.
+    case splitClip(track: TrackRef, clip: ClipRef, atBeat: Double)
+    /// Move a clip to another track (kind-compatible). Optional new start beat.
+    case moveClipToTrack(track: TrackRef, clip: ClipRef, toTrack: TrackRef, startBeat: Double?)
+    /// Delete one note inside a clip (handle resolved to UUID at validation).
+    case deleteNote(track: TrackRef, clip: ClipRef, note: NoteRef)
+    /// Move one note’s pitch and start inside its clip.
+    case moveNote(track: TrackRef, clip: ClipRef, note: NoteRef, pitch: Int, startBeat: Double)
 }
 
 public struct PatchError: Error, Equatable, CustomStringConvertible {
@@ -52,7 +69,9 @@ public struct PatchErrors: Error {
 public let versePatchOps: Set<String> = [
     "setTempo", "setKey", "setTimeSignature", "createTrack", "renameTrack",
     "setInstrument", "setTrackMix", "addMidiClip", "addNotes", "deleteClip",
-    "quantizeNotes", "transposeNotes", "moveClip"
+    "quantizeNotes", "transposeNotes", "moveClip",
+    "resizeClip", "duplicateClip", "splitClip", "moveClipToTrack",
+    "deleteNote", "moveNote"
 ]
 
 // MARK: - JSON coercion helpers (tolerant of NSNumber/Int/Double)

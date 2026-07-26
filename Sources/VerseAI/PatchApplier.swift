@@ -101,6 +101,59 @@ public enum PatchApplier {
                 } catch let err as MutationError {
                     throw PatchError(opIndex: opIndex, err.description)
                 }
+            case .resizeClip(_, let clipRef, let lengthBeats):
+                let (_, clipUUID) = try resolveClipLocation(
+                    clipRef, tempClip: tempClip, opIndex: opIndex)
+                do {
+                    // Validator already rejected below-minimum lengths; Project still floors.
+                    try project.resizeClip(id: clipUUID, toLengthBeats: lengthBeats)
+                } catch let err as MutationError {
+                    throw PatchError(opIndex: opIndex, err.description)
+                }
+            case .duplicateClip(_, let clipRef):
+                let (_, clipUUID) = try resolveClipLocation(
+                    clipRef, tempClip: tempClip, opIndex: opIndex)
+                do {
+                    try project.duplicateClip(id: clipUUID)
+                } catch let err as MutationError {
+                    throw PatchError(opIndex: opIndex, err.description)
+                }
+            case .splitClip(_, let clipRef, let atBeat):
+                let (_, clipUUID) = try resolveClipLocation(
+                    clipRef, tempClip: tempClip, opIndex: opIndex)
+                do {
+                    try project.splitClip(id: clipUUID, atArrangementBeat: atBeat)
+                } catch let err as MutationError {
+                    throw PatchError(opIndex: opIndex, err.description)
+                }
+            case .moveClipToTrack(_, let clipRef, let toTrack, let startBeat):
+                let (_, clipUUID) = try resolveClipLocation(
+                    clipRef, tempClip: tempClip, opIndex: opIndex)
+                let destIndex = try index(toTrack, opIndex: opIndex)
+                do {
+                    try project.moveClip(id: clipUUID, toTrackIndex: destIndex, startBeat: startBeat)
+                } catch let err as MutationError {
+                    throw PatchError(opIndex: opIndex, err.description)
+                }
+            case .deleteNote(_, let clipRef, let noteRef):
+                let (_, clipUUID) = try resolveClipLocation(
+                    clipRef, tempClip: tempClip, opIndex: opIndex)
+                let noteUUID = try resolveNoteUUID(noteRef, opIndex: opIndex)
+                do {
+                    try project.deleteNote(id: noteUUID, inClip: clipUUID)
+                } catch let err as MutationError {
+                    throw PatchError(opIndex: opIndex, err.description)
+                }
+            case .moveNote(_, let clipRef, let noteRef, let pitch, let startBeat):
+                let (_, clipUUID) = try resolveClipLocation(
+                    clipRef, tempClip: tempClip, opIndex: opIndex)
+                let noteUUID = try resolveNoteUUID(noteRef, opIndex: opIndex)
+                do {
+                    try project.moveNote(id: noteUUID, inClip: clipUUID,
+                                         toPitch: pitch, toStartBeat: startBeat)
+                } catch let err as MutationError {
+                    throw PatchError(opIndex: opIndex, err.description)
+                }
             }
         }
         project.modifiedAt = Date()
@@ -120,6 +173,14 @@ public enum PatchApplier {
             return loc
         case .existing(let track, let clip):
             return (track, clip)
+        }
+    }
+
+    /// Note UUID is resolved at validation; apply only unwraps the already-checked ref.
+    private static func resolveNoteUUID(_ noteRef: NoteRef, opIndex: Int) throws -> UUID {
+        switch noteRef {
+        case .existing(_, _, let note):
+            return note
         }
     }
 }

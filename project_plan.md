@@ -1376,7 +1376,7 @@ window), phrase ordering, held-note close-out near stop beat, exactly one “Rec
 (stack empty after one undo), and zero capture when unarmed or when the transport is not
 running. Physical controller remains unverified. **No defects found.**
 
-## Step V3 — AI capability parity with the UI — PENDING
+## Step V3 — AI capability parity with the UI — DONE
 
 The AI has 13 ops and is now materially behind what a user can do by hand. A person can split a
 clip, duplicate a clip, move a clip to another track, resize a clip, and delete or move

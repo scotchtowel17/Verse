@@ -1,6 +1,7 @@
 import Foundation
 import VerseModel
 import VerseAI
+import VerseCommands
 
 /// Build a minimal versePatch reply with a live project fingerprint and the given ops JSON array body.
 private func patchWithFingerprint(_ project: Project, opsJSON: String,
@@ -603,8 +604,586 @@ func runPatchChecks(_ tk: TestKit) {
         tk.expect(req.contains("quantizeNotes"), "lists quantizeNotes")
         tk.expect(req.contains("transposeNotes"), "lists transposeNotes")
         tk.expect(req.contains("moveClip"), "lists moveClip")
-        tk.expect(!req.contains("resizeClip"), "does not list resizeClip")
+        tk.expect(req.contains("resizeClip"), "lists resizeClip")
+        tk.expect(req.contains("duplicateClip"), "lists duplicateClip")
+        tk.expect(req.contains("splitClip"), "lists splitClip")
+        tk.expect(req.contains("moveClipToTrack"), "lists moveClipToTrack")
+        tk.expect(req.contains("deleteNote"), "lists deleteNote")
+        tk.expect(req.contains("moveNote"), "lists moveNote")
         tk.expect(!req.contains("setClipGain"), "does not list setClipGain")
         tk.expect(!req.contains("addHarmony"), "does not list addHarmony")
+    }
+
+    // ── V3 AI capability parity: resizeClip, duplicateClip, splitClip,
+    //    moveClipToTrack, deleteNote, moveNote. Five tests each:
+    //    happy path, bad reference, out-of-range, undo restores exactly,
+    //    multi-op with one invalid applies nothing.
+
+    // —— resizeClip ——
+    tk.suite("V3 resizeClip — happy path") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"resizeClip\",\"track\":\"T1\",\"clip\":\"T1C1\",\"lengthBeats\":8}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "resizeClip applies")
+        tk.expectEqual(project.tracks[0].clips[0].lengthBeats, 8, "length is 8")
+    }
+
+    tk.suite("V3 resizeClip — bad reference") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"resizeClip\",\"track\":\"T1\",\"clip\":\"T1C9\",\"lengthBeats\":8}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "unknown clip rejected")
+        tk.expectEqual(project.tracks[0].clips[0].lengthBeats, 4, "length unchanged")
+        let joined = outcome.errors.map { $0.description }.joined(separator: " | ")
+        tk.expect(joined.contains("T1C9"), "error names the bad clip handle")
+    }
+
+    tk.suite("V3 resizeClip — out-of-range (below minimum, reject not clamp)") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"resizeClip\",\"track\":\"T1\",\"clip\":\"T1C1\",\"lengthBeats\":0.01}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "below-minimum length rejected")
+        tk.expectEqual(project.tracks[0].clips[0].lengthBeats, 4, "length unchanged (not clamped)")
+    }
+
+    tk.suite("V3 resizeClip — undo restores exactly") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [])
+        ]
+        let stack = UndoStack<Project>()
+        stack.record(project, name: "Apply Claude patch")
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"resizeClip\",\"track\":\"T1\",\"clip\":\"T1C1\",\"lengthBeats\":8}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "resize applies before undo")
+        tk.expectEqual(project.tracks[0].clips[0].lengthBeats, 8, "mutated")
+        if let restored = stack.undo(current: project) { project = restored }
+        tk.expectEqual(project.tracks[0].clips[0].lengthBeats, 4, "undo restores length")
+    }
+
+    tk.suite("V3 resizeClip — multi-op with invalid applies nothing") {
+        var project = Project.newUntitled()
+        project.tempoBPM = 100
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"setTempo\",\"bpm\":140}," +
+            "{\"op\":\"resizeClip\",\"track\":\"T1\",\"clip\":\"T1C1\",\"lengthBeats\":0.01}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "whole patch rejected")
+        tk.expectEqual(project.tempoBPM, 100, "setTempo did not apply")
+        tk.expectEqual(project.tracks[0].clips[0].lengthBeats, 4, "resize did not apply")
+    }
+
+    // —— duplicateClip ——
+    tk.suite("V3 duplicateClip — happy path") {
+        var project = Project.newUntitled()
+        let n1 = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [n1])
+        ]
+        let originalClipID = project.tracks[0].clips[0].id
+        let originalNoteID = n1.id
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"duplicateClip\",\"track\":\"T1\",\"clip\":\"T1C1\"}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "duplicateClip applies")
+        tk.expectEqual(project.tracks[0].clips.count, 2, "two clips after duplicate")
+        tk.expectEqual(project.tracks[0].clips[1].startBeat, 4, "copy starts after original")
+        tk.expect(project.tracks[0].clips[1].id != originalClipID, "copy has fresh clip UUID")
+        tk.expect(project.tracks[0].clips[1].midiNotes?.first?.id != originalNoteID,
+                  "copy has fresh note UUID")
+        tk.expectEqual(project.tracks[0].clips[1].midiNotes?.first?.pitch, 60, "pitch preserved")
+    }
+
+    tk.suite("V3 duplicateClip — bad reference") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"duplicateClip\",\"track\":\"T1\",\"clip\":\"T9C1\"}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "bad clip handle rejected")
+        tk.expectEqual(project.tracks[0].clips.count, 1, "no copy created")
+    }
+
+    tk.suite("V3 duplicateClip — out-of-range (mismatched track ownership)") {
+        var project = Project.newUntitled()
+        project.tracks.append(Track(kind: .instrument, name: "Second", instrument: .grandPiano))
+        project.tracks[1].clips = [
+            Clip(kind: .midi, name: "On T2", startBeat: 0, lengthBeats: 4, midiNotes: [])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"duplicateClip\",\"track\":\"T1\",\"clip\":\"T2C1\"}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "ownership mismatch rejected")
+        tk.expectEqual(project.tracks[1].clips.count, 1, "no extra clip on T2")
+        tk.expectEqual(project.tracks[0].clips.count, 0, "no clip landed on T1")
+    }
+
+    tk.suite("V3 duplicateClip — undo restores exactly") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4,
+                 midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
+        ]
+        let stack = UndoStack<Project>()
+        stack.record(project, name: "Apply Claude patch")
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"duplicateClip\",\"track\":\"T1\",\"clip\":\"T1C1\"}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "duplicate applies")
+        tk.expectEqual(project.tracks[0].clips.count, 2, "two clips before undo")
+        if let restored = stack.undo(current: project) { project = restored }
+        tk.expectEqual(project.tracks[0].clips.count, 1, "undo removes the copy")
+    }
+
+    tk.suite("V3 duplicateClip — multi-op with invalid applies nothing") {
+        var project = Project.newUntitled()
+        project.tempoBPM = 100
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"duplicateClip\",\"track\":\"T1\",\"clip\":\"T1C1\"}," +
+            "{\"op\":\"setTempo\",\"bpm\":999}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "whole patch rejected")
+        tk.expectEqual(project.tempoBPM, 100, "tempo unchanged")
+        tk.expectEqual(project.tracks[0].clips.count, 1, "no duplicate applied")
+    }
+
+    // —— splitClip ——
+    tk.suite("V3 splitClip — happy path") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 8, midiNotes: [
+                Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100),
+                Note(startBeat: 5, lengthBeats: 1, pitch: 64, velocity: 90),
+            ])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"splitClip\",\"track\":\"T1\",\"clip\":\"T1C1\",\"atBeat\":4}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "splitClip applies")
+        tk.expectEqual(project.tracks[0].clips.count, 2, "two halves")
+        tk.expectEqual(project.tracks[0].clips[0].lengthBeats, 4, "left length 4")
+        tk.expectEqual(project.tracks[0].clips[1].startBeat, 4, "right starts at 4")
+        tk.expectEqual(project.tracks[0].clips[1].lengthBeats, 4, "right length 4")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.count, 1, "left has first note")
+        tk.expectEqual(project.tracks[0].clips[1].midiNotes?.count, 1, "right has second note")
+    }
+
+    tk.suite("V3 splitClip — bad reference") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 8, midiNotes: [])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"splitClip\",\"track\":\"T1\",\"clip\":\"T1C3\",\"atBeat\":4}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "unknown clip rejected")
+        tk.expectEqual(project.tracks[0].clips.count, 1, "still one clip")
+    }
+
+    tk.suite("V3 splitClip — out-of-range (edge / audio)") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 8, midiNotes: [])
+        ]
+        let edgeReply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"splitClip\",\"track\":\"T1\",\"clip\":\"T1C1\",\"atBeat\":0}]")
+        let edgeOutcome = Copilot.apply(reply: edgeReply, to: &project)
+        tk.expectEqual(edgeOutcome.status, .rejected, "split at start rejected")
+        let edgeMsg = edgeOutcome.errors.map { $0.description }.joined(separator: " | ")
+        tk.expect(edgeMsg.localizedCaseInsensitiveContains("playhead") ||
+                  edgeMsg.localizedCaseInsensitiveContains("empty half"),
+                  "uses UI split-out-of-bounds wording")
+        tk.expectEqual(project.tracks[0].clips.count, 1, "MIDI clip intact after edge refuse")
+
+        project.tracks.append(Track(kind: .audio, name: "Rec"))
+        project.tracks[1].clips = [
+            Clip(kind: .audio, name: "Take", startBeat: 0, lengthBeats: 8, mediaFile: "t.wav")
+        ]
+        let audioReply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"splitClip\",\"track\":\"T2\",\"clip\":\"T2C1\",\"atBeat\":4}]")
+        let audioOutcome = Copilot.apply(reply: audioReply, to: &project)
+        tk.expectEqual(audioOutcome.status, .rejected, "audio split rejected")
+        let audioMsg = audioOutcome.errors.map { $0.description }.joined(separator: " | ")
+        tk.expect(audioMsg.localizedCaseInsensitiveContains("audio"), "mentions audio")
+        tk.expectEqual(project.tracks[1].clips.count, 1, "audio clip intact")
+    }
+
+    tk.suite("V3 splitClip — undo restores exactly") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 8,
+                 midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
+        ]
+        let originalID = project.tracks[0].clips[0].id
+        let stack = UndoStack<Project>()
+        stack.record(project, name: "Apply Claude patch")
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"splitClip\",\"track\":\"T1\",\"clip\":\"T1C1\",\"atBeat\":4}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "split applies")
+        tk.expectEqual(project.tracks[0].clips.count, 2, "two after split")
+        if let restored = stack.undo(current: project) { project = restored }
+        tk.expectEqual(project.tracks[0].clips.count, 1, "undo restores one clip")
+        tk.expectEqual(project.tracks[0].clips[0].id, originalID, "original clip UUID restored")
+        tk.expectEqual(project.tracks[0].clips[0].lengthBeats, 8, "original length restored")
+    }
+
+    tk.suite("V3 splitClip — multi-op with invalid applies nothing") {
+        var project = Project.newUntitled()
+        project.tempoBPM = 100
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 8, midiNotes: [])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"setTempo\",\"bpm\":150}," +
+            "{\"op\":\"splitClip\",\"track\":\"T1\",\"clip\":\"T1C1\",\"atBeat\":0}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "whole patch rejected")
+        tk.expectEqual(project.tempoBPM, 100, "tempo unchanged")
+        tk.expectEqual(project.tracks[0].clips.count, 1, "no split applied")
+    }
+
+    // —— moveClipToTrack ——
+    tk.suite("V3 moveClipToTrack — happy path") {
+        var project = Project.newUntitled()
+        project.tracks.append(Track(kind: .instrument, name: "Keys", instrument: .grandPiano))
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Hook", startBeat: 0, lengthBeats: 4,
+                 midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
+        ]
+        let clipID = project.tracks[0].clips[0].id
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"moveClipToTrack\",\"track\":\"T1\",\"clip\":\"T1C1\"," +
+            "\"toTrack\":\"T2\",\"startBeat\":8}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "moveClipToTrack applies")
+        tk.expectEqual(project.tracks[0].clips.count, 0, "left source track")
+        tk.expectEqual(project.tracks[1].clips.count, 1, "on dest track")
+        tk.expectEqual(project.tracks[1].clips[0].id, clipID, "same clip UUID")
+        tk.expectEqual(project.tracks[1].clips[0].startBeat, 8, "new startBeat")
+    }
+
+    tk.suite("V3 moveClipToTrack — bad reference") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Hook", startBeat: 0, lengthBeats: 4, midiNotes: [])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"moveClipToTrack\",\"track\":\"T1\",\"clip\":\"T1C1\",\"toTrack\":\"T9\"}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "unknown dest track rejected")
+        tk.expectEqual(project.tracks[0].clips.count, 1, "clip still on T1")
+    }
+
+    tk.suite("V3 moveClipToTrack — out-of-range (kind mismatch + negative start)") {
+        var project = Project.newUntitled()
+        project.tracks.append(Track(kind: .audio, name: "Rec"))
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Hook", startBeat: 0, lengthBeats: 4, midiNotes: [])
+        ]
+        let kindReply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"moveClipToTrack\",\"track\":\"T1\",\"clip\":\"T1C1\",\"toTrack\":\"T2\"}]")
+        let kindOutcome = Copilot.apply(reply: kindReply, to: &project)
+        tk.expectEqual(kindOutcome.status, .rejected, "MIDI onto audio rejected")
+        let kindMsg = kindOutcome.errors.map { $0.description }.joined(separator: " | ")
+        tk.expect(kindMsg.localizedCaseInsensitiveContains("instrument") ||
+                  kindMsg.localizedCaseInsensitiveContains("MIDI"),
+                  "uses UI kind-mismatch wording")
+        tk.expectEqual(project.tracks[0].clips.count, 1, "still on instrument track")
+
+        let negReply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"moveClipToTrack\",\"track\":\"T1\",\"clip\":\"T1C1\"," +
+            "\"toTrack\":\"T1\",\"startBeat\":-2}]")
+        let negOutcome = Copilot.apply(reply: negReply, to: &project)
+        tk.expectEqual(negOutcome.status, .rejected, "negative start rejected")
+        tk.expectEqual(project.tracks[0].clips[0].startBeat, 0, "startBeat unchanged")
+    }
+
+    tk.suite("V3 moveClipToTrack — undo restores exactly") {
+        var project = Project.newUntitled()
+        project.tracks.append(Track(kind: .instrument, name: "Keys", instrument: .grandPiano))
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Hook", startBeat: 2, lengthBeats: 4, midiNotes: [])
+        ]
+        let clipID = project.tracks[0].clips[0].id
+        let stack = UndoStack<Project>()
+        stack.record(project, name: "Apply Claude patch")
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"moveClipToTrack\",\"track\":\"T1\",\"clip\":\"T1C1\"," +
+            "\"toTrack\":\"T2\",\"startBeat\":10}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "move applies")
+        if let restored = stack.undo(current: project) { project = restored }
+        tk.expectEqual(project.tracks[0].clips.count, 1, "back on T1")
+        tk.expectEqual(project.tracks[1].clips.count, 0, "gone from T2")
+        tk.expectEqual(project.tracks[0].clips[0].id, clipID, "same clip")
+        tk.expectEqual(project.tracks[0].clips[0].startBeat, 2, "original start")
+    }
+
+    tk.suite("V3 moveClipToTrack — multi-op with invalid applies nothing") {
+        var project = Project.newUntitled()
+        project.tempoBPM = 100
+        project.tracks.append(Track(kind: .audio, name: "Rec"))
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Hook", startBeat: 0, lengthBeats: 4, midiNotes: [])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"setTempo\",\"bpm\":150}," +
+            "{\"op\":\"moveClipToTrack\",\"track\":\"T1\",\"clip\":\"T1C1\",\"toTrack\":\"T2\"}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "whole patch rejected")
+        tk.expectEqual(project.tempoBPM, 100, "tempo unchanged")
+        tk.expectEqual(project.tracks[0].clips.count, 1, "clip still on T1")
+        tk.expectEqual(project.tracks[1].clips.count, 0, "nothing on audio track")
+    }
+
+    // —— deleteNote ——
+    tk.suite("V3 deleteNote — happy path") {
+        var project = Project.newUntitled()
+        let n1 = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        let n2 = Note(startBeat: 1, lengthBeats: 1, pitch: 64, velocity: 90)
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [n1, n2])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"deleteNote\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N1\"}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "deleteNote applies")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.count, 1, "one note left")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.id, n2.id, "N2 remains")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.pitch, 64, "pitch 64 remains")
+    }
+
+    tk.suite("V3 deleteNote — bad reference") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [
+                Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+            ])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"deleteNote\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N9\"}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "stale note handle rejected at validation")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.count, 1, "note still present")
+        let joined = outcome.errors.map { $0.description }.joined(separator: " | ")
+        tk.expect(joined.contains("T1C1N9"), "error names the bad note handle")
+    }
+
+    tk.suite("V3 deleteNote — out-of-range (note on wrong clip / audio)") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "A", startBeat: 0, lengthBeats: 4, midiNotes: [
+                Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+            ]),
+            Clip(kind: .midi, name: "B", startBeat: 4, lengthBeats: 4, midiNotes: [
+                Note(startBeat: 0, lengthBeats: 1, pitch: 62, velocity: 100)
+            ])
+        ]
+        // Note T1C1N1 claimed against clip T1C2.
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"deleteNote\",\"track\":\"T1\",\"clip\":\"T1C2\",\"note\":\"T1C1N1\"}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "mismatched note/clip rejected")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.count, 1, "N1 still in C1")
+        tk.expectEqual(project.tracks[0].clips[1].midiNotes?.count, 1, "C2 untouched")
+    }
+
+    tk.suite("V3 deleteNote — undo restores exactly") {
+        var project = Project.newUntitled()
+        let n1 = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [n1])
+        ]
+        let stack = UndoStack<Project>()
+        stack.record(project, name: "Apply Claude patch")
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"deleteNote\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N1\"}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "delete applies")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.count, 0, "deleted")
+        if let restored = stack.undo(current: project) { project = restored }
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.count, 1, "undo restores note")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.id, n1.id, "same note UUID")
+    }
+
+    tk.suite("V3 deleteNote — multi-op with invalid applies nothing") {
+        var project = Project.newUntitled()
+        project.tempoBPM = 100
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [
+                Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+            ])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"setTempo\",\"bpm\":150}," +
+            "{\"op\":\"deleteNote\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N9\"}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "whole patch rejected")
+        tk.expectEqual(project.tempoBPM, 100, "tempo unchanged")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.count, 1, "note still there")
+    }
+
+    // —— moveNote ——
+    tk.suite("V3 moveNote — happy path") {
+        var project = Project.newUntitled()
+        let n1 = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [n1])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"moveNote\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N1\"," +
+            "\"pitch\":72,\"startBeat\":2}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "moveNote applies")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.id, n1.id, "same note UUID")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.pitch, 72, "pitch 72")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.startBeat, 2, "start 2")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.lengthBeats, 1, "length untouched")
+    }
+
+    tk.suite("V3 moveNote — bad reference") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [
+                Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+            ])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"moveNote\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N3\"," +
+            "\"pitch\":64,\"startBeat\":1}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "unknown note rejected at validation")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.pitch, 60, "pitch unchanged")
+    }
+
+    tk.suite("V3 moveNote — out-of-range (pitch / negative start)") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [
+                Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+            ])
+        ]
+        let pitchReply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"moveNote\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N1\"," +
+            "\"pitch\":200,\"startBeat\":1}]")
+        let pitchOutcome = Copilot.apply(reply: pitchReply, to: &project)
+        tk.expectEqual(pitchOutcome.status, .rejected, "pitch 200 rejected")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.pitch, 60, "pitch unchanged")
+
+        let negReply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"moveNote\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N1\"," +
+            "\"pitch\":64,\"startBeat\":-1}]")
+        let negOutcome = Copilot.apply(reply: negReply, to: &project)
+        tk.expectEqual(negOutcome.status, .rejected, "negative start rejected")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.startBeat, 0, "start unchanged")
+    }
+
+    tk.suite("V3 moveNote — undo restores exactly") {
+        var project = Project.newUntitled()
+        let n1 = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [n1])
+        ]
+        let stack = UndoStack<Project>()
+        stack.record(project, name: "Apply Claude patch")
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"moveNote\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N1\"," +
+            "\"pitch\":72,\"startBeat\":3}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "move applies")
+        if let restored = stack.undo(current: project) { project = restored }
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.pitch, 60, "undo pitch")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.startBeat, 0, "undo start")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.id, n1.id, "same UUID")
+    }
+
+    tk.suite("V3 moveNote — multi-op with invalid applies nothing") {
+        var project = Project.newUntitled()
+        project.tempoBPM = 100
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [
+                Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+            ])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"setTempo\",\"bpm\":150}," +
+            "{\"op\":\"moveNote\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N1\"," +
+            "\"pitch\":200,\"startBeat\":1}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "whole patch rejected")
+        tk.expectEqual(project.tempoBPM, 100, "tempo unchanged")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.pitch, 60, "note unchanged")
+    }
+
+    tk.suite("V3 preview renderer — describes parity ops") {
+        var project = Project.newUntitled()
+        project.tracks[0].name = "Piano"
+        project.tracks.append(Track(kind: .instrument, name: "Keys", instrument: .grandPiano))
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Hook", startBeat: 0, lengthBeats: 8, midiNotes: [
+                Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100),
+                Note(startBeat: 2, lengthBeats: 1, pitch: 64, velocity: 90),
+            ])
+        ]
+        // Preview only: resize + duplicate + moveNote (no split so handles stay valid in one patch
+        // of independent descriptions; renderer is per-op from TypedOp).
+        let opsJSON = "[" +
+            "{\"op\":\"resizeClip\",\"track\":\"T1\",\"clip\":\"T1C1\",\"lengthBeats\":6}," +
+            "{\"op\":\"duplicateClip\",\"track\":\"T1\",\"clip\":\"T1C1\"}," +
+            "{\"op\":\"moveNote\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N1\"," +
+            "\"pitch\":72,\"startBeat\":1}," +
+            "{\"op\":\"deleteNote\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N2\"}" +
+            "]"
+        let reply = patchWithFingerprint(project, opsJSON: opsJSON, summary: "POISON_V3_SUMMARY")
+        switch Copilot.preview(reply: reply, project: project) {
+        case .failure(let outcome):
+            tk.expect(false, "preview should succeed (got \(outcome.userMessage))")
+        case .success(let prep):
+            let text = prep.description
+            tk.expect(!text.contains("POISON_V3_SUMMARY"), "summary never in approval text")
+            tk.expect(text.localizedCaseInsensitiveContains("resize"), "mentions resize")
+            tk.expect(text.contains("6"), "names new length")
+            tk.expect(text.localizedCaseInsensitiveContains("duplicate"), "mentions duplicate")
+            tk.expect(text.localizedCaseInsensitiveContains("move"), "mentions move note")
+            tk.expect(text.contains("72"), "names pitch")
+            tk.expect(text.localizedCaseInsensitiveContains("delete"), "mentions delete note")
+            tk.expect(text.contains("Hook"), "names the clip")
+            tk.expectEqual(project.tracks[0].clips[0].lengthBeats, 8, "preview leaves length")
+            tk.expectEqual(project.tracks[0].clips[0].midiNotes?.count, 2, "preview leaves notes")
+        }
+    }
+
+    tk.suite("V3 request builder — exposes note handles") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [
+                Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+            ])
+        ]
+        let req = Copilot.buildRequest(project: project, userPrompt: "Delete the first note")
+        tk.expect(req.contains("T1C1N1"), "request exposes note handle T1C1N1")
+        tk.expect(req.contains("note ids"), "instructions mention note ids")
     }
 }

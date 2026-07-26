@@ -9,7 +9,9 @@ public enum RequestBuilder {
     public static let capabilityOps = [
         "createTrack", "setInstrument", "addMidiClip", "addNotes", "setTempo", "setKey",
         "setTimeSignature", "setTrackMix", "deleteClip", "renameTrack",
-        "quantizeNotes", "transposeNotes", "moveClip"
+        "quantizeNotes", "transposeNotes", "moveClip",
+        "resizeClip", "duplicateClip", "splitClip", "moveClipToTrack",
+        "deleteNote", "moveNote"
     ]
 
     public static func buildJSON(project: Project, userPrompt: String, appVersion: String = "0.1.0") -> String {
@@ -17,14 +19,28 @@ public enum RequestBuilder {
         for (ti, t) in project.tracks.enumerated() {
             var clips: [[String: Any]] = []
             for (ci, c) in t.clips.enumerated() {
-                let clipDict: [String: Any] = [
-                    "id": "T\(ti + 1)C\(ci + 1)",
+                let clipId = "T\(ti + 1)C\(ci + 1)"
+                var notes: [[String: Any]] = []
+                if let midiNotes = c.midiNotes {
+                    for (ni, n) in midiNotes.enumerated() {
+                        notes.append([
+                            "id": "\(clipId)N\(ni + 1)",
+                            "pitch": n.pitch,
+                            "startBeat": n.startBeat,
+                            "lengthBeats": n.lengthBeats,
+                            "velocity": n.velocity
+                        ])
+                    }
+                }
+                var clipDict: [String: Any] = [
+                    "id": clipId,
                     "kind": c.kind.rawValue,
                     "name": c.name,
                     "startBeat": c.startBeat,
                     "lengthBeats": c.lengthBeats,
                     "noteCount": c.midiNotes?.count ?? 0
                 ]
+                if !notes.isEmpty { clipDict["notes"] = notes }
                 clips.append(clipDict)
             }
 
@@ -73,10 +89,11 @@ public enum RequestBuilder {
         """
         I'm using an app called Verse. Please reply with ONLY a fenced ```json block containing a \
         "versePatch" object (schema "verse-patch", version 1) whose "ops" implement my request. \
-        Allowed ops: \(capabilityOps.joined(separator: ", ")). Use the track ids (T1, T2, …) and \
-        clip ids (T1C1, T2C3, …) below. Mint your own tempId / tempClipId for new tracks/clips. \
-        Copy the fingerprint value from the verseRequest into your versePatch verbatim as \
-        "fingerprint": "<value>". My request: "\(userPrompt)".
+        Allowed ops: \(capabilityOps.joined(separator: ", ")). Use the track ids (T1, T2, …), \
+        clip ids (T1C1, T2C3, …), and note ids (T1C1N1, T2C3N2, …) below. Mint your own \
+        tempId / tempClipId for new tracks/clips. Copy the fingerprint value from the \
+        verseRequest into your versePatch verbatim as "fingerprint": "<value>". My request: \
+        "\(userPrompt)".
         """
     }
 }

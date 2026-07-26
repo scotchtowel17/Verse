@@ -53,9 +53,17 @@ public enum PatchValidator {
         // Existing clip handles: positional T1C1, T2C3, …
         // Map handle → (trackUUID, clipUUID)
         var clipHandles: [String: (track: UUID, clip: UUID)] = [:]
+        // Note handles: positional T1C1N1, T2C3N2, … resolved to UUIDs at validation time.
+        var noteHandles: [String: (track: UUID, clip: UUID, note: UUID)] = [:]
         for (ti, t) in project.tracks.enumerated() {
             for (ci, c) in t.clips.enumerated() {
-                clipHandles["T\(ti + 1)C\(ci + 1)"] = (t.id, c.id)
+                let clipHandle = "T\(ti + 1)C\(ci + 1)"
+                clipHandles[clipHandle] = (t.id, c.id)
+                if let notes = c.midiNotes {
+                    for (ni, n) in notes.enumerated() {
+                        noteHandles["\(clipHandle)N\(ni + 1)"] = (t.id, c.id, n.id)
+                    }
+                }
             }
         }
 
@@ -120,6 +128,49 @@ public enum PatchValidator {
                 }
                 return true
             }
+        }
+
+        /// Resolve a note handle (`T2C1N3`) to a UUID. Ownership of clip vs. track is enforced.
+        func resolveNote(_ ref: Any?, track: TrackRef, trackHandle: String,
+                         clip: ClipRef, clipHandle: String, op i: Int) -> NoteRef? {
+            guard let s = JSONCoerce.string(ref), !s.isEmpty else {
+                errors.append(PatchError(opIndex: i, "Missing note reference.")); return nil
+            }
+            guard let loc = noteHandles[s] else {
+                errors.append(PatchError(opIndex: i, "Unknown note “\(s)”.")); return nil
+            }
+            // Note handle encodes its clip (T2C1N3 → T2C1). Reject mismatch.
+            switch clip {
+            case .existing(let trackUUID, let clipUUID):
+                if loc.track != trackUUID || loc.clip != clipUUID {
+                    errors.append(PatchError(opIndex: i,
+                        "Note “\(s)” isn't in clip “\(clipHandle)” on track “\(trackHandle)”."))
+                    return nil
+                }
+            case .temp:
+                errors.append(PatchError(opIndex: i,
+                    "Note “\(s)” isn't in clip “\(clipHandle)” on track “\(trackHandle)”."))
+                return nil
+            }
+            switch track {
+            case .existing(let trackUUID):
+                if loc.track != trackUUID {
+                    errors.append(PatchError(opIndex: i,
+                        "Note “\(s)” isn't on track “\(trackHandle)”."))
+                    return nil
+                }
+            case .temp:
+                errors.append(PatchError(opIndex: i,
+                    "Note “\(s)” isn't on track “\(trackHandle)”."))
+                return nil
+            }
+            return .existing(track: loc.track, clip: loc.clip, note: loc.note)
+        }
+
+        /// Drop every note handle that points at this clip (after delete/split).
+        func invalidateNotes(inClip clipHandle: String) {
+            let prefix = clipHandle + "N"
+            noteHandles = noteHandles.filter { !$0.key.hasPrefix(prefix) }
         }
 
         /// Accept `gridBeats` as 1 / 0.5 / 0.25, or `grid` / `gridBeats` as "1/4", "1/8", "1/16".
@@ -280,6 +331,7 @@ public enum PatchValidator {
                 guard let clip = resolveClip(op["clip"], track: ref, trackHandle: trackHandle, op: i) else { continue }
                 // Invalidate so later ops on this handle fail validation (not apply).
                 clipNotePitches.removeValue(forKey: clipHandle)
+                invalidateNotes(inClip: clipHandle)
                 clipHandles.removeValue(forKey: clipHandle)
                 tempClips.remove(clipHandle)
                 typed.append(.deleteClip(track: ref, clip: clip))
@@ -329,6 +381,169 @@ public enum PatchValidator {
                     errors.append(PatchError(opIndex: i, "moveClip “startBeat” must be ≥ 0.")); continue
                 }
                 typed.append(.moveClip(track: ref, clip: clip, startBeat: start))
+
+            case "resizeClip":
+                guard let ref = resolveTrack(op["track"], op: i) else { continue }
+                let trackHandle = JSONCoerce.string(op["track"]) ?? ""
+                guard let clip = resolveClip(op["clip"], track: ref, trackHandle: trackHandle, op: i) else { continue }
+                guard let len = JSONCoerce.double(op["lengthBeats"]) else {
+                    errors.append(PatchError(opIndex: i, "resizeClip needs a numeric “lengthBeats”.")); continue
+                }
+                // Reject rather than clamp: AI path enforces the floor explicitly.
+                guard len >= Project.minimumClipLengthBeats else {
+                    errors.append(PatchError(opIndex: i,
+                        "resizeClip “lengthBeats” must be at least \(Project.minimumClipLengthBeats) (got \(len))."))
+                    continue
+                }
+                typed.append(.resizeClip(track: ref, clip: clip, lengthBeats: len))
+
+            case "duplicateClip":
+                guard let ref = resolveTrack(op["track"], op: i) else { continue }
+                let trackHandle = JSONCoerce.string(op["track"]) ?? ""
+                guard let clip = resolveClip(op["clip"], track: ref, trackHandle: trackHandle, op: i) else { continue }
+                typed.append(.duplicateClip(track: ref, clip: clip))
+
+            case "splitClip":
+                guard let ref = resolveTrack(op["track"], op: i) else { continue }
+                let trackHandle = JSONCoerce.string(op["track"]) ?? ""
+                let clipHandle = JSONCoerce.string(op["clip"]) ?? ""
+                guard let clip = resolveClip(op["clip"], track: ref, trackHandle: trackHandle, op: i) else { continue }
+                guard let atBeat = JSONCoerce.double(op["atBeat"]) else {
+                    errors.append(PatchError(opIndex: i, "splitClip needs a numeric “atBeat”.")); continue
+                }
+                // Same readable reasons as the UI (MutationError.cannotSplitAudioClip / splitOutOfBounds).
+                switch clip {
+                case .temp:
+                    errors.append(PatchError(opIndex: i,
+                        "splitClip needs an existing clip (not a just-created temp clip)."))
+                    continue
+                case .existing(_, let clipID):
+                    guard let found = project.tracks.lazy.flatMap(\.clips).first(where: { $0.id == clipID }) else {
+                        errors.append(PatchError(opIndex: i, "Unknown clip “\(clipHandle)”.")); continue
+                    }
+                    if found.kind == .audio {
+                        errors.append(PatchError(opIndex: i, MutationError.cannotSplitAudioClip.description))
+                        continue
+                    }
+                    let local = atBeat - found.startBeat
+                    if local <= 0 || local >= found.lengthBeats {
+                        errors.append(PatchError(opIndex: i, MutationError.splitOutOfBounds.description))
+                        continue
+                    }
+                }
+                // Original clip is replaced; later ops must not use the old handle.
+                clipNotePitches.removeValue(forKey: clipHandle)
+                invalidateNotes(inClip: clipHandle)
+                clipHandles.removeValue(forKey: clipHandle)
+                typed.append(.splitClip(track: ref, clip: clip, atBeat: atBeat))
+
+            case "moveClipToTrack":
+                guard let ref = resolveTrack(op["track"], op: i) else { continue }
+                let trackHandle = JSONCoerce.string(op["track"]) ?? ""
+                let clipHandle = JSONCoerce.string(op["clip"]) ?? ""
+                guard let clip = resolveClip(op["clip"], track: ref, trackHandle: trackHandle, op: i) else { continue }
+                guard let destRef = resolveTrack(op["toTrack"], op: i) else { continue }
+                var start: Double? = nil
+                if op.keys.contains("startBeat") {
+                    guard let s = JSONCoerce.double(op["startBeat"]) else {
+                        errors.append(PatchError(opIndex: i,
+                            "moveClipToTrack “startBeat” must be numeric when provided.")); continue
+                    }
+                    guard s >= 0 else {
+                        errors.append(PatchError(opIndex: i,
+                            "moveClipToTrack “startBeat” must be ≥ 0.")); continue
+                    }
+                    start = s
+                }
+                // Kind compatibility: same rules as the UI / Project.moveClip(toTrackIndex:).
+                if case .existing(_, let clipID) = clip {
+                    guard let found = project.tracks.lazy.flatMap(\.clips).first(where: { $0.id == clipID }) else {
+                        errors.append(PatchError(opIndex: i, "Unknown clip “\(clipHandle)”.")); continue
+                    }
+                    switch destRef {
+                    case .existing(let destTrackUUID):
+                        guard let destTrack = project.track(id: destTrackUUID) else {
+                            errors.append(PatchError(opIndex: i, "That track isn’t in this project.")); continue
+                        }
+                        if !Project.trackAccepts(clipKind: found.kind, trackKind: destTrack.kind) {
+                            errors.append(PatchError(opIndex: i,
+                                MutationError.incompatibleClipTrack(
+                                    clipKind: found.kind, trackKind: destTrack.kind).description))
+                            continue
+                        }
+                    case .temp(let tempId):
+                        // Temp tracks minted earlier in this patch: kind from createTrack ops is
+                        // not re-simulated here for every path; refuse kind mismatch when we can
+                        // only know instrument vs audio from the createTrack already typed.
+                        // Look up kind from already-validated createTrack ops.
+                        if let created = typed.reversed().compactMap({ op -> TrackKind? in
+                            if case .createTrack(let id, let kind, _, _) = op, id == tempId { return kind }
+                            return nil
+                        }).first {
+                            if !Project.trackAccepts(clipKind: found.kind, trackKind: created) {
+                                errors.append(PatchError(opIndex: i,
+                                    MutationError.incompatibleClipTrack(
+                                        clipKind: found.kind, trackKind: created).description))
+                                continue
+                            }
+                        }
+                    }
+                }
+                // Source handle becomes stale if the clip leaves its track (positional handles).
+                if case .existing(let srcUUID) = ref, case .existing(let destUUID) = destRef, destUUID != srcUUID {
+                    clipNotePitches.removeValue(forKey: clipHandle)
+                    invalidateNotes(inClip: clipHandle)
+                    clipHandles.removeValue(forKey: clipHandle)
+                }
+                typed.append(.moveClipToTrack(track: ref, clip: clip, toTrack: destRef, startBeat: start))
+
+            case "deleteNote":
+                guard let ref = resolveTrack(op["track"], op: i) else { continue }
+                let trackHandle = JSONCoerce.string(op["track"]) ?? ""
+                let clipHandle = JSONCoerce.string(op["clip"]) ?? ""
+                guard let clip = resolveClip(op["clip"], track: ref, trackHandle: trackHandle, op: i) else { continue }
+                guard requireMidiClip(clip, handle: clipHandle, opName: "deleteNote", op: i) else { continue }
+                let noteHandle = JSONCoerce.string(op["note"]) ?? ""
+                guard let note = resolveNote(op["note"], track: ref, trackHandle: trackHandle,
+                                             clip: clip, clipHandle: clipHandle, op: i) else { continue }
+                noteHandles.removeValue(forKey: noteHandle)
+                if var pitches = clipNotePitches[clipHandle], !pitches.isEmpty {
+                    // Drop one pitch entry so subsequent transpose still sees a plausible list.
+                    // Order is positional; remove by note index if the handle encodes Nk.
+                    if let nPart = noteHandle.split(separator: "N").last, let nIdx = Int(nPart), nIdx >= 1,
+                       nIdx <= pitches.count {
+                        pitches.remove(at: nIdx - 1)
+                        clipNotePitches[clipHandle] = pitches
+                    }
+                }
+                typed.append(.deleteNote(track: ref, clip: clip, note: note))
+
+            case "moveNote":
+                guard let ref = resolveTrack(op["track"], op: i) else { continue }
+                let trackHandle = JSONCoerce.string(op["track"]) ?? ""
+                let clipHandle = JSONCoerce.string(op["clip"]) ?? ""
+                guard let clip = resolveClip(op["clip"], track: ref, trackHandle: trackHandle, op: i) else { continue }
+                guard requireMidiClip(clip, handle: clipHandle, opName: "moveNote", op: i) else { continue }
+                guard let note = resolveNote(op["note"], track: ref, trackHandle: trackHandle,
+                                             clip: clip, clipHandle: clipHandle, op: i) else { continue }
+                guard let pitch = JSONCoerce.int(op["pitch"]), (0...127).contains(pitch) else {
+                    errors.append(PatchError(opIndex: i, "moveNote “pitch” must be 0–127.")); continue
+                }
+                guard let start = JSONCoerce.double(op["startBeat"]) else {
+                    errors.append(PatchError(opIndex: i, "moveNote needs a numeric “startBeat”.")); continue
+                }
+                guard start >= 0 else {
+                    errors.append(PatchError(opIndex: i, "moveNote “startBeat” must be ≥ 0.")); continue
+                }
+                // Keep simulated pitches in sync for later transpose in the same patch.
+                let noteHandle = JSONCoerce.string(op["note"]) ?? ""
+                if var pitches = clipNotePitches[clipHandle],
+                   let nPart = noteHandle.split(separator: "N").last, let nIdx = Int(nPart),
+                   nIdx >= 1, nIdx <= pitches.count {
+                    pitches[nIdx - 1] = pitch
+                    clipNotePitches[clipHandle] = pitches
+                }
+                typed.append(.moveNote(track: ref, clip: clip, note: note, pitch: pitch, startBeat: start))
 
             default:
                 errors.append(PatchError(opIndex: i, "Unhandled operation “\(name)”."))
