@@ -111,6 +111,12 @@ struct PianoRollEmbeddedView: View {
     @State private var pitchNavOffset: Int = 0
     /// Gutter-drag bookkeeping: pitchNavOffset snapshot at drag start.
     @State private var gutterDragStartOffset: Int?
+    /// Pitch the window is centred on, latched when a clip is opened.
+    ///
+    /// Derived from the clip's notes once, never re-derived while editing. Recomputing it per
+    /// render made the window a function of note content, so adding or moving a note shifted
+    /// the mean pitch and scrolled the grid out from under the pointer.
+    @State private var latchedFocusPitch: Int?
 
     private static let clickSlop: CGFloat = 4
     private static let doubleClickSeconds: TimeInterval = 0.4
@@ -152,8 +158,10 @@ struct PianoRollEmbeddedView: View {
         max(1, store.project.timeSignature.num)
     }
 
-    /// Mean pitch of the open clip (middle C when empty). Unchanged by navigation.
-    private var focusPitch: Int { PianoRollLayout.focusPitch(notes: notes) }
+    /// Centre of the pitch window: latched when the clip opened, not re-derived while editing.
+    private var focusPitch: Int {
+        latchedFocusPitch ?? PianoRollLayout.focusPitch(notes: notes)
+    }
 
     /// Window centre after explicit octave / gutter navigation.
     private var windowCenterPitch: Int {
@@ -220,6 +228,9 @@ struct PianoRollEmbeddedView: View {
                 .onAppear {
                     isFocused = true
                     pitchPaneHeight = paneH
+                    if latchedFocusPitch == nil {
+                        latchedFocusPitch = PianoRollLayout.focusPitch(notes: notes)
+                    }
                 }
                 .onChange(of: geo.size.height) { _, newHeight in
                     pitchPaneHeight = newHeight
@@ -247,10 +258,13 @@ struct PianoRollEmbeddedView: View {
         .onChange(of: isFocused) { _, focused in
             if focused { store.editSurface = .pianoRoll }
         }
-        .onChange(of: clipID) { _, _ in
+        .onChange(of: clipID) { oldID, newID in
             store.selectedNoteIDs = []
             pitchNavOffset = 0
             gutterDragStartOffset = nil
+            if PianoRollLayout.shouldRecentrePitchWindow(oldClipID: oldID, newClipID: newID) {
+                latchedFocusPitch = PianoRollLayout.focusPitch(notes: notes)
+            }
             // Do not steal keyboard focus here: selecting a clip in the arrangement must
             // leave arrangement focus so Cmd-C/X/V still copy clips. The roll takes focus
             // when the user clicks/drags inside it (or on first appear of the pane).
@@ -645,7 +659,10 @@ struct PianoRollEmbeddedView: View {
         pitchLow: Int,
         pitchHigh: Int
     ) -> some View {
-        ZStack(alignment: .topLeading) {
+        // Black keys are drawn narrow and above their neighbours, the way keys overlap on a
+        // real keyboard. White keys span the full key width.
+        let keyW = BeatTimeline.keyboardWidth
+        return ZStack(alignment: .topLeading) {
             ForEach((pitchLow...pitchHigh).reversed(), id: \.self) { pitch in
                 let y = yForPitch(pitch, pitchHigh: pitchHigh, rowHeight: rowHeight)
                 let black = Self.isBlackKey(pitch)
@@ -653,24 +670,39 @@ struct PianoRollEmbeddedView: View {
                     // Quiet reference strip (X3): soft surfaces, not pure white/black that
                     // dominate the pane in dark mode or wash out in light mode.
                     .fill(black ? Self.gutterBlackKey : Self.gutterWhiteKey)
-                    .frame(width: BeatTimeline.gutterWidth, height: rowHeight)
+                    .frame(width: black ? keyW * 0.62 : keyW, height: rowHeight)
                     .overlay(alignment: .bottom) {
-                        Rectangle()
-                            .fill(Color.primary.opacity(0.12))
-                            .frame(height: 0.5)
+                        // Only white keys carry a separating line: a black key's own edge
+                        // already reads as the boundary.
+                        if !black {
+                            Rectangle()
+                                .fill(Color.primary.opacity(0.22))
+                                .frame(height: 0.5)
+                        }
                     }
                     .overlay(alignment: .trailing) {
+                        // Octave labels land on C, which is always a white key.
                         if pitch % 12 == 0 {
                             Text(PianoRollLayout.pitchLabel(pitch))
                                 .font(.system(size: 9, weight: .medium, design: .monospaced))
-                                .foregroundStyle(Color.primary.opacity(black ? 0.75 : 0.45))
+                                .foregroundStyle(Color.primary.opacity(0.45))
                                 .padding(.trailing, 4)
                         }
                     }
+                    .zIndex(black ? 1 : 0)
                     .offset(y: y)
             }
         }
-        .frame(width: BeatTimeline.gutterWidth, height: totalHeight, alignment: .topLeading)
+        .frame(width: keyW, height: totalHeight, alignment: .topLeading)
+        // The keyboard is its own surface, so it reads as an object rather than as stripes
+        // floating in the gutter.
+        .background(Self.gutterWhiteKey)
+        .overlay(alignment: .leading) {
+            Rectangle().fill(Color.primary.opacity(0.18)).frame(width: 1)
+        }
+        // Keys hug the grid edge; the rest of the shared gutter column stays empty so the
+        // roll's column 0 still lines up with the arrangement's.
+        .frame(width: BeatTimeline.gutterWidth, height: totalHeight, alignment: .topTrailing)
         .contentShape(Rectangle())
         .gesture(gutterPitchDragGesture(rowHeight: rowHeight))
         .overlay(alignment: .trailing) {
@@ -1240,13 +1272,15 @@ struct PianoRollEmbeddedView: View {
 
     // MARK: - Appearance-aware roll colours (light and dark)
 
-    /// Soft white-key surface for the gutter (not pure white, which blinds in dark mode).
+    /// White-key surface for the gutter. Must read as a key against the grid behind it: at the
+    /// old 248pt gutter the black bars carried the shape, but at keyboard width the white keys
+    /// are the body of the keyboard and need their own contrast.
     private static var gutterWhiteKey: Color {
         Color(nsColor: NSColor(name: nil) { appearance in
             if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
-                return NSColor(calibratedWhite: 0.30, alpha: 1)
+                return NSColor(calibratedWhite: 0.38, alpha: 1)
             }
-            return NSColor(calibratedWhite: 0.93, alpha: 1)
+            return NSColor(calibratedWhite: 0.99, alpha: 1)
         })
     }
 
@@ -1422,6 +1456,17 @@ public enum PianoRollLayout {
     public static func snap(_ beats: Double, to snapBeats: Double) -> Double {
         guard snapBeats > 0 else { return beats }
         return (beats / snapBeats).rounded() * snapBeats
+    }
+
+    /// Whether a change of open clip should re-centre the pitch window on the new clip's music.
+    ///
+    /// True only when the user moves between two existing clips. It is deliberately false for
+    /// a nil -> clip transition: that is the roll creating a clip under the pointer on a
+    /// double-click, and re-centring there scrolls the grid away from the note just placed.
+    /// It is false for clip -> nil so closing a clip leaves the window where the user left it.
+    public static func shouldRecentrePitchWindow(oldClipID: UUID?, newClipID: UUID?) -> Bool {
+        guard let old = oldClipID, let new = newClipID else { return false }
+        return old != new
     }
 
     /// Length used when the user clicks to add a note.

@@ -150,10 +150,15 @@ struct TimelineWorkspaceView: View {
         let zoom = self.zoom
         let gutter = BeatTimeline.gutterWidth
         let rulerH = BeatTimeline.rulerHeight
-        let totalW = totalWidth
         let dividerH: CGFloat = rollExpanded ? 8 : 0
 
         return GeometryReader { geo in
+            // Draw at least a viewport's worth of grid. Sized from content alone, a short
+            // project leaves most of the window blank with no surface to write on past the
+            // last clip. geo here is the width proposed by the parent, not a measurement of
+            // this view's own content, so this cannot feed back into layout.
+            let drawnBeats = max(contentBeats, Double(max(0, geo.size.width - gutter) / beatW))
+            let totalW = BeatTimeline.width(forBeats: drawnBeats, zoom: zoom)
             // Fit preferred band heights to the real viewport so the roll is not laid out
             // taller than the pane and then clipped (X3: range label vs visible rows).
             let fitted = PianoRollLayout.fitBandHeights(
@@ -184,7 +189,7 @@ struct TimelineWorkspaceView: View {
                             HStack(alignment: .top, spacing: 0) {
                                 arrangementGutter
                                 ArrangementLanesView(
-                                    contentBeats: contentBeats,
+                                    contentBeats: drawnBeats,
                                     totalWidth: totalW,
                                     snapBeats: arrangementSnapBeats,
                                     zoom: zoom
@@ -198,7 +203,7 @@ struct TimelineWorkspaceView: View {
                             // Piano roll owns a bounded pitch window (no vertical ScrollView).
                             // Time still uses the shared horizontal offset from this parent.
                             PianoRollEmbeddedView(
-                                contentBeats: contentBeats,
+                                contentBeats: drawnBeats,
                                 totalWidth: totalW,
                                 showsGutter: true,
                                 zoom: zoom

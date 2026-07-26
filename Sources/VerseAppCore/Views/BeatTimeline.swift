@@ -15,6 +15,13 @@ public enum BeatTimeline {
     /// Left gutter for track controls (arrangement) / piano keys (roll). Shared so grid
     /// column 0 lines up. Wide enough for the compact always-visible track strip (AA1/AA2).
     public static let gutterWidth: CGFloat = 248
+    /// Width of the drawn piano keys inside the roll's gutter column.
+    ///
+    /// The gutter column itself must stay `gutterWidth` so the roll's grid column 0 lines up
+    /// with the arrangement's under the shared ruler and shared horizontal scroll. The keys,
+    /// though, are a keyboard: drawn at the column's full 248pt they render as flat bars with
+    /// no key proportions at all. They are drawn at this width, flush against the grid edge.
+    public static let keyboardWidth: CGFloat = 72
     /// Height of the single shared beat ruler.
     public static let rulerHeight: CGFloat = 22
 
