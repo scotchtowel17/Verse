@@ -69,17 +69,12 @@ struct TransportBar: View {
 
     private var loopHelp: String {
         if let region = store.loopRegion {
-            let label = "beats \(formatLoopBeat(region.lowerBound))-\(formatLoopBeat(region.upperBound))"
+            let label = "beats \(LoopRegionLogic.formatLoopBeat(region.lowerBound))-\(LoopRegionLogic.formatLoopBeat(region.upperBound))"
             return store.loopOn ? "Loop region on (\(label))" : "Loop off · region set (\(label))"
         }
         return store.loopOn
             ? "Loop whole arrangement on"
             : "Loop (set a region in the ruler or from a clip)"
-    }
-
-    private func formatLoopBeat(_ v: Double) -> String {
-        if v == floor(v) { return String(Int(v)) }
-        return String(format: "%.2f", v)
     }
 
     /// Three-state record control: unarmed, armed (waiting for play), capturing (armed + playing).

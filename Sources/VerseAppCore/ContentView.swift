@@ -49,6 +49,7 @@ public struct ContentView: View {
             redoName: store.redoName
         ))
         .alert(store.pendingRecovery?.projectLoadFailureMessage == nil
+               && store.pendingRecovery?.journalLoadFailureMessage == nil
                ? "Recover unsaved work?"
                : "Couldn’t restore all unsaved work",
                isPresented: Binding(get: { store.pendingRecovery != nil },
@@ -63,6 +64,12 @@ public struct ContentView: View {
                     Text("\(fail) An in-progress recording can still be restored.")
                 } else {
                     Text(fail)
+                }
+            } else if let jfail = store.pendingRecovery?.journalLoadFailureMessage {
+                if store.pendingRecovery?.project != nil {
+                    Text("\(jfail) Your last edits can still be restored.")
+                } else {
+                    Text(jfail)
                 }
             } else {
                 Text("Verse found work from a session that didn’t close normally — your last edits and any in-progress recording can be restored.")

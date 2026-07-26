@@ -66,6 +66,13 @@ public enum LoopRegionLogic {
             return normalized(start: region.lowerBound, end: edgeBeat)
         }
     }
+
+    /// Format a loop-region beat for status, help, and accessibility labels.
+    /// Whole numbers render as integers; fractional values keep two decimals.
+    public static func formatLoopBeat(_ v: Double) -> String {
+        if v == floor(v) { return String(Int(v)) }
+        return String(format: "%.2f", v)
+    }
 }
 
 public enum LoopRegionEdge: Equatable, Sendable {
@@ -153,14 +160,9 @@ extension AppStore {
         }
         loopRegion = range
         // Confirm the set in the header so a successful click is never a silent no-op (Z4).
-        let lo = formatLoopBeat(range.lowerBound)
-        let hi = formatLoopBeat(range.upperBound)
+        let lo = LoopRegionLogic.formatLoopBeat(range.lowerBound)
+        let hi = LoopRegionLogic.formatLoopBeat(range.upperBound)
         statusMessage = "Loop region set to beats \(lo)-\(hi)."
-    }
-
-    private func formatLoopBeat(_ v: Double) -> String {
-        if v == floor(v) { return String(Int(v)) }
-        return String(format: "%.2f", v)
     }
 
     /// Pause: stop audio but hold the current playhead so the next play resumes from there.

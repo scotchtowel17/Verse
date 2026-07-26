@@ -24,14 +24,19 @@ extension AppStore {
             }
             rebuildTakesFromModel()
             history.clear()
+            var msg: String
             if rekeyed > 0 {
                 let n = rekeyed == 1 ? "1 duplicate track id" : "\(rekeyed) duplicate track ids"
-                statusMessage = "Recovered your unsaved work. Fixed \(n) so every track can play."
+                msg = "Recovered your unsaved work. Fixed \(n) so every track can play."
             } else {
-                statusMessage = "Recovered your unsaved work."
+                msg = "Recovered your unsaved work."
             }
+            if let jfail = info.journalLoadFailureMessage {
+                msg = "\(msg) \(jfail)"
+            }
+            statusMessage = msg
         } else {
-            // Autosave existed but could not be decoded (e.g. newer schema). Still restore any take.
+            // Autosave missing or unreadable. Still restore any take the journal named.
             if let takeURL = info.inProgressTakeURL {
                 addRecordingClip(filename: takeURL.lastPathComponent, seconds: durationOf(takeURL))
                 rebuildTakesFromModel()
@@ -40,6 +45,8 @@ extension AppStore {
                 statusMessage = info.inProgressTakeURL == nil
                     ? fail
                     : "\(fail) Restored the in-progress recording."
+            } else if let jfail = info.journalLoadFailureMessage {
+                statusMessage = jfail
             } else {
                 statusMessage = "Couldn’t restore the autosaved project."
             }

@@ -322,7 +322,7 @@ struct TimelineWorkspaceView: View {
                     .allowsHitTesting(false)
                     .accessibilityLabel("Loop region")
                     .accessibilityValue(
-                        "beats \(formatLoopBeat(region.lowerBound)) to \(formatLoopBeat(region.upperBound))"
+                        "beats \(LoopRegionLogic.formatLoopBeat(region.lowerBound)) to \(LoopRegionLogic.formatLoopBeat(region.upperBound))"
                     )
             }
 
@@ -373,11 +373,6 @@ struct TimelineWorkspaceView: View {
             .disabled(store.selectedClipIDs.count != 1)
         }
         .help(rulerHelp)
-    }
-
-    private func formatLoopBeat(_ v: Double) -> String {
-        if v == floor(v) { return String(Int(v)) }
-        return String(format: "%.2f", v)
     }
 
     private var rulerHelp: String {

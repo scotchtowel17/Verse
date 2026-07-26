@@ -592,7 +592,7 @@ duplicated (the second is a thin forwarder to one implementation), and `pianoRol
 `pruneArmedTracks` are used, just within their defining file. Recording those because a
 correction is as much a result as a finding.
 
-## Step AB1 — Correct three real findings — PENDING
+## Step AB1 — Correct three real findings — DONE
 
 1. **`formatLoopBeat` is triplicated**, byte-identical, in `AppStore+Transport.swift`,
    `TransportBar.swift` and `TimelineWorkspaceView.swift`. Principle 4: no duplicate utilities.
