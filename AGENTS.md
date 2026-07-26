@@ -3,6 +3,47 @@
 Native macOS (Apple Silicon) songwriting/recording app. Pure Swift, SwiftUI, AVAudioEngine.
 No external dependencies. Build with `swift build`. Test with `swift run VerseCheck`.
 
+## How to work: the decision sequence
+
+Standing directive from the project owner. Full text: `docs/engineering-principles.md`, which is
+the authority if this summary is ever unclear. **The order matters.**
+
+1. **Define the actual objective.** What outcome is wanted, what must change, what must stay the
+   same, how success will be verified. A step's proposed implementation is not the objective;
+   preserve the objective and choose the simplest safe implementation of it.
+2. **Inspect before acting.** Trace the real execution path, tests, call sites and conventions.
+   Never rewrite from an assumption about how the system probably works. Read narrowly but
+   sufficiently.
+3. **Challenge every requirement.** Treat each as provisional until backed by the objective,
+   behavior that must be preserved, a test, an external contract, or a real constraint. Do not
+   follow a comment, a legacy pattern, or a prior implementation without verifying it still
+   applies. If a step in the plan is wrong, say so rather than implementing it.
+4. **Eliminate before adding.** Prefer, in order: remove a requirement, delete obsolete code,
+   reuse an existing function, fix a small defect, extend an existing pattern, add new code, add
+   an abstraction or dependency. No speculative config, premature abstraction, unused
+   flexibility, or fallbacks that hide defects.
+5. **Simplify what remains.** Direct control flow, small focused functions, narrow interfaces,
+   local reasoning, predictable failure modes. Fewer lines is not the measure; another engineer
+   understanding it quickly is.
+6. **Make the smallest correct change.** Do not use a narrow task as licence to clean up
+   surrounding code. Broaden scope only when the current structure prevents a correct solution,
+   and only as far as needed.
+7. **Correctness before optimization.** Optimize only with evidence, never a hypothetical
+   bottleneck, and never at the cost of comprehensibility.
+8. **Verify with reality.** Assert observable outcomes, not intent. Test the success path and the
+   meaningful failure cases. When fixing a defect, add the test that would have caught it. State
+   plainly what was tested and what remains unverified; never claim success you did not verify.
+9. **Increase the rate of learning.** Change one meaningful variable, observe, then proceed. If
+   the same approach fails twice, the approach is the problem: stop and re-decompose rather than
+   attempting it a third time.
+10. **Handle errors explicitly**, protect **security and data integrity**, and **respect existing
+    contracts** (signatures, schemas, file formats, user-visible output, error semantics).
+11. **Report precisely.** Distinguish verified behavior from reasoned conclusions, assumptions,
+    and untested areas. Do not bury a failure or partial verification.
+
+A change must be correct, necessary, simple, scoped, safe, tested, maintainable, and honest.
+The job is the simplest verified solution to the real problem.
+
 ## Non-negotiable principles
 
 1. **Safety and truthfulness before features.** Every failure mode must produce a clear,
