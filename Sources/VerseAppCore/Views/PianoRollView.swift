@@ -82,7 +82,7 @@ struct PianoRollEmbeddedView: View {
 
     /// Last non-zero grid choice; used as new-note length when snap is Off so clicks
     /// do not produce a 1/32 sliver.
-    @State private var lastGridSnapBeats: Double = 0.25
+    @State private var lastGridSnapBeats: Double = SnapGrid.sixteenth
     /// View-local clipboard for Cmd-C / Cmd-X / Cmd-V (relative paste uses startBeat).
     @State private var noteClipboard: [ClipboardNote] = []
     @FocusState private var isFocused: Bool
@@ -350,10 +350,11 @@ struct PianoRollEmbeddedView: View {
 
     /// Pinned controls above the pitch pane (Y3): never wrap into multi-line labels.
     /// Wide layout shows everything; narrower widths collapse secondary chrome into a menu.
+    /// Snap uses a compact menu (Straight / Triplets) so 1/32 and triplets never overflow.
     private var snapBar: some View {
         ViewThatFits(in: .horizontal) {
-            snapBarContents(includeStatus: true, includeSnapLabel: true, snapWidth: 200)
-            snapBarContents(includeStatus: false, includeSnapLabel: false, snapWidth: 180)
+            snapBarContents(includeStatus: true, includeSnapLabel: true)
+            snapBarContents(includeStatus: false, includeSnapLabel: false)
             snapBarMinimal
         }
         .lineLimit(1)
@@ -363,11 +364,10 @@ struct PianoRollEmbeddedView: View {
     /// Full / medium toolbar row. All groups use `fixedSize` so labels never stack one letter per line.
     private func snapBarContents(
         includeStatus: Bool,
-        includeSnapLabel: Bool,
-        snapWidth: CGFloat
+        includeSnapLabel: Bool
     ) -> some View {
         HStack(spacing: 6) {
-            snapPickerGroup(showLabel: includeSnapLabel, width: snapWidth)
+            snapPickerGroup(showLabel: includeSnapLabel)
             toolbarDivider
             pitchNavGroup
             toolbarDivider
@@ -390,7 +390,7 @@ struct PianoRollEmbeddedView: View {
     /// Narrowest layout: snap + pitch range + overflow for zooms / ghosts / status.
     private var snapBarMinimal: some View {
         HStack(spacing: 6) {
-            snapPickerGroup(showLabel: false, width: 160)
+            snapPickerGroup(showLabel: false)
             pitchNavGroup
             Spacer(minLength: 0)
             overflowMenu(includeStatus: true)
@@ -401,29 +401,15 @@ struct PianoRollEmbeddedView: View {
         Divider().frame(height: 16)
     }
 
-    private func snapPickerGroup(showLabel: Bool, width: CGFloat) -> some View {
-        HStack(spacing: 4) {
-            if showLabel {
-                Text("Snap")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize()
-            }
-            Picker("Snap", selection: snapBeatsBinding) {
-                Text("Off").tag(0.0)
-                Text("1/4").tag(1.0)
-                Text("1/8").tag(0.5)
-                Text("1/16").tag(0.25)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: width)
-            .help("Grid snap for note start and length. Off allows free placement.")
-            .onChange(of: store.pianoRollSnapBeats) { _, newValue in
-                if newValue > 0 { lastGridSnapBeats = newValue }
-            }
+    private func snapPickerGroup(showLabel: Bool) -> some View {
+        SnapGridPicker(
+            snapBeats: snapBeatsBinding,
+            showLabel: showLabel,
+            helpText: "Grid snap for note start and length. Off allows free placement."
+        )
+        .onChange(of: store.pianoRollSnapBeats) { _, newValue in
+            if newValue > 0 { lastGridSnapBeats = newValue }
         }
-        .fixedSize(horizontal: true, vertical: true)
         .layoutPriority(2)
     }
 

@@ -292,7 +292,7 @@ public enum MutationError: Error, Equatable, CustomStringConvertible {
         case .negativeNoteStartBeat:
             return "A note can’t start before beat 0."
         case .invalidQuantizeGrid(let g):
-            return "Quantize grid must be 1/4, 1/8, or 1/16 beat (got \(g))."
+            return "Quantize grid must be 1/4, 1/8, 1/16, 1/32, or a triplet (1/4T, 1/8T, 1/16T) (got \(g))."
         case .pitchOutOfRange(let pitch, let semitones):
             return "Transposing pitch \(pitch) by \(semitones) semitones would leave the MIDI range 0–127."
         case .invalidPitch(let pitch):
@@ -574,15 +574,17 @@ public extension Project {
 
     /// Quantize note **starts** in a clip to the nearest grid point.
     ///
-    /// - Supported grids (in beats): `1` (1/4), `0.5` (1/8), `0.25` (1/16).
+    /// - Supported grids: see `SnapGrid.allowedQuantizeGrids` (straight 1/4–1/32 and
+    ///   triplets 1/4T, 1/8T, 1/16T).
     /// - Only start times move; lengths are untouched.
     /// - Starts are never moved past the clip end (`lengthBeats`); they clamp to that bound.
     /// - Starts are never moved before beat 0 within the clip.
     /// - When `noteIDs` is non-nil and non-empty, only those notes are quantized; otherwise
     ///   every note in the clip is quantized.
     mutating func quantizeNotes(in clipID: UUID, to gridBeats: Double, noteIDs: Set<UUID>? = nil) throws {
-        let allowed: Set<Double> = [1.0, 0.5, 0.25]
-        guard allowed.contains(gridBeats) else { throw MutationError.invalidQuantizeGrid(gridBeats) }
+        guard SnapGrid.isAllowedQuantizeGrid(gridBeats) else {
+            throw MutationError.invalidQuantizeGrid(gridBeats)
+        }
         guard let loc = clipLocation(id: clipID) else { throw MutationError.clipNotFound }
         let clipEnd = tracks[loc.trackIndex].clips[loc.clipIndex].lengthBeats
         guard var notes = tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes, !notes.isEmpty else {

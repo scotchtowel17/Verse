@@ -173,22 +173,18 @@ public enum PatchValidator {
             noteHandles = noteHandles.filter { !$0.key.hasPrefix(prefix) }
         }
 
-        /// Accept `gridBeats` as 1 / 0.5 / 0.25, or `grid` / `gridBeats` as "1/4", "1/8", "1/16".
+        /// Accept `gridBeats` as a SnapGrid value, or `grid` / `gridBeats` as labels
+        /// ("1/4", "1/32", "1/8T", …).
         func parseQuantizeGrid(_ op: [String: Any], op i: Int) -> Double? {
-            if let g = JSONCoerce.double(op["gridBeats"]), [1.0, 0.5, 0.25].contains(g) {
-                return g
+            if let g = JSONCoerce.double(op["gridBeats"]), let parsed = SnapGrid.parseGrid(g) {
+                return parsed
             }
             let raw = JSONCoerce.string(op["grid"]) ?? JSONCoerce.string(op["gridBeats"])
-            if let s = raw {
-                switch s.trimmingCharacters(in: .whitespacesAndNewlines) {
-                case "1/4", "1": return 1.0
-                case "1/8", "0.5": return 0.5
-                case "1/16", "0.25": return 0.25
-                default: break
-                }
+            if let s = raw, let parsed = SnapGrid.parseGridLabel(s) {
+                return parsed
             }
             errors.append(PatchError(opIndex: i,
-                "quantizeNotes needs “gridBeats” of 1, 0.5, or 0.25 (1/4, 1/8, or 1/16 beat)."))
+                "quantizeNotes needs “gridBeats” of 1, 0.5, 0.25, 0.125, or a triplet (1/4, 1/8, 1/16, 1/32, 1/4T, 1/8T, 1/16T)."))
             return nil
         }
 

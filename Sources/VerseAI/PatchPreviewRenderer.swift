@@ -189,12 +189,10 @@ public enum PatchPreviewRenderer {
     }
 
     private static func gridLabel(_ gridBeats: Double) -> String {
-        switch gridBeats {
-        case 1.0: return "1/4 note"
-        case 0.5: return "1/8 note"
-        case 0.25: return "1/16 note"
-        default: return "\(formatNumber(gridBeats))-beat grid"
+        if SnapGrid.isAllowedQuantizeGrid(gridBeats) || gridBeats == SnapGrid.off {
+            return SnapGrid.displayLabel(for: gridBeats)
         }
+        return "\(formatNumber(gridBeats))-beat grid"
     }
 
     /// Positional handle plus display name: `Track 1 “Piano”`.

@@ -2,12 +2,84 @@ import Foundation
 import VerseModel
 import VerseEngine
 
+// MARK: - Loop region pure logic (Z3)
+
+/// Pure helpers for the transport loop region. Free of SwiftUI so VerseCheck can cover them.
+/// Loop state is transport-only: never project data, never undo.
+public enum LoopRegionLogic {
+    /// Minimum region length in beats (matches clip floor so a region stays usable).
+    public static let minimumLengthBeats: Double = 0.125
+
+    /// Normalize two beat positions into a valid loop range, or `nil` if too short.
+    public static func normalized(start: Double, end: Double) -> ClosedRange<Double>? {
+        let a = max(0, start)
+        let b = max(0, end)
+        let lo = min(a, b)
+        let hi = max(a, b)
+        guard hi - lo >= minimumLengthBeats - 1e-12 else { return nil }
+        return lo...hi
+    }
+
+    /// Loop range matching a clip's arrangement bounds.
+    public static func fromClip(startBeat: Double, lengthBeats: Double) -> ClosedRange<Double>? {
+        normalized(start: startBeat, end: startBeat + lengthBeats)
+    }
+
+    /// Effective transport loop when the toggle is on. With no region, fall back to the
+    /// whole-arrangement range used before Z3 (`0...max(4, arrangementEnd)`).
+    public static func playbackLoop(
+        loopOn: Bool,
+        region: ClosedRange<Double>?,
+        arrangementEnd: Double
+    ) -> ClosedRange<Double>? {
+        guard loopOn else { return nil }
+        if let region { return region }
+        return 0...max(4, arrangementEnd)
+    }
+
+    /// Where play should begin. With a loop range: resume inside it, otherwise jump to the
+    /// loop start. With no loop: hold the playhead (legacy).
+    public static func playbackStart(playhead: Double, loop: ClosedRange<Double>?) -> Double {
+        let p = max(0, playhead)
+        guard let loop else { return p }
+        if p >= loop.lowerBound && p < loop.upperBound { return p }
+        return loop.lowerBound
+    }
+
+    /// Move a region by `delta` beats, clamping start to ≥ 0 and preserving length.
+    public static func moved(_ region: ClosedRange<Double>, by delta: Double) -> ClosedRange<Double> {
+        let len = region.upperBound - region.lowerBound
+        let lo = max(0, region.lowerBound + delta)
+        return lo...(lo + len)
+    }
+
+    /// Resize by dragging one edge to `edgeBeat`, keeping the other edge fixed.
+    public static func resized(
+        _ region: ClosedRange<Double>,
+        edge: LoopRegionEdge,
+        to edgeBeat: Double
+    ) -> ClosedRange<Double>? {
+        switch edge {
+        case .start:
+            return normalized(start: edgeBeat, end: region.upperBound)
+        case .end:
+            return normalized(start: region.lowerBound, end: edgeBeat)
+        }
+    }
+}
+
+public enum LoopRegionEdge: Equatable, Sendable {
+    case start
+    case end
+}
+
 // MARK: - Transport, tracks, mix, effects
 
 extension AppStore {
-    // MARK: Transport (M4 / S1)
+    // MARK: Transport (M4 / S1 / Z3)
 
     // Transport actions never record undo: moving the playhead is not an edit.
+    // Loop region mutations are also transport-only and never record undo (Z3).
 
     public func togglePlay() {
         // Copilot preview sheet does not disable menu/keyboard shortcuts on its own.
@@ -19,6 +91,7 @@ extension AppStore {
     }
 
     /// Start or resume playback from the held playhead position (`playheadBeat`).
+    /// When loop is on, uses the loop region if set; otherwise the whole arrangement.
     public func startPlayback() {
         guard !copilotPreviewBlocksTransport else {
             statusMessage = "Finish or cancel the Claude preview before playing."
@@ -26,10 +99,59 @@ extension AppStore {
         }
         transport.metronomeEnabled = metronomeOn
         let end = arrangementBeats
-        let loop: ClosedRange<Double>? = loopOn ? 0...max(4, end) : nil
-        let from = max(0, playheadBeat)
+        let loop = LoopRegionLogic.playbackLoop(
+            loopOn: loopOn,
+            region: loopRegion,
+            arrangementEnd: end
+        )
+        let from = LoopRegionLogic.playbackStart(playhead: playheadBeat, loop: loop)
         transport.play(project: project, mediaDir: workingMediaDir, from: from, loop: loop)
         isPlaying = true
+    }
+
+    /// Set or clear the loop region (beats). No undo. Invalid (too short / inverted) clears.
+    public func setLoopRegion(_ range: ClosedRange<Double>?) {
+        if let range {
+            loopRegion = LoopRegionLogic.normalized(start: range.lowerBound, end: range.upperBound)
+        } else {
+            loopRegion = nil
+        }
+    }
+
+    /// Set the loop region from two beat positions (order-independent). No undo.
+    public func setLoopRegion(start: Double, end: Double) {
+        loopRegion = LoopRegionLogic.normalized(start: start, end: end)
+    }
+
+    /// Clear the loop region so looping falls back to the whole arrangement. No undo.
+    public func clearLoopRegion() {
+        loopRegion = nil
+    }
+
+    /// One-action set: loop region matches the single selected arrangement clip.
+    /// No undo. Refuses empty or multi-selection with a clear status message.
+    public func setLoopRegionFromSelectedClip() {
+        guard !selectedClipIDs.isEmpty else {
+            statusMessage = "Select a clip to set the loop region."
+            return
+        }
+        guard selectedClipIDs.count == 1, let id = selectedClipIDs.first else {
+            statusMessage = "Select one clip to set the loop region."
+            return
+        }
+        guard let loc = project.clipLocation(id: id) else {
+            statusMessage = "That clip isn’t in this project."
+            return
+        }
+        let clip = project.tracks[loc.trackIndex].clips[loc.clipIndex]
+        guard let range = LoopRegionLogic.fromClip(
+            startBeat: clip.startBeat,
+            lengthBeats: clip.lengthBeats
+        ) else {
+            statusMessage = "That clip is too short to loop."
+            return
+        }
+        loopRegion = range
     }
 
     /// Pause: stop audio but hold the current playhead so the next play resumes from there.
@@ -74,7 +196,7 @@ extension AppStore {
         playheadBeat = clamped
     }
 
-    var arrangementBeats: Double {
+    public var arrangementBeats: Double {
         project.tracks.flatMap { $0.clips }.map { $0.startBeat + $0.lengthBeats }.max() ?? 8
     }
 

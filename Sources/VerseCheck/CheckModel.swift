@@ -659,8 +659,40 @@ func runModelChecks(_ tk: TestKit) {
         try p.quantizeNotes(in: clip.id, to: 1.0)
         tk.expectEqual(p.tracks[0].clips[0].midiNotes![0].startBeat, 1.0, "1.4 snaps to 1.0 on 1/4")
 
+        // 1/32 grid (Step Z2)
+        p.tracks[0].clips[0].midiNotes = [
+            Note(startBeat: 0.1, lengthBeats: 0.25, pitch: 60, velocity: 100),
+        ]
+        try p.quantizeNotes(in: clip.id, to: SnapGrid.thirtySecond)
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes![0].startBeat, 0.125,
+                       "0.1 snaps to 0.125 on 1/32")
+
+        // 1/4T triplet grid (one third of a beat)
+        p.tracks[0].clips[0].midiNotes = [
+            Note(startBeat: 0.4, lengthBeats: 0.25, pitch: 60, velocity: 100),
+        ]
+        try p.quantizeNotes(in: clip.id, to: SnapGrid.quarterTriplet)
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes![0].startBeat, SnapGrid.quarterTriplet,
+                       "0.4 snaps to 1/3 on 1/4T")
+
+        // 1/8T and 1/16T
+        p.tracks[0].clips[0].midiNotes = [
+            Note(startBeat: 0.2, lengthBeats: 0.25, pitch: 60, velocity: 100),
+        ]
+        try p.quantizeNotes(in: clip.id, to: SnapGrid.eighthTriplet)
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes![0].startBeat, SnapGrid.eighthTriplet,
+                       "0.2 snaps to 1/6 on 1/8T")
+
+        p.tracks[0].clips[0].midiNotes = [
+            Note(startBeat: 0.1, lengthBeats: 0.25, pitch: 60, velocity: 100),
+        ]
+        try p.quantizeNotes(in: clip.id, to: SnapGrid.sixteenthTriplet)
+        // 0.1 / (1/12) ≈ 1.2 → rounds to 1 → 1/12
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes![0].startBeat, SnapGrid.sixteenthTriplet,
+                       "0.1 snaps to 1/12 on 1/16T")
+
         tk.expectThrows("reject unsupported grid") {
-            try p.quantizeNotes(in: clip.id, to: 1.0 / 3.0)
+            try p.quantizeNotes(in: clip.id, to: 0.333) // near 1/3 but not exact
         }
         tk.expectThrows("reject unknown clip on quantize") {
             try p.quantizeNotes(in: UUID(), to: 0.25)

@@ -66,7 +66,12 @@ public final class AppStore {
     /// Scrub and rewind write this; pause captures the live beat into it. Never recorded as undo.
     public var playheadBeat: Double = 0
     var metronomeOn = false
-    var loopOn = false
+    /// Loop toggle (transport state only). When on, playback uses `loopRegion` if set,
+    /// otherwise the whole arrangement (legacy fallback). Never recorded as undo (Z3).
+    public var loopOn = false
+    /// Optional loop region in arrangement beats (start...end). Session/transport state only:
+    /// not part of the project document, never saved, never recorded as undo (Z3).
+    public var loopRegion: ClosedRange<Double>? = nil
     var trackLevels: [UUID: Float] = [:]
     var trackEffects: [UUID: VerseAudioEngine.BuiltInEffect] = [:]
     /// True when every effects-map key names a track that still exists on the project.
@@ -112,8 +117,8 @@ public final class AppStore {
     public var selectedClipIDs: Set<UUID> = []
     /// Piano-roll note selection (view-driven; not persisted).
     public var selectedNoteIDs: Set<UUID> = []
-    /// Piano-roll snap in beats: 0 (Off), 1 (1/4), 0.5 (1/8), 0.25 (1/16). Quantize uses this.
-    public var pianoRollSnapBeats: Double = 0.25
+    /// Piano-roll snap in beats. See `SnapGrid` (Off, 1/4–1/32, triplets). Quantize uses this.
+    public var pianoRollSnapBeats: Double = SnapGrid.sixteenth
     /// Shared timeline zoom for arrangement + piano roll (via `BeatTimeline.beatWidth(zoom:)`).
     public var timelineZoom: Double = BeatTimeline.defaultZoom
     /// When true, other tracks' overlapping MIDI notes draw as dimmed ghosts in the roll (Y2).
@@ -768,11 +773,11 @@ public final class AppStore {
 
     /// Quantize notes in the effective piano-roll MIDI clip. When `noteIDs` is non-empty,
     /// only those notes move; otherwise every note in the clip is quantized. Grid comes from
-    /// `pianoRollSnapBeats` (must be 1, 0.5, or 0.25). One undo entry labeled "Quantize Notes".
+    /// `pianoRollSnapBeats` (any `SnapGrid` quantize value). One undo entry labeled "Quantize Notes".
     public func pianoRollQuantizeNotes(noteIDs: Set<UUID>? = nil) {
         let grid = pianoRollSnapBeats
-        guard grid > 0 else {
-            statusMessage = "Turn on snap (1/4, 1/8, or 1/16) to quantize."
+        guard grid > 0, SnapGrid.isAllowedQuantizeGrid(grid) else {
+            statusMessage = SnapGrid.quantizeNeedsSnapMessage + "."
             return
         }
         guard let clipID = effectivePianoRollClipID else {
