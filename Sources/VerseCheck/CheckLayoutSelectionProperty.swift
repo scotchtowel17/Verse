@@ -827,53 +827,58 @@ private func runBeatToXProperty(_ tk: TestKit) {
         var first: String?
 
         // Arrangement and roll share this mapping; one function pair is the agreement.
-        tk.expectEqual(BeatTimeline.beatWidth, 28, "shared pixels-per-beat is 28")
+        tk.expectEqual(BeatTimeline.baseBeatWidth, 28, "base pixels-per-beat is 28")
+        tk.expectEqual(BeatTimeline.beatWidth(zoom: 1.0), 28, "zoom 1.0 yields base width")
 
-        for trial in 0..<trials {
-            let beat = rng.nextDouble(in: 0...256)
-            let x = BeatTimeline.x(forBeat: beat)
-            let back = BeatTimeline.beat(atX: x)
+        // Property holds at default zoom and at a non-default shared zoom.
+        let zooms: [Double] = [1.0, 0.5, 2.0, 1.25]
+        for zoom in zooms {
+            for trial in 0..<trials {
+                let beat = rng.nextDouble(in: 0...256)
+                let x = BeatTimeline.x(forBeat: beat, zoom: zoom)
+                let back = BeatTimeline.beat(atX: x, zoom: zoom)
 
-            // Round-trip within rounding tolerance (CGFloat path on the mapping).
-            if abs(back - beat) > 1e-9 {
-                failures += 1
-                first = first ?? "trial \(trial): round-trip beat \(beat) → x \(x) → \(back)"
-                continue
+                // Round-trip within rounding tolerance (CGFloat path on the mapping).
+                if abs(back - beat) > 1e-9 {
+                    failures += 1
+                    first = first ?? "trial \(trial) zoom \(zoom): round-trip beat \(beat) → x \(x) → \(back)"
+                    continue
+                }
+
+                // Closed form: both views use the same scale, so x is beat × beatWidth(zoom).
+                let expectedX = CGFloat(beat) * BeatTimeline.beatWidth(zoom: zoom)
+                if abs(x - expectedX) > 1e-9 {
+                    failures += 1
+                    first = first ?? "trial \(trial) zoom \(zoom): x \(x) != beat×width \(expectedX)"
+                    continue
+                }
+
+                // width(forBeats:) agrees with x of a duration from 0.
+                let w = BeatTimeline.width(forBeats: beat, zoom: zoom)
+                if abs(w - x) > 1e-9 {
+                    failures += 1
+                    first = first ?? "trial \(trial) zoom \(zoom): width(forBeats:) \(w) != x(forBeat:) \(x)"
+                }
             }
 
-            // Closed form: both views use the same scale, so x is beat × beatWidth.
-            let expectedX = CGFloat(beat) * BeatTimeline.beatWidth
-            if abs(x - expectedX) > 1e-9 {
-                failures += 1
-                first = first ?? "trial \(trial): x \(x) != beat×width \(expectedX)"
-                continue
-            }
-
-            // width(forBeats:) agrees with x of a duration from 0.
-            let w = BeatTimeline.width(forBeats: beat)
-            if abs(w - x) > 1e-9 {
-                failures += 1
-                first = first ?? "trial \(trial): width(forBeats:) \(w) != x(forBeat:) \(x)"
-            }
-        }
-
-        // Absolute / local invert for random clip placements (roll note under arrangement).
-        for trial in 0..<trials {
-            let clipStart = rng.nextDouble(in: 0...64)
-            let local = rng.nextDouble(in: 0...16)
-            let absolute = BeatTimeline.absoluteStart(clipStart: clipStart, noteLocalStart: local)
-            let backLocal = BeatTimeline.localBeat(absolute: absolute, clipStart: clipStart)
-            if abs(backLocal - local) > 1e-12 {
-                failures += 1
-                first = first ?? "trial \(trial): local/absolute invert failed"
-                continue
-            }
-            // Note at local L in clip at S shares x with arrangement event at S+L.
-            let noteX = BeatTimeline.x(forBeat: absolute)
-            let arrX = BeatTimeline.x(forBeat: clipStart + local)
-            if abs(noteX - arrX) > 1e-9 {
-                failures += 1
-                first = first ?? "trial \(trial): roll and arrangement disagree on x"
+            // Absolute / local invert for random clip placements (roll note under arrangement).
+            for trial in 0..<trials {
+                let clipStart = rng.nextDouble(in: 0...64)
+                let local = rng.nextDouble(in: 0...16)
+                let absolute = BeatTimeline.absoluteStart(clipStart: clipStart, noteLocalStart: local)
+                let backLocal = BeatTimeline.localBeat(absolute: absolute, clipStart: clipStart)
+                if abs(backLocal - local) > 1e-12 {
+                    failures += 1
+                    first = first ?? "trial \(trial) zoom \(zoom): local/absolute invert failed"
+                    continue
+                }
+                // Note at local L in clip at S shares x with arrangement event at S+L (same zoom).
+                let noteX = BeatTimeline.x(forBeat: absolute, zoom: zoom)
+                let arrX = BeatTimeline.x(forBeat: clipStart + local, zoom: zoom)
+                if abs(noteX - arrX) > 1e-9 {
+                    failures += 1
+                    first = first ?? "trial \(trial) zoom \(zoom): roll and arrangement disagree on x"
+                }
             }
         }
 

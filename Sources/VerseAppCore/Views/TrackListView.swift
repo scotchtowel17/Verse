@@ -42,19 +42,30 @@ private struct TrackRow: View {
     let track: Track
 
     private var isActive: Bool { track.id == store.activeTrackID && track.kind == .instrument }
+    private var identity: TrackIdentityColor.Swatch { TrackIdentityColor.swatch(for: track.colorIndex) }
 
     var body: some View {
         HStack(spacing: 10) {
+            // Thin identity accent strip (not a large saturated block).
+            RoundedRectangle(cornerRadius: 2)
+                .fill(identity.solid)
+                .frame(width: 4)
+                .padding(.vertical, 2)
+
             Image(systemName: track.kind == .instrument ? "pianokeys" : "waveform")
                 .foregroundStyle(isActive ? Color.accentColor : .secondary)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(track.name).font(.callout).fontWeight(isActive ? .semibold : .regular)
-                MeterBar(level: store.trackLevel(track.id), height: 5).frame(width: 130)
+                MeterBar(level: store.trackLevel(track.id), height: 5,
+                         identityColor: identity.solid)
+                    .frame(width: 130)
             }
             .frame(width: 150, alignment: .leading)
             .contentShape(Rectangle())
             .onTapGesture { store.selectTrack(track.id) }
+
+            colorPicker
 
             if track.kind == .instrument {
                 instrumentPicker
@@ -96,8 +107,37 @@ private struct TrackRow: View {
                 .buttonStyle(.borderless).controlSize(.small)
         }
         .padding(8)
+        // Active / selection chrome stays system accent; identity is the strip only.
         .background(isActive ? Color.accentColor.opacity(0.10) : Color.black.opacity(0.04),
                     in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    /// Eight-slot identity colour menu. Does not offer semantic colours (record/play/selection).
+    private var colorPicker: some View {
+        Menu {
+            ForEach(0..<TrackPalette.count, id: \.self) { index in
+                let swatch = TrackIdentityColor.swatch(for: index)
+                Button {
+                    store.setTrackColorIndex(index, track.id)
+                } label: {
+                    Label {
+                        Text(swatch.name)
+                    } icon: {
+                        Image(systemName: track.colorIndex == index
+                              ? "checkmark.circle.fill" : "circle.fill")
+                            .foregroundStyle(swatch.solid)
+                    }
+                }
+            }
+        } label: {
+            Circle()
+                .fill(identity.solid)
+                .frame(width: 14, height: 14)
+                .overlay(Circle().strokeBorder(Color.primary.opacity(0.25), lineWidth: 0.5))
+        }
+        .menuStyle(.borderlessButton)
+        .frame(width: 22)
+        .help("Track colour")
     }
 
     /// Bound to program + bank (not track.name) so a new project's "Piano" track still shows

@@ -77,17 +77,25 @@ struct PianoRollEmbeddedView: View {
     let contentBeats: Double
     let totalWidth: CGFloat
     let showsGutter: Bool
+    /// Shared timeline zoom (must match arrangement).
+    let zoom: Double
 
-    /// Snap grid in beats: 0 (Off), 1 (1/4), 0.5 (1/8), 0.25 (1/16). Default 1/16.
-    @State private var snapBeats: Double = 0.25
     /// Last non-zero grid choice; used as new-note length when snap is Off so clicks
     /// do not produce a 1/32 sliver.
     @State private var lastGridSnapBeats: Double = 0.25
-    /// View-local selection (not persisted).
-    @State private var selectedNoteIDs: Set<UUID> = []
     /// View-local clipboard for Cmd-C / Cmd-X / Cmd-V (relative paste uses startBeat).
     @State private var noteClipboard: [ClipboardNote] = []
     @FocusState private var isFocused: Bool
+
+    /// Snap grid in beats (shared with quantize on the action bar).
+    private var snapBeats: Double { store.pianoRollSnapBeats }
+
+    private var snapBeatsBinding: Binding<Double> {
+        Binding(
+            get: { store.pianoRollSnapBeats },
+            set: { store.pianoRollSnapBeats = $0 }
+        )
+    }
 
     /// Drag-move bookkeeping (gesture-local). Origins for the whole selection.
     @State private var moveOrigin: MoveOrigin?
@@ -129,6 +137,21 @@ struct PianoRollEmbeddedView: View {
 
     private var notes: [Note] { clip?.midiNotes ?? [] }
 
+    /// Identity colour of the track that owns the open clip (notes match that track at a glance).
+    private var trackColorIndex: Int {
+        if let clipID, let loc = store.project.clipLocation(id: clipID) {
+            return store.project.tracks[loc.trackIndex].colorIndex
+        }
+        if let t = store.project.track(id: store.rollTrackID) {
+            return t.colorIndex
+        }
+        return 0
+    }
+
+    private var trackIdentity: TrackIdentityColor.Swatch {
+        TrackIdentityColor.swatch(for: trackColorIndex)
+    }
+
     private var beatsPerBar: Int {
         max(1, store.project.timeSignature.num)
     }
@@ -143,6 +166,10 @@ struct PianoRollEmbeddedView: View {
 
     /// Inclusive pitch rows drawn on the roll. Pure function of focus, pane height, and
     /// row height: no scroll offset, so expand / resize cannot go stale.
+    ///
+    /// Uses the measured pitch-pane height only (never a larger default while a shorter pane
+    /// is what was drawn). Until the first measure, falls back to the default pane so the
+    /// chrome has a stable label.
     private var pitchRange: ClosedRange<Int> {
         let h = pitchPaneHeight > 0 ? pitchPaneHeight : PianoRollLayout.defaultPitchPaneHeight
         return PianoRollLayout.visiblePitchRange(
@@ -164,6 +191,8 @@ struct PianoRollEmbeddedView: View {
                     .padding(.vertical, 4)
             }
             GeometryReader { geo in
+                // Measure first, then derive the range from that height so the label
+                // (via pitchPaneHeight) and the grid always share one row count (X3).
                 let paneH = geo.size.height
                 let range = PianoRollLayout.visiblePitchRange(
                     focusPitch: windowCenterPitch,
@@ -188,6 +217,11 @@ struct PianoRollEmbeddedView: View {
                 .onChange(of: geo.size.height) { _, newHeight in
                     pitchPaneHeight = newHeight
                 }
+                // Keep the measured height in sync when the reader reports a non-zero size
+                // on the first layout pass (onAppear can race a zero proposal).
+                .onChange(of: paneH) { _, newHeight in
+                    if newHeight > 0 { pitchPaneHeight = newHeight }
+                }
             }
         }
         .frame(width: (showsGutter ? BeatTimeline.gutterWidth : 0) + totalWidth,
@@ -203,13 +237,25 @@ struct PianoRollEmbeddedView: View {
                 .padding(-2)
                 .allowsHitTesting(false)
         )
+        .onChange(of: isFocused) { _, focused in
+            if focused { store.editSurface = .pianoRoll }
+        }
         .onChange(of: clipID) { _, _ in
-            selectedNoteIDs = []
+            store.selectedNoteIDs = []
             pitchNavOffset = 0
             gutterDragStartOffset = nil
             // Do not steal keyboard focus here: selecting a clip in the arrangement must
             // leave arrangement focus so Cmd-C/X/V still copy clips. The roll takes focus
             // when the user clicks/drags inside it (or on first appear of the pane).
+        }
+        // Drop selection entries that no longer exist (undo, delete).
+        .onChange(of: store.project.tracks) { _, _ in
+            guard let clipID, let loc = store.project.clipLocation(id: clipID) else {
+                store.selectedNoteIDs = []
+                return
+            }
+            let live = Set(store.project.tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes?.map(\.id) ?? [])
+            store.selectedNoteIDs = store.selectedNoteIDs.intersection(live)
         }
         .onDeleteCommand { deleteSelection() }
         .onKeyPress(.delete) {
@@ -287,7 +333,7 @@ struct PianoRollEmbeddedView: View {
     private var snapBar: some View {
         HStack(spacing: 10) {
             Text("Snap").font(.callout).foregroundStyle(.secondary)
-            Picker("Snap", selection: $snapBeats) {
+            Picker("Snap", selection: snapBeatsBinding) {
                 Text("Off").tag(0.0)
                 Text("1/4").tag(1.0)
                 Text("1/8").tag(0.5)
@@ -297,7 +343,7 @@ struct PianoRollEmbeddedView: View {
             .labelsHidden()
             .frame(width: 260)
             .help("Grid snap for note start and length. Off allows free placement.")
-            .onChange(of: snapBeats) { _, newValue in
+            .onChange(of: store.pianoRollSnapBeats) { _, newValue in
                 if newValue > 0 { lastGridSnapBeats = newValue }
             }
 
@@ -322,10 +368,10 @@ struct PianoRollEmbeddedView: View {
                 .help("Visible pitch range (drag the key gutter to shift)")
 
             Spacer()
-            if !selectedNoteIDs.isEmpty {
-                Text(selectedNoteIDs.count == 1
+            if !store.selectedNoteIDs.isEmpty {
+                Text(store.selectedNoteIDs.count == 1
                      ? "Delete removes selection"
-                     : "\(selectedNoteIDs.count) selected · Delete removes all")
+                     : "\(store.selectedNoteIDs.count) selected · Delete removes all")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
@@ -373,10 +419,10 @@ struct PianoRollEmbeddedView: View {
     @ViewBuilder
     private func clipSpanOverlay(totalHeight: CGFloat) -> some View {
         if let clip {
-            let x = BeatTimeline.x(forBeat: clip.startBeat)
-            let w = max(BeatTimeline.width(forBeats: clip.lengthBeats), 2)
+            let x = BeatTimeline.x(forBeat: clip.startBeat, zoom: zoom)
+            let w = max(BeatTimeline.width(forBeats: clip.lengthBeats, zoom: zoom), 2)
             Rectangle()
-                .fill(Color.accentColor.opacity(0.06))
+                .fill(trackIdentity.solid.opacity(0.08))
                 .frame(width: w, height: totalHeight)
                 .offset(x: x)
                 .allowsHitTesting(false)
@@ -394,21 +440,22 @@ struct PianoRollEmbeddedView: View {
         ZStack(alignment: .topLeading) {
             ForEach((pitchLow...pitchHigh).reversed(), id: \.self) { pitch in
                 let y = yForPitch(pitch, pitchHigh: pitchHigh, rowHeight: rowHeight)
+                let black = Self.isBlackKey(pitch)
                 Rectangle()
-                    .fill(Self.isBlackKey(pitch) ? Color.black.opacity(0.78) : Color.white)
+                    // Quiet reference strip (X3): soft surfaces, not pure white/black that
+                    // dominate the pane in dark mode or wash out in light mode.
+                    .fill(black ? Self.gutterBlackKey : Self.gutterWhiteKey)
                     .frame(width: BeatTimeline.gutterWidth, height: rowHeight)
                     .overlay(alignment: .bottom) {
                         Rectangle()
-                            .fill(Color.black.opacity(0.12))
+                            .fill(Color.primary.opacity(0.12))
                             .frame(height: 0.5)
                     }
                     .overlay(alignment: .trailing) {
                         if pitch % 12 == 0 {
                             Text(PianoRollLayout.pitchLabel(pitch))
                                 .font(.system(size: 9, weight: .medium, design: .monospaced))
-                                .foregroundStyle(Self.isBlackKey(pitch)
-                                                 ? Color.white.opacity(0.85)
-                                                 : Color.black.opacity(0.55))
+                                .foregroundStyle(Color.primary.opacity(black ? 0.75 : 0.45))
                                 .padding(.trailing, 4)
                         }
                     }
@@ -419,7 +466,7 @@ struct PianoRollEmbeddedView: View {
         .contentShape(Rectangle())
         .gesture(gutterPitchDragGesture(rowHeight: rowHeight))
         .overlay(alignment: .trailing) {
-            Rectangle().fill(Color.black.opacity(0.2)).frame(width: 1)
+            Rectangle().fill(Color.primary.opacity(0.18)).frame(width: 1)
         }
         .help("Drag up or down to shift the pitch window")
     }
@@ -450,29 +497,34 @@ struct PianoRollEmbeddedView: View {
         pitchLow: Int,
         pitchHigh: Int
     ) -> some View {
+        // Adaptive strokes/fills (Color.primary) so rows read in both light and dark (X3).
+        // Fixed Color.black.opacity(...) vanishes on a dark text background.
         Canvas { context, size in
+            // Base fill so the note grid is the readable surface, not a black void.
+            context.fill(Path(CGRect(origin: .zero, size: size)),
+                         with: .color(Self.gridBaseFill))
             for pitch in pitchLow...pitchHigh {
                 let y = yForPitch(pitch, pitchHigh: pitchHigh, rowHeight: rowHeight)
                 if Self.isBlackKey(pitch) {
                     let rect = CGRect(x: 0, y: y, width: size.width, height: rowHeight)
-                    context.fill(Path(rect), with: .color(Color.black.opacity(0.06)))
+                    context.fill(Path(rect), with: .color(Color.primary.opacity(0.07)))
                 }
                 var rowLine = Path()
                 rowLine.move(to: CGPoint(x: 0, y: y + rowHeight))
                 rowLine.addLine(to: CGPoint(x: size.width, y: y + rowHeight))
-                context.stroke(rowLine, with: .color(Color.black.opacity(0.06)), lineWidth: 0.5)
+                context.stroke(rowLine, with: .color(Color.primary.opacity(0.14)), lineWidth: 0.5)
             }
 
             let beatCount = Int(ceil(contentBeats))
             for b in 0...beatCount {
-                let x = CGFloat(b) * BeatTimeline.beatWidth
+                let x = CGFloat(b) * BeatTimeline.beatWidth(zoom: zoom)
                 let isBar = b % beatsPerBar == 0
                 var line = Path()
                 line.move(to: CGPoint(x: x, y: 0))
                 line.addLine(to: CGPoint(x: x, y: size.height))
                 context.stroke(
                     line,
-                    with: .color(Color.black.opacity(isBar ? 0.28 : 0.10)),
+                    with: .color(Color.primary.opacity(isBar ? 0.30 : 0.12)),
                     lineWidth: isBar ? 1.2 : 0.6
                 )
             }
@@ -564,7 +616,7 @@ struct PianoRollEmbeddedView: View {
             return
         }
         // Single click on empty grid: clear selection (does not add a note).
-        selectedNoteIDs = []
+        store.selectedNoteIDs = []
         lastEmptyClickTime = now
         lastEmptyClickPoint = location
     }
@@ -577,9 +629,9 @@ struct PianoRollEmbeddedView: View {
         guard let start = marqueeStart, let current = marqueeCurrent else { return }
         // Grid x is arrangement-absolute; selection helpers use clip-local starts.
         let localA = BeatTimeline.localBeat(
-            absolute: BeatTimeline.beat(atX: start.x), clipStart: clipStart)
+            absolute: BeatTimeline.beat(atX: start.x, zoom: zoom), clipStart: clipStart)
         let localB = BeatTimeline.localBeat(
-            absolute: BeatTimeline.beat(atX: current.x), clipStart: clipStart)
+            absolute: BeatTimeline.beat(atX: current.x, zoom: zoom), clipStart: clipStart)
         let pitchA = pitchAt(y: start.y, pitchLow: pitchLow, pitchHigh: pitchHigh,
                              rowHeight: rowHeight)
         let pitchB = pitchAt(y: current.y, pitchLow: pitchLow, pitchHigh: pitchHigh,
@@ -587,7 +639,7 @@ struct PianoRollEmbeddedView: View {
         let ids = PianoRollSelection.notesTouchingMarquee(
             notes: notes, beatA: localA, beatB: localB, pitchA: pitchA, pitchB: pitchB
         )
-        selectedNoteIDs = Set(ids)
+        store.selectedNoteIDs = Set(ids)
     }
 
     // MARK: - Notes
@@ -610,20 +662,21 @@ struct PianoRollEmbeddedView: View {
         // Arrangement-absolute x so beat N sits under arrangement beat N.
         let absStart = BeatTimeline.absoluteStart(
             clipStart: clipStart, noteLocalStart: note.startBeat)
-        let x = BeatTimeline.x(forBeat: absStart)
+        let x = BeatTimeline.x(forBeat: absStart, zoom: zoom)
         let y = yForPitch(note.pitch, pitchHigh: pitchHigh, rowHeight: rowHeight)
-        let w = max(BeatTimeline.width(forBeats: note.lengthBeats), 6)
+        let w = max(BeatTimeline.width(forBeats: note.lengthBeats, zoom: zoom), 6)
         let h = max(rowHeight - 2, 6)
-        let selected = selectedNoteIDs.contains(note.id)
+        let selected = store.selectedNoteIDs.contains(note.id)
         // Proportional, capped resize zone so short notes (default 1/16) keep a move body.
         let handleW = PianoRollLayout.resizeHandleWidth(noteWidth: w)
 
         ZStack(alignment: .trailing) {
+            // Note fill matches track identity; selection is a border (system accent), not identity.
             RoundedRectangle(cornerRadius: 3)
-                .fill(Color.accentColor.opacity(selected ? 1.0 : 0.85))
+                .fill(selected ? trackIdentity.solid.opacity(0.92) : trackIdentity.fill)
                 .overlay(
                     RoundedRectangle(cornerRadius: 3)
-                        .strokeBorder(selected ? Color.primary.opacity(0.55) : Color.accentColor,
+                        .strokeBorder(selected ? Color.accentColor : trackIdentity.solid.opacity(0.7),
                                       lineWidth: selected ? 1.5 : 0.5)
                 )
             // Right-edge resize handle (high priority so it wins over body move).
@@ -663,8 +716,8 @@ struct PianoRollEmbeddedView: View {
                     // If shift-deselect removed the note under the pointer, do not start a
                     // group move (toggle only). Otherwise move every currently selected note.
                     let moving: [Note]
-                    if selectedNoteIDs.contains(note.id) {
-                        moving = notes.filter { selectedNoteIDs.contains($0.id) }
+                    if store.selectedNoteIDs.contains(note.id) {
+                        moving = notes.filter { store.selectedNoteIDs.contains($0.id) }
                     } else {
                         moving = []
                     }
@@ -686,7 +739,7 @@ struct PianoRollEmbeddedView: View {
                 // Same pitch and time delta for every selected note (formation preserved).
                 // Snap the primary note’s start; apply that beat delta to the whole group.
                 let pitchDelta = Int((-value.translation.height / rowHeight).rounded())
-                let beatDeltaRaw = Double(value.translation.width / BeatTimeline.beatWidth)
+                let beatDeltaRaw = Double(value.translation.width / BeatTimeline.beatWidth(zoom: zoom))
                 guard let primary = origin.notes.first(where: { $0.id == origin.primaryID })
                         ?? origin.notes.first else { return }
                 let snappedPrimaryStart = PianoRollLayout.snap(
@@ -733,13 +786,13 @@ struct PianoRollEmbeddedView: View {
     private func applyNoteClickSelection(_ note: Note) {
         let shift = NSEvent.modifierFlags.contains(.shift)
         if shift {
-            if selectedNoteIDs.contains(note.id) {
-                selectedNoteIDs.remove(note.id)
+            if store.selectedNoteIDs.contains(note.id) {
+                store.selectedNoteIDs.remove(note.id)
             } else {
-                selectedNoteIDs.insert(note.id)
+                store.selectedNoteIDs.insert(note.id)
             }
-        } else if !selectedNoteIDs.contains(note.id) {
-            selectedNoteIDs = [note.id]
+        } else if !store.selectedNoteIDs.contains(note.id) {
+            store.selectedNoteIDs = [note.id]
         }
     }
 
@@ -749,8 +802,8 @@ struct PianoRollEmbeddedView: View {
                 isFocused = true
                 if resizeOrigin == nil {
                     resizeOrigin = ResizeOrigin(noteID: note.id, lengthBeats: note.lengthBeats)
-                    if !selectedNoteIDs.contains(note.id) {
-                        selectedNoteIDs = [note.id]
+                    if !store.selectedNoteIDs.contains(note.id) {
+                        store.selectedNoteIDs = [note.id]
                     }
                     store.pianoRollAuditionStart(note.pitch)
                     return
@@ -762,7 +815,7 @@ struct PianoRollEmbeddedView: View {
                     continuousGestureLive = true
                 }
                 guard let origin = resizeOrigin, origin.noteID == note.id else { return }
-                let deltaBeats = Double(value.translation.width / BeatTimeline.beatWidth)
+                let deltaBeats = Double(value.translation.width / BeatTimeline.beatWidth(zoom: zoom))
                 let raw = origin.lengthBeats + deltaBeats
                 let snapped = max(Project.minimumNoteLengthBeats,
                                   PianoRollLayout.snap(raw, to: snapBeats))
@@ -789,7 +842,7 @@ struct PianoRollEmbeddedView: View {
     ) {
         let pitch = pitchAt(y: location.y, pitchLow: pitchLow, pitchHigh: pitchHigh,
                             rowHeight: rowHeight)
-        let absBeat = BeatTimeline.beat(atX: location.x)
+        let absBeat = BeatTimeline.beat(atX: location.x, zoom: zoom)
         let localRaw = BeatTimeline.localBeat(absolute: absBeat, clipStart: clipStart)
         // Notes before the clip start cannot be stored (model uses clip-local ≥ 0).
         guard localRaw >= -0.000_1 else {
@@ -800,7 +853,7 @@ struct PianoRollEmbeddedView: View {
         let length = PianoRollLayout.newNoteLengthBeats(snapBeats: snapBeats,
                                                         lastGridBeats: lastGridSnapBeats)
         if let id = store.pianoRollAddNote(pitch: pitch, startBeat: start, lengthBeats: length) {
-            selectedNoteIDs = [id]
+            store.selectedNoteIDs = [id]
             store.pianoRollAuditionStart(pitch)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
                 store.pianoRollAuditionStop()
@@ -809,15 +862,15 @@ struct PianoRollEmbeddedView: View {
     }
 
     private func deleteSelection() {
-        guard !selectedNoteIDs.isEmpty else { return }
+        guard !store.selectedNoteIDs.isEmpty else { return }
         store.pianoRollAuditionStop()
-        let ids = Array(selectedNoteIDs)
+        let ids = Array(store.selectedNoteIDs)
         store.pianoRollDeleteNotes(ids: ids)
-        selectedNoteIDs = []
+        store.selectedNoteIDs = []
     }
 
     private func copySelection() {
-        let selected = notes.filter { selectedNoteIDs.contains($0.id) }
+        let selected = notes.filter { store.selectedNoteIDs.contains($0.id) }
         guard !selected.isEmpty else { return }
         noteClipboard = selected.map {
             ClipboardNote(pitch: $0.pitch, startBeat: $0.startBeat,
@@ -827,11 +880,11 @@ struct PianoRollEmbeddedView: View {
 
     private func cutSelection() {
         copySelection()
-        guard !selectedNoteIDs.isEmpty else { return }
+        guard !store.selectedNoteIDs.isEmpty else { return }
         store.pianoRollAuditionStop()
-        let ids = Array(selectedNoteIDs)
+        let ids = Array(store.selectedNoteIDs)
         store.pianoRollDeleteNotes(ids: ids, undoName: ids.count == 1 ? "Cut Note" : "Cut Notes")
-        selectedNoteIDs = []
+        store.selectedNoteIDs = []
     }
 
     private func pasteClipboard() {
@@ -854,7 +907,7 @@ struct PianoRollEmbeddedView: View {
         }
         let newIDs = store.pianoRollPasteNotes(specs)
         if !newIDs.isEmpty {
-            selectedNoteIDs = Set(newIDs)
+            store.selectedNoteIDs = Set(newIDs)
         }
     }
 
@@ -883,6 +936,38 @@ struct PianoRollEmbeddedView: View {
         case 1, 3, 6, 8, 10: return true
         default: return false
         }
+    }
+
+    // MARK: - Appearance-aware roll colours (light and dark)
+
+    /// Soft white-key surface for the gutter (not pure white, which blinds in dark mode).
+    private static var gutterWhiteKey: Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+                return NSColor(calibratedWhite: 0.30, alpha: 1)
+            }
+            return NSColor(calibratedWhite: 0.93, alpha: 1)
+        })
+    }
+
+    /// Soft black-key surface for the gutter (quiet reference strip, not the main event).
+    private static var gutterBlackKey: Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+                return NSColor(calibratedWhite: 0.14, alpha: 1)
+            }
+            return NSColor(calibratedWhite: 0.22, alpha: 1)
+        })
+    }
+
+    /// Note-grid base fill: readable in both appearances (slightly lifted off pure black/white).
+    private static var gridBaseFill: Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+                return NSColor(calibratedWhite: 0.11, alpha: 1)
+            }
+            return NSColor(calibratedWhite: 0.99, alpha: 1)
+        })
     }
 
     // MARK: - Gesture origin snapshots
@@ -930,6 +1015,64 @@ public enum PianoRollLayout {
         defaultPitchPaneHeight + snapToolbarHeight
     }
 
+    /// Whole pitch rows that fit in `paneHeight` at `rowHeight` (at least one).
+    ///
+    /// This is the count of rows the roll will draw, and must equal the span of
+    /// `visiblePitchRange` (and therefore of `rangeLabel`) for the same inputs (X3).
+    public static func drawnRowCount(paneHeight: CGFloat, rowHeight: CGFloat) -> Int {
+        let rh = max(rowHeight, 1)
+        return max(1, Int(floor(paneHeight / rh)))
+    }
+
+    /// Shrink preferred arrangement/roll band heights so the shared timeline stack fits the
+    /// workspace viewport. Without this, a tall default roll (plus the X2 action bar and other
+    /// chrome) is laid out full-size and then clipped by the workspace, so the range label
+    /// claims more rows than the user can see.
+    ///
+    /// When `rollExpanded` is false, all band budget goes to the arrangement.
+    /// When the budget is tight, both bands share it proportionally above their minima;
+    /// if even the minima cannot fit, the budget is split by the minima ratio so the stack
+    /// height never exceeds the viewport (honest range, no clipped half-rows).
+    public static func fitBandHeights(
+        availableHeight: CGFloat,
+        rulerHeight: CGFloat,
+        dividerHeight: CGFloat,
+        rollExpanded: Bool,
+        preferredArrangement: CGFloat,
+        preferredRoll: CGFloat,
+        minArrangement: CGFloat,
+        minRoll: CGFloat
+    ) -> (arrangement: CGFloat, roll: CGFloat) {
+        let arrPref = max(minArrangement, preferredArrangement)
+        if !rollExpanded {
+            let budget = max(0, availableHeight - rulerHeight)
+            return (min(arrPref, max(minArrangement, budget)), 0)
+        }
+        let rollPref = max(minRoll, preferredRoll)
+        let budget = max(0, availableHeight - rulerHeight - dividerHeight)
+        if arrPref + rollPref <= budget {
+            return (arrPref, rollPref)
+        }
+        let minSum = minArrangement + minRoll
+        if budget <= minSum {
+            guard budget > 0, minSum > 0 else {
+                return (max(0, budget), 0)
+            }
+            let arrShare = budget * (minArrangement / minSum)
+            return (arrShare, budget - arrShare)
+        }
+        // Keep minima; distribute remaining pixels by how far each preferred sits above min.
+        let extra = budget - minSum
+        let arrHeadroom = arrPref - minArrangement
+        let rollHeadroom = rollPref - minRoll
+        let headroom = arrHeadroom + rollHeadroom
+        if headroom <= 0 {
+            return (minArrangement, minRoll)
+        }
+        let arrExtra = extra * (arrHeadroom / headroom)
+        return (minArrangement + arrExtra, minRoll + (extra - arrExtra))
+    }
+
     /// Max pixel width of the right-edge resize handle on a note block.
     public static let resizeHandleMaxWidth: CGFloat = 10
     /// Fraction of note width used for resize when the note is shorter than the fixed max.
@@ -972,8 +1115,7 @@ public enum PianoRollLayout {
         paneHeight: CGFloat,
         rowHeight: CGFloat
     ) -> ClosedRange<Int> {
-        let rh = max(rowHeight, 1)
-        let rowCount = max(1, Int(floor(paneHeight / rh)))
+        let rowCount = drawnRowCount(paneHeight: paneHeight, rowHeight: rowHeight)
         let focus = min(127, max(0, focusPitch))
         // Prefer equal space above and below; when odd count, the extra row sits below.
         let below = (rowCount - 1) / 2

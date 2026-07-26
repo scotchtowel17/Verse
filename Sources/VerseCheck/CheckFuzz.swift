@@ -478,6 +478,7 @@ private func randomProject(rng: inout SeededRNG) -> Project {
             pan: rng.nextDouble(in: -1...1),
             mute: rng.nextBool(),
             solo: false,
+            colorIndex: rng.nextInt(in: 0...7),
             instrument: kind == .instrument ? .grandPiano : nil,
             clips: []
         )
@@ -1018,6 +1019,7 @@ private func projectFieldMismatches(_ a: Project, _ b: Project) -> [String] {
         if ta.pan != tb.pan { m.append("track[\(i)].pan") }
         if ta.mute != tb.mute { m.append("track[\(i)].mute") }
         if ta.solo != tb.solo { m.append("track[\(i)].solo") }
+        if ta.colorIndex != tb.colorIndex { m.append("track[\(i)].colorIndex") }
         if ta.instrument != tb.instrument { m.append("track[\(i)].instrument") }
         if ta.inserts != tb.inserts { m.append("track[\(i)].inserts") }
         if ta.clips.count != tb.clips.count {
