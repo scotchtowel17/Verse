@@ -11,13 +11,19 @@ extension AppStore {
 
     public func togglePlay() {
         // Copilot preview sheet does not disable menu/keyboard shortcuts on its own.
-        guard !copilotPreviewBlocksTransport else { return }
+        guard !copilotPreviewBlocksTransport else {
+            statusMessage = "Finish or cancel the Claude preview before playing."
+            return
+        }
         isPlaying ? pausePlayback() : startPlayback()
     }
 
     /// Start or resume playback from the held playhead position (`playheadBeat`).
     public func startPlayback() {
-        guard !copilotPreviewBlocksTransport else { return }
+        guard !copilotPreviewBlocksTransport else {
+            statusMessage = "Finish or cancel the Claude preview before playing."
+            return
+        }
         transport.metronomeEnabled = metronomeOn
         let end = arrangementBeats
         let loop: ClosedRange<Double>? = loopOn ? 0...max(4, end) : nil
@@ -103,7 +109,17 @@ extension AppStore {
     }
 
     public func deleteTrack(_ id: UUID) {
-        guard project.tracks.count > 1 else { return }
+        // Refuse emptying the project: the UI always shows a trash control, so this is a
+        // real user ask that must not fail silently.
+        guard project.tracks.count > 1 else {
+            statusMessage = "A project needs at least one track."
+            return
+        }
+        // Should be impossible: the track list only offers delete for live rows.
+        guard project.trackIndex(id: id) != nil else {
+            statusMessage = "That track isn’t in this project."
+            return
+        }
         history.record(project, name: "Delete Track")
         engine.removeTrack(id: id)
         project.tracks.removeAll { $0.id == id }
@@ -115,6 +131,8 @@ extension AppStore {
     }
 
     func selectTrack(_ id: UUID) {
+        // Active track is instrument-only (keyboard / MIDI audition). Selecting an audio
+        // track is a deliberate no-op, not a failure.
         if project.track(id: id)?.kind == .instrument { activeTrackID = id }
     }
 
@@ -128,6 +146,8 @@ extension AppStore {
     func toggleSolo(_ id: UUID) { mutate(id) { $0.solo.toggle() }; applyEffectiveMix() }
 
     private func mutate(_ id: UUID, _ f: (inout Track) -> Void) {
+        // Should be impossible: sliders only bind to tracks still in the list. Silent so
+        // continuous volume/pan gestures never spam status during a race with delete.
         if let i = project.trackIndex(id: id) { f(&project.tracks[i]) }
     }
 

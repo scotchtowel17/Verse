@@ -26,5 +26,6 @@ runHumToMIDIChecks(tk)
 runMIDIChecks(tk)
 runFuzzChecks(tk)
 runUndoRoundTripChecks(tk)
+runLayoutSelectionPropertyChecks(tk)
 
 tk.finish()

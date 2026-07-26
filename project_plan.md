@@ -1407,3 +1407,68 @@ undo group, and the preview renderer describes each new op in plain English from
 
 Every new op needs the standard five tests: happy path, bad reference, out-of-range, undo
 restores exactly, and a multi-op patch containing one invalid op applies nothing.
+
+## Step V4 — Silent no-op audit — DONE
+
+`AppStore` has roughly 54 `guard ... else { return }` sites. That exact pattern has already
+produced two real defects in this project: `PatchApplier.addNotes` returning success while doing
+nothing, and the applier silently skipping unresolvable references. Both were invisible until
+something else exposed them.
+
+Audit every early return in `AppStore` and its extensions and classify each one:
+
+- **Correct silent no-op.** Nothing was asked for, or the guard is a re-entrancy or
+  double-begin guard. Leave it, and add a brief comment saying why it is deliberate.
+- **Silent swallow.** The user asked for something, it did not happen, and nothing tells them.
+  Fix it: set `statusMessage` (or the relevant error) with a plain-language reason. The standard
+  is the one already used elsewhere in this app: never leave the UI implying something happened
+  when it did not.
+- **Should be impossible.** The guard is defending against a state that cannot occur. Say so in
+  a comment rather than leaving the reader guessing, and do not add user-facing noise.
+
+Do not add status messages for routine, high-frequency paths where a message would be noise
+(for example a mouse move with nothing under it). Judgement matters more than mechanical
+coverage here: the goal is that a user never asks for something and gets silence.
+
+Report a table of what was found in each category, and add tests for any swallow that is fixed.
+
+### V4 result
+
+Fixed swallows (now set `statusMessage`):
+- `deleteTrack` when only one track remains
+- `deleteTrack` when the track id is not in the project (also closed an empty-undo hole)
+- `selectPreset` when the track id is missing
+- `togglePlay` / `startPlayback` / `toggleRecording` / `startRecording` while Claude preview blocks transport
+- `commitMIDICapture` when notes were captured but the capture track is gone or no longer an instrument
+
+Tests: `AppStore V4:*` suites in `CheckAppStore.swift`.
+
+## Step V5 — Property-test the pure layout, selection and split functions — DONE
+
+Today's refactors left a large set of pure static functions in the view layer that are now
+directly testable, and several were written specifically to make behaviour assertable rather
+than observable only on screen. Property-test them with the existing seeded generator.
+
+1. **`visiblePitchRange`**: always contains the focus pitch; never leaves 0-127; its row count
+   matches what the pane height can show; shifts rather than shrinks when clamped at either end.
+2. **Split**: for any MIDI clip and any interior split point, total note count is preserved or
+   grows by exactly the number of notes crossing the point; **total note duration is exactly
+   preserved**; every rebased start beat is correct; the two halves' lengths sum to the original.
+3. **Group move (notes and clips)**: relative offsets are preserved exactly; the move is applied
+   entirely or not at all; no note leaves 0-127 and no clip starts before beat 0.
+4. **Marquee hit-testing**: a note or clip is selected if and only if its rectangle intersects
+   the marquee rectangle. Test with degenerate marquees (zero width, zero height, inverted drag
+   direction).
+5. **Beat-to-x mapping shared by the arrangement and roll**: round-trips within rounding
+   tolerance, and both views agree on the x for a given beat, which is what makes the two line
+   up on screen.
+
+Seeded and deterministic. Report any defect rather than silently fixing it.
+
+**Resolution (V5):** Harness in `Sources/VerseCheck/CheckLayoutSelectionProperty.swift`
+(`runLayoutSelectionPropertyChecks`), wired from `main.swift`. Seeds `0xA5150001`…
+`0xA5150005`. Suites: `visiblePitchRange` (200 trials), split (120 trials + control crossing
+case), note and clip group-move (150 each), note and clip marquee (150 each + explicit zero
+width / zero height / inverted drag / point), `BeatTimeline` beat↔x (200 trials + absolute/local
+invert). Full harness: **1719 assertions, 0 failures. No defects found.** No production code
+changes.

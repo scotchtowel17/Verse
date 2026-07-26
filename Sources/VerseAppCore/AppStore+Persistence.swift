@@ -9,6 +9,7 @@ extension AppStore {
     // MARK: Recovery
 
     func applyRecovery() {
+        // Nothing pending (already applied or dismissed): deliberate no-op.
         guard let info = pendingRecovery else { return }
         if let recovered = info.project {
             project = recovered
@@ -70,6 +71,7 @@ extension AppStore {
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
         panel.treatsFilePackagesAsDirectories = false
+        // User cancelled the open panel: nothing was asked to load.
         guard panel.runModal() == .OK, let url = panel.url else { return }
         openPackage(url)
     }
@@ -111,6 +113,7 @@ extension AppStore {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [Self.verseType]
         panel.nameFieldStringValue = "\(project.title).verse"
+        // User cancelled the save panel: nothing was asked to write.
         guard panel.runModal() == .OK, var url = panel.url else { return }
         if url.pathExtension != ProjectPackage.fileExtension {
             url.appendPathExtension(ProjectPackage.fileExtension)
