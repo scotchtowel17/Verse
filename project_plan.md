@@ -1065,3 +1065,51 @@ content is left-pinned via GeometryReader min frame (macOS ScrollView no longer 
 grids). Clip move/resize gesture bookkeeping moved to a reference-type `GestureSession` so
 mid-gesture writes do not re-render and cancel pure click; one click still opens the piano roll.
 Move/resize undo grouping unchanged.
+
+---
+
+# Phase S — Piano roll editing essentials (from real use)
+
+Owner feedback after actually playing with the roll. All three are standard DAW behaviour that
+the current roll lacks.
+
+## Step S1 — Transport inside the piano roll — DONE
+
+The roll is a modal sheet, so the transport bar is behind it and unreachable. You cannot hear
+what you are editing without closing the roll. Owner calls this a huge must.
+
+1. Put transport controls **in the piano roll**: play, pause, rewind to start. Keep the existing
+   loop toggle reachable too.
+2. **Pause is distinct from stop**: pause holds the current position so play resumes from there.
+   Rewind returns to beat 0. `Transport.play` already accepts a `from:` beat, so resuming is a
+   matter of tracking the position rather than new engine work.
+3. **Scrub**: clicking anywhere on the roll's beat ruler moves the playhead to that beat, and
+   dragging along the ruler scrubs continuously. Starting playback then begins from there.
+4. The playhead already draws in the roll; it must now also reflect a paused or scrubbed
+   position while stopped, not only while playing.
+5. Editing must keep working while the transport is running. Do not lock the grid during
+   playback.
+6. Undo must not record anything for transport actions. Moving the playhead is not an edit.
+
+## Step S2 — Selection, double-click to add, and copy/paste — DONE
+
+Three related changes to the roll's interaction model.
+
+1. **Double-click to add a note, not single click.** A single click on empty grid clears the
+   selection. A single click on a note selects it. This is the owner's explicit request and it
+   also frees single-drag on empty grid for item 2.
+2. **Marquee selection.** Dragging on empty grid draws a rubber-band rectangle and selects every
+   note it touches. Shift-click toggles a note in and out of the selection.
+3. **Move the whole selection together, preserving formation.** Dragging any selected note moves
+   all selected notes by the same pitch and time delta, so a chord shifted up a semitone keeps
+   its shape. The move is rejected as a whole if any note would leave 0-127 or go before beat 0;
+   never move part of a selection.
+4. **Copy and paste multiple notes.** Cmd-C copies the selection, Cmd-V pastes it. Paste at the
+   current playhead position, preserving the relative offsets within the copied group, and leave
+   the newly pasted notes selected so they can be dragged immediately. Cmd-X cuts.
+5. Delete removes the entire selection, not just one note.
+6. **Undo grouping, unchanged rule**: exactly one entry per completed gesture. A group move is
+   one "Move Notes" entry, a paste is one "Paste Notes", a marquee delete is one "Delete Notes".
+   Never per-note and never per drag update.
+
+Selection state is view-local; do not put it in the persisted model. No schema change.

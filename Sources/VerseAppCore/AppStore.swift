@@ -54,6 +54,9 @@ public final class AppStore {
 
     // Transport / multitrack state
     public var isPlaying = false
+    /// Arrangement beat under the playhead when stopped or paused. Play resumes from here.
+    /// Scrub and rewind write this; pause captures the live beat into it. Never recorded as undo.
+    public var playheadBeat: Double = 0
     var metronomeOn = false
     var loopOn = false
     var trackLevels: [UUID: Float] = [:]
@@ -168,7 +171,15 @@ public final class AppStore {
         engine.configure(with: project)
         do { try engine.start(); started = true }
         catch { engineError = "Couldn’t start audio: \(error.localizedDescription)" }
-        transport.onStop = { [weak self] in MainActor.assumeIsolated { self?.isPlaying = false } }
+        transport.onStop = { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                // finish() calls stop() before onStop, so currentBeat is already nil.
+                // stoppedAtBeat holds the playhead at auto-stop (pause, not rewind).
+                self.playheadBeat = max(0, self.transport.stoppedAtBeat)
+                self.isPlaying = false
+            }
+        }
         startTimers()
         observeTermination()
     }
@@ -264,11 +275,14 @@ public final class AppStore {
         return project.tracks[loc.trackIndex].id
     }
 
-    /// Arrangement beat under the playhead while transport is playing; `nil` when stopped.
-    /// Used by the piano roll to draw a playhead over the grid.
+    /// Arrangement beat under the playhead for drawing and resume.
+    /// While playing: live transport beat. While stopped or paused: held `playheadBeat`
+    /// (including scrubbed positions). Never `nil` once the store exists (starts at 0).
     public var playbackBeat: Double? {
-        guard isPlaying else { return nil }
-        return transport.currentBeat
+        if isPlaying {
+            return transport.currentBeat ?? playheadBeat
+        }
+        return playheadBeat
     }
 
     // MARK: Piano roll editing (one undo entry per completed gesture)
@@ -313,31 +327,81 @@ public final class AppStore {
 
     /// Discrete delete: one undo entry labeled "Delete Note", then autosave.
     public func pianoRollDeleteNote(id noteID: UUID) {
-        guard let clipID = pianoRollClipID else { return }
+        pianoRollDeleteNotes(ids: [noteID], undoName: "Delete Note")
+    }
+
+    /// Discrete multi-delete: one undo entry for the whole selection (never per note).
+    /// Default label is "Delete Note" for one id and "Delete Notes" for several.
+    public func pianoRollDeleteNotes(ids: [UUID], undoName: String? = nil) {
+        guard let clipID = pianoRollClipID, !ids.isEmpty else { return }
         var working = project
-        do {
-            try working.deleteNote(id: noteID, inClip: clipID)
-        } catch let err as MutationError {
-            statusMessage = err.description
-            return
-        } catch {
-            statusMessage = "Couldn’t delete that note."
-            return
+        var deleted = 0
+        for id in ids {
+            do {
+                try working.deleteNote(id: id, inClip: clipID)
+                deleted += 1
+            } catch {
+                // Missing notes are skipped; others still delete.
+            }
         }
-        history.record(project, name: "Delete Note")
+        guard deleted > 0 else { return }
+        let name = undoName ?? (deleted == 1 ? "Delete Note" : "Delete Notes")
+        history.record(project, name: name)
         project = working
         recovery.autosave(project)
+    }
+
+    /// Paste notes into the open clip. One undo entry labeled "Paste Notes". Returns new
+    /// note ids in the same order as `specs` so the view can leave them selected. Rejects
+    /// the whole paste (no partial apply) if any note is out of range.
+    @discardableResult
+    public func pianoRollPasteNotes(
+        _ specs: [(pitch: Int, startBeat: Double, lengthBeats: Double, velocity: Int)]
+    ) -> [UUID] {
+        guard let clipID = pianoRollClipID, !specs.isEmpty else { return [] }
+        var working = project
+        var ids: [UUID] = []
+        ids.reserveCapacity(specs.count)
+        do {
+            for s in specs {
+                let id = try working.addNote(toClip: clipID, pitch: s.pitch,
+                                             startBeat: s.startBeat, lengthBeats: s.lengthBeats,
+                                             velocity: s.velocity)
+                ids.append(id)
+            }
+        } catch let err as MutationError {
+            statusMessage = err.description
+            return []
+        } catch {
+            statusMessage = "Couldn’t paste those notes."
+            return []
+        }
+        history.record(project, name: "Paste Notes")
+        project = working
+        recovery.autosave(project)
+        return ids
     }
 
     /// Continuous move update. Caller must `beginPianoRollGesture(name: "Move Note")` first.
     /// Does not record undo and does not autosave (that is `endPianoRollGesture`).
     /// No-ops if no gesture is active so a missed begin cannot mutate without undo.
     public func pianoRollMoveNote(id noteID: UUID, toPitch pitch: Int, toStartBeat startBeat: Double) {
-        guard pianoRollGestureActive, let clipID = pianoRollClipID else { return }
+        pianoRollMoveNotes([(id: noteID, toPitch: pitch, toStartBeat: startBeat)])
+    }
+
+    /// Continuous multi-note move. All notes move or none do (formation preserved). Caller
+    /// must begin a piano-roll gesture first. One undo entry covers the whole gesture.
+    public func pianoRollMoveNotes(_ moves: [(id: UUID, toPitch: Int, toStartBeat: Double)]) {
+        guard pianoRollGestureActive, let clipID = pianoRollClipID, !moves.isEmpty else { return }
+        var working = project
         do {
-            try project.moveNote(id: noteID, inClip: clipID, toPitch: pitch, toStartBeat: startBeat)
+            for m in moves {
+                try working.moveNote(id: m.id, inClip: clipID,
+                                     toPitch: m.toPitch, toStartBeat: m.toStartBeat)
+            }
+            project = working
         } catch {
-            // Out-of-range mid-drag is expected when the pointer leaves the grid; ignore.
+            // Out-of-range mid-drag: reject the whole update so the selection never splits.
         }
     }
 

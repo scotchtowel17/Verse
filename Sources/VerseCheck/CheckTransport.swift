@@ -208,6 +208,41 @@ private func runTransportChecksOnMain(_ tk: TestKit) {
         }
         transport.stop()
         tk.expect(transport.currentBeat == nil, "currentBeat is nil after stop")
+        tk.expect(transport.stoppedAtBeat >= 0.2,
+                  "stoppedAtBeat captures last playhead for pause/resume (got \(transport.stoppedAtBeat))")
+        engine.stop()
+    }
+
+    tk.suite("Transport S1: play(from:) starts currentBeat at the given beat") {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("verse-tr-from-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let midiID = UUID()
+        var project = Project(title: "from-beat", tempoBPM: 120)
+        project.tracks = [
+            Track(id: midiID, kind: .instrument, name: "Keys", instrument: .grandPiano, clips: [
+                Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 16,
+                     midiNotes: [Note(startBeat: 0, lengthBeats: 8, pitch: 60, velocity: 90)])
+            ])
+        ]
+        let engine = VerseAudioEngine()
+        engine.configure(with: project)
+        try engine.start()
+        let transport = Transport(engine: engine)
+
+        transport.play(project: project, mediaDir: dir, from: 3.0)
+        tk.expectEqual(transport.state, .playing, "playing from beat 3")
+        if let early = transport.currentBeat {
+            tk.expect(early >= 2.95 && early < 3.5,
+                      "currentBeat starts near from: 3 (got \(early))")
+        } else {
+            tk.expect(false, "currentBeat non-nil while playing from 3")
+        }
+        transport.stop()
+        tk.expect(transport.stoppedAtBeat >= 2.95,
+                  "stoppedAtBeat near resume point (got \(transport.stoppedAtBeat))")
         engine.stop()
     }
 

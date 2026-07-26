@@ -3,8 +3,8 @@ import SwiftUI
 import VerseModel
 
 /// Piano-roll editor for a MIDI clip: pitch × time grid, piano-key gutter, note blocks,
-/// snap control, and standard DAW editing (add / move / resize / delete) with one undo
-/// entry per completed gesture.
+/// snap control, and standard DAW editing (add / move / resize / delete / copy-paste)
+/// with multi-note selection and one undo entry per completed gesture.
 struct PianoRollView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -14,20 +14,32 @@ struct PianoRollView: View {
     /// Last non-zero grid choice; used as new-note length when snap is Off so clicks
     /// do not produce a 1/32 sliver.
     @State private var lastGridSnapBeats: Double = 0.25
-    @State private var selectedNoteID: UUID?
+    /// View-local selection (not persisted).
+    @State private var selectedNoteIDs: Set<UUID> = []
+    /// View-local clipboard for Cmd-C / Cmd-X / Cmd-V (relative paste uses startBeat).
+    @State private var noteClipboard: [ClipboardNote] = []
     @FocusState private var isFocused: Bool
 
-    /// Drag-move bookkeeping (gesture-local).
+    /// Drag-move bookkeeping (gesture-local). Origins for the whole selection.
     @State private var moveOrigin: MoveOrigin?
     /// Drag-resize bookkeeping.
     @State private var resizeOrigin: ResizeOrigin?
     /// True while a continuous move/resize gesture is live (guards double-begin).
     @State private var continuousGestureLive = false
+    /// Marquee rubber-band on empty grid (view-local).
+    @State private var marqueeStart: CGPoint?
+    @State private var marqueeCurrent: CGPoint?
+    @State private var marqueeLive = false
+    /// Double-click detection on empty grid (add note).
+    @State private var lastEmptyClickTime: Date?
+    @State private var lastEmptyClickPoint: CGPoint?
 
     private static let rowHeight: CGFloat = 18
     private static let beatWidth: CGFloat = 56
     private static let gutterWidth: CGFloat = 48
+    private static let rulerHeight: CGFloat = 22
     private static let clickSlop: CGFloat = 4
+    private static let doubleClickSeconds: TimeInterval = 0.4
 
     private var clipID: UUID? { store.pianoRollClipID }
 
@@ -101,6 +113,21 @@ struct PianoRollView: View {
             deleteSelection()
             return .handled
         }
+        .onKeyPress(keys: [KeyEquivalent("c")], phases: .down) { press in
+            guard press.modifiers.contains(.command) else { return .ignored }
+            copySelection()
+            return .handled
+        }
+        .onKeyPress(keys: [KeyEquivalent("x")], phases: .down) { press in
+            guard press.modifiers.contains(.command) else { return .ignored }
+            cutSelection()
+            return .handled
+        }
+        .onKeyPress(keys: [KeyEquivalent("v")], phases: .down) { press in
+            guard press.modifiers.contains(.command) else { return .ignored }
+            pasteClipboard()
+            return .handled
+        }
         .onDisappear {
             store.pianoRollAuditionStop()
             if continuousGestureLive {
@@ -124,12 +151,47 @@ struct PianoRollView: View {
                 }
             }
             Spacer()
+            rollTransport
+            Spacer().frame(width: 12)
             Button("Done") {
                 store.pianoRollAuditionStop()
                 dismiss()
             }
             .keyboardShortcut(.cancelAction)
         }
+    }
+
+    /// Play / pause / rewind / loop inside the sheet so the main transport bar is not needed.
+    private var rollTransport: some View {
+        HStack(spacing: 8) {
+            Button {
+                store.rewindToStart()
+            } label: {
+                Image(systemName: "backward.end.fill")
+            }
+            .help("Rewind to start")
+            .disabled(store.copilotPreviewBlocksTransport)
+
+            Button {
+                if store.isPlaying {
+                    store.pausePlayback()
+                } else {
+                    store.startPlayback()
+                }
+            } label: {
+                Image(systemName: store.isPlaying ? "pause.fill" : "play.fill")
+            }
+            .help(store.isPlaying ? "Pause (hold position)" : "Play from playhead")
+            .disabled(store.copilotPreviewBlocksTransport)
+
+            Toggle(isOn: Binding(get: { store.loopOn }, set: { store.loopOn = $0 })) {
+                Image(systemName: "repeat")
+            }
+            .toggleStyle(.button)
+            .help("Loop")
+            .disabled(store.copilotPreviewBlocksTransport)
+        }
+        .buttonStyle(.borderless)
     }
 
     private var snapBar: some View {
@@ -150,8 +212,10 @@ struct PianoRollView: View {
                 if newValue > 0 { lastGridSnapBeats = newValue }
             }
             Spacer()
-            if selectedNoteID != nil {
-                Text("Delete removes selection")
+            if !selectedNoteIDs.isEmpty {
+                Text(selectedNoteIDs.count == 1
+                     ? "Delete removes selection"
+                     : "\(selectedNoteIDs.count) selected · Delete removes all")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
@@ -164,24 +228,37 @@ struct PianoRollView: View {
     private var rollScroll: some View {
         let rowH = Self.rowHeight
         let beatW = Self.beatWidth
-        let totalHeight = CGFloat(pitchCount) * rowH
+        let gridHeight = CGFloat(pitchCount) * rowH
         let totalWidth = CGFloat(contentBeats) * beatW
+        // Ruler + grid share the playhead height so the line spans both.
+        let totalHeight = Self.rulerHeight + gridHeight
 
         return ScrollView([.horizontal, .vertical]) {
             HStack(alignment: .top, spacing: 0) {
-                pianoGutter(rowHeight: rowH, totalHeight: totalHeight)
+                // Gutter under a blank ruler corner so keys stay aligned with pitch rows.
+                VStack(alignment: .leading, spacing: 0) {
+                    Color.clear.frame(width: Self.gutterWidth, height: Self.rulerHeight)
+                    pianoGutter(rowHeight: rowH, totalHeight: gridHeight)
+                }
                 ZStack(alignment: .topLeading) {
-                    gridLayer(beatWidth: beatW, rowHeight: rowH,
-                              totalWidth: totalWidth, totalHeight: totalHeight)
-                    // Empty-grid click target (under notes so note gestures win).
-                    emptyGridHitTarget(beatWidth: beatW, rowHeight: rowH,
-                                       totalWidth: totalWidth, totalHeight: totalHeight)
-                    notesLayer(beatWidth: beatW, rowHeight: rowH)
-                    // Playhead over the grid during playback (cheap: one vertical line).
+                    VStack(alignment: .leading, spacing: 0) {
+                        beatRuler(beatWidth: beatW, totalWidth: totalWidth)
+                        ZStack(alignment: .topLeading) {
+                            gridLayer(beatWidth: beatW, rowHeight: rowH,
+                                      totalWidth: totalWidth, totalHeight: gridHeight)
+                            // Empty-grid: double-click adds, drag marquees, click clears.
+                            emptyGridHitTarget(beatWidth: beatW, rowHeight: rowH,
+                                               totalWidth: totalWidth, totalHeight: gridHeight)
+                            notesLayer(beatWidth: beatW, rowHeight: rowH)
+                            marqueeOverlay()
+                        }
+                        .frame(width: totalWidth, height: gridHeight, alignment: .topLeading)
+                        .coordinateSpace(name: "pianoRollGrid")
+                    }
+                    // Playhead over ruler + grid (playing, paused, or scrubbed).
                     playheadLayer(beatWidth: beatW, totalHeight: totalHeight)
                 }
                 .frame(width: totalWidth, height: totalHeight, alignment: .topLeading)
-                .coordinateSpace(name: "pianoRollGrid")
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
@@ -189,12 +266,68 @@ struct PianoRollView: View {
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.black.opacity(0.12)))
     }
 
-    /// Vertical playhead at the transport’s current arrangement beat, mapped into clip-local time.
+    // MARK: - Beat ruler (scrub)
+
+    /// Click or drag the ruler to move the playhead. Position is arrangement-absolute
+    /// (clip start + local beat). Does not record undo.
+    private func beatRuler(beatWidth: CGFloat, totalWidth: CGFloat) -> some View {
+        Canvas { context, size in
+            let beatCount = Int(ceil(contentBeats))
+            for b in 0...beatCount {
+                let x = CGFloat(b) * beatWidth
+                let isBar = b % beatsPerBar == 0
+                if isBar {
+                    var line = Path()
+                    line.move(to: CGPoint(x: x, y: size.height * 0.25))
+                    line.addLine(to: CGPoint(x: x, y: size.height))
+                    context.stroke(line, with: .color(Color.black.opacity(0.35)), lineWidth: 1)
+                    let barNumber = (b / beatsPerBar) + 1
+                    context.draw(
+                        Text("\(barNumber)")
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .foregroundColor(Color.secondary),
+                        at: CGPoint(x: x + 3, y: 2),
+                        anchor: .topLeading
+                    )
+                } else {
+                    var line = Path()
+                    line.move(to: CGPoint(x: x, y: size.height * 0.55))
+                    line.addLine(to: CGPoint(x: x, y: size.height))
+                    context.stroke(line, with: .color(Color.black.opacity(0.12)), lineWidth: 0.5)
+                }
+            }
+        }
+        .frame(width: totalWidth, height: Self.rulerHeight)
+        .background(Color.black.opacity(0.04))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.black.opacity(0.15)).frame(height: 0.5)
+        }
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    scrub(atX: value.location.x, beatWidth: beatWidth)
+                }
+                .onEnded { value in
+                    scrub(atX: value.location.x, beatWidth: beatWidth)
+                }
+        )
+        .help("Click or drag to move the playhead")
+    }
+
+    private func scrub(atX x: CGFloat, beatWidth: CGFloat) {
+        guard let clip else { return }
+        let local = max(0, min(contentBeats, Double(x / beatWidth)))
+        let arrangement = clip.startBeat + local
+        store.scrubPlayhead(to: arrangement)
+    }
+
+    /// Vertical playhead at the transport’s arrangement beat, mapped into clip-local time.
+    /// Drawn while playing, paused, or after a scrub (not only during playback).
     @ViewBuilder
     private func playheadLayer(beatWidth: CGFloat, totalHeight: CGFloat) -> some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !store.isPlaying)) { _ in
-            if store.isPlaying,
-               let beat = store.playbackBeat,
+            if let beat = store.playbackBeat,
                let clip {
                 let local = beat - clip.startBeat
                 if local >= 0 && local <= contentBeats {
@@ -278,7 +411,8 @@ struct PianoRollView: View {
         .allowsHitTesting(false)
     }
 
-    /// Click empty grid to add a note at that pitch / snapped beat.
+    /// Empty grid: pure click clears selection; double-click adds a note; drag draws a
+    /// marquee and selects every note it touches.
     private func emptyGridHitTarget(beatWidth: CGFloat, rowHeight: CGFloat,
                                     totalWidth: CGFloat, totalHeight: CGFloat) -> some View {
         Color.clear
@@ -286,12 +420,84 @@ struct PianoRollView: View {
             .frame(width: totalWidth, height: totalHeight)
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .named("pianoRollGrid"))
+                    .onChanged { value in
+                        if marqueeStart == nil {
+                            marqueeStart = value.startLocation
+                            marqueeCurrent = value.location
+                        } else {
+                            marqueeCurrent = value.location
+                        }
+                        let moved = hypot(value.translation.width, value.translation.height)
+                        if moved >= Self.clickSlop {
+                            marqueeLive = true
+                        }
+                    }
                     .onEnded { value in
+                        defer {
+                            marqueeStart = nil
+                            marqueeCurrent = nil
+                            marqueeLive = false
+                        }
+                        if marqueeLive {
+                            applyMarqueeSelection(beatWidth: beatWidth, rowHeight: rowHeight)
+                            lastEmptyClickTime = nil
+                            lastEmptyClickPoint = nil
+                            return
+                        }
                         let moved = hypot(value.translation.width, value.translation.height)
                         guard moved < Self.clickSlop else { return }
-                        addNote(at: value.location, beatWidth: beatWidth, rowHeight: rowHeight)
+                        handleEmptyGridClick(at: value.location,
+                                             beatWidth: beatWidth, rowHeight: rowHeight)
                     }
             )
+    }
+
+    @ViewBuilder
+    private func marqueeOverlay() -> some View {
+        if marqueeLive, let start = marqueeStart, let current = marqueeCurrent {
+            let rect = CGRect(
+                x: min(start.x, current.x),
+                y: min(start.y, current.y),
+                width: abs(current.x - start.x),
+                height: abs(current.y - start.y)
+            )
+            Rectangle()
+                .fill(Color.accentColor.opacity(0.12))
+                .overlay(Rectangle().strokeBorder(Color.accentColor.opacity(0.7), lineWidth: 1))
+                .frame(width: rect.width, height: rect.height)
+                .offset(x: rect.minX, y: rect.minY)
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func handleEmptyGridClick(at location: CGPoint,
+                                      beatWidth: CGFloat, rowHeight: CGFloat) {
+        let now = Date()
+        if let lastTime = lastEmptyClickTime,
+           let lastPoint = lastEmptyClickPoint,
+           now.timeIntervalSince(lastTime) <= Self.doubleClickSeconds,
+           hypot(location.x - lastPoint.x, location.y - lastPoint.y) < Self.clickSlop * 2 {
+            addNote(at: location, beatWidth: beatWidth, rowHeight: rowHeight)
+            lastEmptyClickTime = nil
+            lastEmptyClickPoint = nil
+            return
+        }
+        // Single click on empty grid: clear selection (does not add a note).
+        selectedNoteIDs = []
+        lastEmptyClickTime = now
+        lastEmptyClickPoint = location
+    }
+
+    private func applyMarqueeSelection(beatWidth: CGFloat, rowHeight: CGFloat) {
+        guard let start = marqueeStart, let current = marqueeCurrent else { return }
+        let beatA = Double(start.x / beatWidth)
+        let beatB = Double(current.x / beatWidth)
+        let pitchA = pitchAt(y: start.y, rowHeight: rowHeight)
+        let pitchB = pitchAt(y: current.y, rowHeight: rowHeight)
+        let ids = PianoRollSelection.notesTouchingMarquee(
+            notes: notes, beatA: beatA, beatB: beatB, pitchA: pitchA, pitchB: pitchB
+        )
+        selectedNoteIDs = Set(ids)
     }
 
     // MARK: - Notes
@@ -310,7 +516,7 @@ struct PianoRollView: View {
         let y = yForPitch(note.pitch, rowHeight: rowHeight)
         let w = max(CGFloat(note.lengthBeats) * beatWidth, 6)
         let h = max(rowHeight - 2, 6)
-        let selected = note.id == selectedNoteID
+        let selected = selectedNoteIDs.contains(note.id)
         // Proportional, capped resize zone so short notes (default 1/16) keep a move body.
         let handleW = PianoRollLayout.resizeHandleWidth(noteWidth: w)
 
@@ -352,30 +558,59 @@ struct PianoRollView: View {
             .onChanged { value in
                 let moved = hypot(value.translation.width, value.translation.height)
                 if moveOrigin == nil {
-                    // First update: bookkeep origin. Only begin undo once motion exceeds slop
-                    // so a pure click does not leave a no-op “Move Note” on the stack.
-                    moveOrigin = MoveOrigin(noteID: note.id,
-                                            pitch: note.pitch,
-                                            startBeat: note.startBeat)
-                    selectedNoteID = note.id
+                    // First update: update selection, snapshot the group that will move.
+                    // Only begin undo once motion exceeds slop so a pure click does not
+                    // leave a no-op move on the stack.
+                    applyNoteClickSelection(note)
+                    // If shift-deselect removed the note under the pointer, do not start a
+                    // group move (toggle only). Otherwise move every currently selected note.
+                    let moving: [Note]
+                    if selectedNoteIDs.contains(note.id) {
+                        moving = notes.filter { selectedNoteIDs.contains($0.id) }
+                    } else {
+                        moving = []
+                    }
+                    let origins = moving.map {
+                        (id: $0.id, pitch: $0.pitch, startBeat: $0.startBeat)
+                    }
+                    moveOrigin = MoveOrigin(notes: origins, primaryID: note.id)
                     store.pianoRollAuditionStart(note.pitch)
                     return
                 }
                 guard moved >= Self.clickSlop else { return }
+                guard let origin = moveOrigin, origin.primaryID == note.id,
+                      !origin.notes.isEmpty else { return }
                 if !continuousGestureLive {
-                    store.beginPianoRollGesture(name: "Move Note")
+                    let name = origin.notes.count > 1 ? "Move Notes" : "Move Note"
+                    store.beginPianoRollGesture(name: name)
                     continuousGestureLive = true
                 }
-                guard let origin = moveOrigin, origin.noteID == note.id else { return }
+                // Same pitch and time delta for every selected note (formation preserved).
+                // Snap the primary note’s start; apply that beat delta to the whole group.
                 let pitchDelta = Int((-value.translation.height / rowHeight).rounded())
-                let beatDelta = Double(value.translation.width / beatWidth)
-                let rawPitch = origin.pitch + pitchDelta
-                let rawStart = origin.startBeat + beatDelta
-                let newPitch = min(127, max(0, rawPitch))
-                let newStart = max(0, PianoRollLayout.snap(rawStart, to: snapBeats))
-                store.pianoRollMoveNote(id: note.id, toPitch: newPitch, toStartBeat: newStart)
-                // Keep audition on the live pitch while dragging.
-                store.pianoRollAuditionStart(newPitch)
+                let beatDeltaRaw = Double(value.translation.width / beatWidth)
+                guard let primary = origin.notes.first(where: { $0.id == origin.primaryID })
+                        ?? origin.notes.first else { return }
+                let snappedPrimaryStart = PianoRollLayout.snap(
+                    primary.startBeat + beatDeltaRaw, to: snapBeats)
+                let beatDelta = snappedPrimaryStart - primary.startBeat
+                guard let proposed = PianoRollSelection.applyGroupDelta(
+                    origins: origin.notes.map { (pitch: $0.pitch, startBeat: $0.startBeat) },
+                    pitchDelta: pitchDelta,
+                    beatDelta: beatDelta
+                ) else {
+                    // Any note would leave 0–127 or go before beat 0: reject as a whole.
+                    return
+                }
+                let moves = zip(origin.notes, proposed).map {
+                    (id: $0.0.id, toPitch: $0.1.pitch, toStartBeat: $0.1.startBeat)
+                }
+                store.pianoRollMoveNotes(moves)
+                if let idx = origin.notes.firstIndex(where: { $0.id == origin.primaryID }) {
+                    store.pianoRollAuditionStart(proposed[idx].pitch)
+                } else if let first = proposed.first {
+                    store.pianoRollAuditionStart(first.pitch)
+                }
             }
             .onEnded { value in
                 let moved = hypot(value.translation.width, value.translation.height)
@@ -395,12 +630,29 @@ struct PianoRollView: View {
             }
     }
 
+    /// Click a note: select it. Shift-click toggles membership. Clicking an already-selected
+    /// note without shift keeps the whole selection (so a drag can move the group).
+    private func applyNoteClickSelection(_ note: Note) {
+        let shift = NSEvent.modifierFlags.contains(.shift)
+        if shift {
+            if selectedNoteIDs.contains(note.id) {
+                selectedNoteIDs.remove(note.id)
+            } else {
+                selectedNoteIDs.insert(note.id)
+            }
+        } else if !selectedNoteIDs.contains(note.id) {
+            selectedNoteIDs = [note.id]
+        }
+    }
+
     private func resizeGesture(for note: Note, beatWidth: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .named("pianoRollGrid"))
             .onChanged { value in
                 if resizeOrigin == nil {
                     resizeOrigin = ResizeOrigin(noteID: note.id, lengthBeats: note.lengthBeats)
-                    selectedNoteID = note.id
+                    if !selectedNoteIDs.contains(note.id) {
+                        selectedNoteIDs = [note.id]
+                    }
                     store.pianoRollAuditionStart(note.pitch)
                     return
                 }
@@ -436,7 +688,7 @@ struct PianoRollView: View {
         let length = PianoRollLayout.newNoteLengthBeats(snapBeats: snapBeats,
                                                         lastGridBeats: lastGridSnapBeats)
         if let id = store.pianoRollAddNote(pitch: pitch, startBeat: start, lengthBeats: length) {
-            selectedNoteID = id
+            selectedNoteIDs = [id]
             store.pianoRollAuditionStart(pitch)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
                 store.pianoRollAuditionStop()
@@ -445,10 +697,53 @@ struct PianoRollView: View {
     }
 
     private func deleteSelection() {
-        guard let id = selectedNoteID else { return }
+        guard !selectedNoteIDs.isEmpty else { return }
         store.pianoRollAuditionStop()
-        store.pianoRollDeleteNote(id: id)
-        selectedNoteID = nil
+        let ids = Array(selectedNoteIDs)
+        store.pianoRollDeleteNotes(ids: ids)
+        selectedNoteIDs = []
+    }
+
+    private func copySelection() {
+        let selected = notes.filter { selectedNoteIDs.contains($0.id) }
+        guard !selected.isEmpty else { return }
+        noteClipboard = selected.map {
+            ClipboardNote(pitch: $0.pitch, startBeat: $0.startBeat,
+                          lengthBeats: $0.lengthBeats, velocity: $0.velocity)
+        }
+    }
+
+    private func cutSelection() {
+        copySelection()
+        guard !selectedNoteIDs.isEmpty else { return }
+        store.pianoRollAuditionStop()
+        let ids = Array(selectedNoteIDs)
+        store.pianoRollDeleteNotes(ids: ids, undoName: ids.count == 1 ? "Cut Note" : "Cut Notes")
+        selectedNoteIDs = []
+    }
+
+    private func pasteClipboard() {
+        guard !noteClipboard.isEmpty, let clip else { return }
+        let absBeat = store.playbackBeat ?? 0
+        let playheadLocal = max(0, absBeat - clip.startBeat)
+        let starts = PianoRollSelection.pasteStartBeats(
+            clipboardStarts: noteClipboard.map(\.startBeat),
+            playheadLocalBeat: playheadLocal
+        )
+        guard starts.count == noteClipboard.count else { return }
+        // Reject whole paste if any start would go negative (formation would break).
+        guard starts.allSatisfy({ $0 >= 0 }) else {
+            store.statusMessage = "Those notes can’t paste before beat 0."
+            return
+        }
+        let specs = zip(noteClipboard, starts).map {
+            (pitch: $0.0.pitch, startBeat: $0.1,
+             lengthBeats: $0.0.lengthBeats, velocity: $0.0.velocity)
+        }
+        let newIDs = store.pianoRollPasteNotes(specs)
+        if !newIDs.isEmpty {
+            selectedNoteIDs = Set(newIDs)
+        }
     }
 
     // MARK: - Coordinate helpers
@@ -487,14 +782,21 @@ struct PianoRollView: View {
     // MARK: - Gesture origin snapshots
 
     private struct MoveOrigin {
-        let noteID: UUID
-        let pitch: Int
-        let startBeat: Double
+        /// Selection snapshot at drag start (id, pitch, startBeat).
+        let notes: [(id: UUID, pitch: Int, startBeat: Double)]
+        let primaryID: UUID
     }
 
     private struct ResizeOrigin {
         let noteID: UUID
         let lengthBeats: Double
+    }
+
+    private struct ClipboardNote: Equatable {
+        var pitch: Int
+        var startBeat: Double
+        var lengthBeats: Double
+        var velocity: Int
     }
 }
 
@@ -570,5 +872,71 @@ public enum PianoRollLayout {
         }
         if low > high { return 48...84 }
         return low...high
+    }
+}
+
+// MARK: - Selection helpers (Phase S2, testable)
+
+/// Pure multi-note selection helpers for the piano roll. Free of SwiftUI so VerseCheck can
+/// lock marquee hit-testing, group-move rejection, and paste offsets without rendering.
+public enum PianoRollSelection {
+    /// Whether a note’s pitch × time rectangle intersects the marquee. Pitch bounds are
+    /// inclusive (one row per MIDI pitch). Time ranges touch if they overlap at all.
+    public static func noteTouchesMarquee(
+        note: Note,
+        beatA: Double, beatB: Double,
+        pitchA: Int, pitchB: Int
+    ) -> Bool {
+        let beatLo = min(beatA, beatB)
+        let beatHi = max(beatA, beatB)
+        let pitchLo = min(pitchA, pitchB)
+        let pitchHi = max(pitchA, pitchB)
+        let noteBeatLo = note.startBeat
+        let noteBeatHi = note.startBeat + note.lengthBeats
+        let timeOverlap = noteBeatLo < beatHi && noteBeatHi > beatLo
+        let pitchOverlap = note.pitch >= pitchLo && note.pitch <= pitchHi
+        return timeOverlap && pitchOverlap
+    }
+
+    /// IDs of notes whose blocks touch the marquee rectangle in beat/pitch space.
+    public static func notesTouchingMarquee(
+        notes: [Note],
+        beatA: Double, beatB: Double,
+        pitchA: Int, pitchB: Int
+    ) -> [UUID] {
+        notes.filter {
+            noteTouchesMarquee(note: $0, beatA: beatA, beatB: beatB, pitchA: pitchA, pitchB: pitchB)
+        }.map(\.id)
+    }
+
+    /// Paste starts: the earliest clipboard note maps to `playheadLocalBeat`; others keep
+    /// their relative offsets. Starts are never forced below 0 (caller should pass a
+    /// non-negative playhead; offsets that would go negative are still returned so the
+    /// paste API can reject with a readable message).
+    public static func pasteStartBeats(
+        clipboardStarts: [Double],
+        playheadLocalBeat: Double
+    ) -> [Double] {
+        guard let anchor = clipboardStarts.min() else { return [] }
+        return clipboardStarts.map { playheadLocalBeat + ($0 - anchor) }
+    }
+
+    /// Apply one pitch delta and one beat delta to every origin. Returns `nil` if any
+    /// result would leave MIDI 0–127 or start before beat 0 (whole selection rejected).
+    /// Formation (relative pitch and time) is preserved when the result is non-nil.
+    public static func applyGroupDelta(
+        origins: [(pitch: Int, startBeat: Double)],
+        pitchDelta: Int,
+        beatDelta: Double
+    ) -> [(pitch: Int, startBeat: Double)]? {
+        var result: [(pitch: Int, startBeat: Double)] = []
+        result.reserveCapacity(origins.count)
+        for o in origins {
+            let pitch = o.pitch + pitchDelta
+            let start = o.startBeat + beatDelta
+            guard (0...127).contains(pitch), start >= 0 else { return nil }
+            result.append((pitch: pitch, startBeat: start))
+        }
+        return result
     }
 }

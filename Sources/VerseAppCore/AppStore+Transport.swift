@@ -5,29 +5,67 @@ import VerseEngine
 // MARK: - Transport, tracks, mix, effects
 
 extension AppStore {
-    // MARK: Transport (M4)
+    // MARK: Transport (M4 / S1)
+
+    // Transport actions never record undo: moving the playhead is not an edit.
 
     public func togglePlay() {
         // Copilot preview sheet does not disable menu/keyboard shortcuts on its own.
         guard !copilotPreviewBlocksTransport else { return }
-        isPlaying ? stopPlayback() : startPlayback()
+        isPlaying ? pausePlayback() : startPlayback()
     }
 
+    /// Start or resume playback from the held playhead position (`playheadBeat`).
     public func startPlayback() {
         guard !copilotPreviewBlocksTransport else { return }
         transport.metronomeEnabled = metronomeOn
         let end = arrangementBeats
         let loop: ClosedRange<Double>? = loopOn ? 0...max(4, end) : nil
-        transport.play(project: project, mediaDir: workingMediaDir, from: 0, loop: loop)
+        let from = max(0, playheadBeat)
+        transport.play(project: project, mediaDir: workingMediaDir, from: from, loop: loop)
         isPlaying = true
     }
 
-    public func stopPlayback() {
+    /// Pause: stop audio but hold the current playhead so the next play resumes from there.
+    /// Distinct from rewind (which returns to beat 0). Does not record undo.
+    public func pausePlayback() {
         // Close still-held MIDI capture notes at the last playhead beat (M3). The take
         // stays pending until recording stops, so a second play pass can add more notes.
         endOpenMIDICaptureNotesAtPlayhead()
+        let wasPlaying = isPlaying
         transport.stop()
+        // Transport.stop captures the live beat into stoppedAtBeat before clearing state.
+        if wasPlaying {
+            playheadBeat = max(0, transport.stoppedAtBeat)
+        }
         isPlaying = false
+    }
+
+    /// Stop playback while holding the playhead (same as pause). Kept for existing callers.
+    public func stopPlayback() {
+        pausePlayback()
+    }
+
+    /// Return the playhead to arrangement beat 0. Stops playback if running. No undo.
+    public func rewindToStart() {
+        if isPlaying {
+            endOpenMIDICaptureNotesAtPlayhead()
+            transport.stop()
+            isPlaying = false
+        }
+        playheadBeat = 0
+    }
+
+    /// Move the playhead to `beat` (clamped to ≥ 0). Stops playback if running so the
+    /// next play starts from the scrubbed position. No undo.
+    public func scrubPlayhead(to beat: Double) {
+        let clamped = max(0, beat)
+        if isPlaying {
+            endOpenMIDICaptureNotesAtPlayhead()
+            transport.stop()
+            isPlaying = false
+        }
+        playheadBeat = clamped
     }
 
     var arrangementBeats: Double {
