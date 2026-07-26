@@ -50,7 +50,7 @@ public final class AppStore {
     // Persistence state
     var currentPackageURL: URL?
     var pendingRecovery: RecoveryManager.RecoveryInfo?
-    var statusMessage: String?
+    public var statusMessage: String?
 
     // Transport / multitrack state
     public var isPlaying = false
@@ -464,6 +464,61 @@ public final class AppStore {
         }
     }
 
+    /// Continuous multi-clip move (time and/or track). All placements succeed or none do
+    /// (formation preserved; kind mismatch or start before 0 rejects the whole update).
+    /// Caller must begin an arrangement gesture first. One undo entry covers the gesture.
+    public func arrangementMoveClips(
+        _ placements: [(id: UUID, startBeat: Double, trackIndex: Int)]
+    ) {
+        guard arrangementGestureActive, !placements.isEmpty else { return }
+        var working = project
+        // Snapshot clips first so removals do not lose payload when re-homing to new tracks.
+        var payloads: [(id: UUID, clip: Clip, startBeat: Double, trackIndex: Int)] = []
+        payloads.reserveCapacity(placements.count)
+        do {
+            for p in placements {
+                guard working.tracks.indices.contains(p.trackIndex) else {
+                    throw MutationError.trackNotFound
+                }
+                guard p.startBeat >= 0 else { throw MutationError.negativeStartBeat }
+                guard let loc = working.clipLocation(id: p.id) else {
+                    throw MutationError.clipNotFound
+                }
+                let clip = working.tracks[loc.trackIndex].clips[loc.clipIndex]
+                let destKind = working.tracks[p.trackIndex].kind
+                guard Project.trackAccepts(clipKind: clip.kind, trackKind: destKind) else {
+                    throw MutationError.incompatibleClipTrack(
+                        clipKind: clip.kind, trackKind: destKind)
+                }
+                payloads.append((id: p.id, clip: clip, startBeat: p.startBeat,
+                                 trackIndex: p.trackIndex))
+            }
+            // Remove every moved clip, then re-insert at the destination (handles same-track
+            // and cross-track uniformly without index churn mid-loop).
+            for p in payloads {
+                try working.removeClip(id: p.id)
+            }
+            for p in payloads {
+                var placed = p.clip
+                placed.startBeat = p.startBeat
+                try working.insertClip(placed, onTrackIndex: p.trackIndex)
+            }
+            project = working
+            // Keep the piano-roll open clip pointer valid if that clip moved.
+            if let openID = pianoRollClipID, working.clipLocation(id: openID) == nil {
+                pianoRollClipID = nil
+            }
+        } catch let err as MutationError {
+            // Incompatible kind mid-drag: surface once so the refusal is not silent.
+            if case .incompatibleClipTrack = err {
+                statusMessage = err.description
+            }
+            // Out-of-range or missing: reject whole update so the selection never splits.
+        } catch {
+            // Unexpected: leave project unchanged.
+        }
+    }
+
     /// Continuous clip-resize update. Caller must
     /// `beginArrangementGesture(name: "Resize Clip")` first. No-ops if no gesture is active.
     public func arrangementResizeClip(id clipID: UUID, toLengthBeats lengthBeats: Double) {
@@ -474,6 +529,94 @@ public final class AppStore {
             // Zero/negative length mid-drag is floored by the model when still positive;
             // true rejects are ignored so the drag can recover.
         }
+    }
+
+    /// Discrete multi-delete of arrangement clips. One undo entry for the whole selection
+    /// (never per clip). Default label is "Delete Clip(s)".
+    public func arrangementDeleteClips(ids: [UUID], undoName: String? = nil) {
+        guard !ids.isEmpty else { return }
+        var working = project
+        var deleted = 0
+        for id in ids {
+            do {
+                try working.removeClip(id: id)
+                deleted += 1
+            } catch {
+                // Missing clips are skipped; others still delete.
+            }
+        }
+        guard deleted > 0 else { return }
+        let name = undoName ?? (deleted == 1 ? "Delete Clip" : "Delete Clips")
+        history.record(project, name: name)
+        project = working
+        if let openID = pianoRollClipID, working.clipLocation(id: openID) == nil {
+            pianoRollClipID = nil
+            showPianoRoll = false
+        }
+        recovery.autosave(project)
+    }
+
+    /// Split a MIDI clip at the playhead into two abutting halves. One undo entry labeled
+    /// "Split Clip". Returns the new left and right clip ids on success. Audio clips and
+    /// out-of-bounds playheads are refused with a plain-language `statusMessage` (never a
+    /// silent no-op that reports success).
+    @discardableResult
+    public func arrangementSplitClip(id clipID: UUID, atArrangementBeat playhead: Double)
+        -> (left: UUID, right: UUID)?
+    {
+        var working = project
+        do {
+            let pair = try working.splitClip(id: clipID, atArrangementBeat: playhead)
+            history.record(project, name: "Split Clip")
+            project = working
+            if pianoRollClipID == clipID {
+                pianoRollClipID = pair.left.id
+            }
+            recovery.autosave(project)
+            return (pair.left.id, pair.right.id)
+        } catch let err as MutationError {
+            statusMessage = err.description
+            return nil
+        } catch {
+            statusMessage = "Couldn’t split that clip."
+            return nil
+        }
+    }
+
+    /// Paste clips into the arrangement. One undo entry labeled "Paste Clips". Each entry
+    /// is deep-copied (`Project.deepCopyClip`) so clip and note UUIDs are fresh. Returns new
+    /// clip ids in input order so the view can leave them selected. Rejects the whole paste
+    /// (no partial apply) on kind mismatch or start before beat 0.
+    @discardableResult
+    public func arrangementPasteClips(
+        _ specs: [(clip: Clip, startBeat: Double, trackIndex: Int)]
+    ) -> [UUID] {
+        guard !specs.isEmpty else { return [] }
+        var working = project
+        var ids: [UUID] = []
+        ids.reserveCapacity(specs.count)
+        do {
+            for s in specs {
+                guard s.startBeat >= 0 else { throw MutationError.negativeStartBeat }
+                guard working.tracks.indices.contains(s.trackIndex) else {
+                    throw MutationError.trackNotFound
+                }
+                var copy = Project.deepCopyClip(s.clip)
+                copy.startBeat = s.startBeat
+                try working.insertClip(copy, onTrackIndex: s.trackIndex)
+                ids.append(copy.id)
+            }
+        } catch let err as MutationError {
+            statusMessage = err.description
+            return []
+        } catch {
+            statusMessage = "Couldn’t paste those clips."
+            return []
+        }
+        history.record(project, name: "Paste Clips")
+        project = working
+        recovery.autosave(project)
+        return ids
     }
 
     // MARK: - Playing notes

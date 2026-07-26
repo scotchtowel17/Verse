@@ -86,7 +86,7 @@ struct TimelineWorkspaceView: View {
                 .frame(width: 260)
                 .help("Grid snap for clip start and length. Off allows free placement.")
                 Spacer()
-                Text("Drag to move · right edge to resize · click MIDI to open piano roll")
+                Text("Select · drag to move · right edge to resize · click MIDI for piano roll")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
@@ -320,6 +320,8 @@ struct TimelineWorkspaceView: View {
 // MARK: - Arrangement lanes (no own scroll or ruler; uses BeatTimeline)
 
 /// Clip lanes only. Horizontal time comes from the parent’s shared scroll + `BeatTimeline`.
+/// Owns view-local clip selection, marquee, clipboard, and Cmd-C/X/V when keyboard-focused
+/// (the piano roll owns those shortcuts when *it* is focused).
 struct ArrangementLanesView: View {
     @Environment(AppStore.self) private var store
 
@@ -327,7 +329,16 @@ struct ArrangementLanesView: View {
     let totalWidth: CGFloat
     let snapBeats: Double
 
+    /// View-local selection (not persisted).
+    @State private var selectedClipIDs: Set<UUID> = []
+    /// View-local clipboard for Cmd-C / Cmd-X / Cmd-V.
+    @State private var clipClipboard: [ClipboardClip] = []
+    @FocusState private var isFocused: Bool
+
     @State private var session = GestureSession()
+    @State private var marqueeStart: CGPoint?
+    @State private var marqueeCurrent: CGPoint?
+    @State private var marqueeLive = false
 
     static let laneHeight: CGFloat = 44
     private static let clickSlop: CGFloat = 4
@@ -336,23 +347,88 @@ struct ArrangementLanesView: View {
         max(1, store.project.timeSignature.num)
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(store.project.tracks.enumerated()), id: \.element.id) { _, track in
-                lane(track: track)
+    private var trackCount: Int { store.project.tracks.count }
+
+    /// Flat list of every clip with its track index (for marquee / group ops).
+    private var allClips: [(id: UUID, startBeat: Double, lengthBeats: Double, trackIndex: Int, clip: Clip)] {
+        var result: [(id: UUID, startBeat: Double, lengthBeats: Double, trackIndex: Int, clip: Clip)] = []
+        for (ti, track) in store.project.tracks.enumerated() {
+            for clip in track.clips {
+                result.append((id: clip.id, startBeat: clip.startBeat,
+                               lengthBeats: clip.lengthBeats, trackIndex: ti, clip: clip))
             }
+        }
+        return result
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(store.project.tracks.enumerated()), id: \.element.id) { ti, track in
+                    lane(track: track, trackIndex: ti)
+                }
+            }
+            marqueeOverlay()
         }
         .frame(width: totalWidth, alignment: .topLeading)
         .coordinateSpace(name: "arrangementGrid")
+        // Empty-lane marquee / clear-selection behind clips (clips own their own gestures).
+        .contentShape(Rectangle())
+        .gesture(emptyBackgroundGesture())
+        .focusable()
+        .focused($isFocused)
+        .focusEffectDisabled()
+        // Focus ring: arrangement owns Cmd-C/X/V only when this surface is focused.
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .strokeBorder(Color.accentColor.opacity(isFocused ? 0.85 : 0), lineWidth: 2)
+                .padding(-2)
+                .allowsHitTesting(false)
+        )
+        .onDeleteCommand { deleteSelection() }
+        .onKeyPress(.delete) {
+            deleteSelection()
+            return .handled
+        }
+        .onKeyPress(.deleteForward) {
+            deleteSelection()
+            return .handled
+        }
+        .onKeyPress(keys: [KeyEquivalent("c")], phases: .down) { press in
+            guard press.modifiers.contains(.command) else { return .ignored }
+            copySelection()
+            return .handled
+        }
+        .onKeyPress(keys: [KeyEquivalent("x")], phases: .down) { press in
+            guard press.modifiers.contains(.command) else { return .ignored }
+            cutSelection()
+            return .handled
+        }
+        .onKeyPress(keys: [KeyEquivalent("v")], phases: .down) { press in
+            guard press.modifiers.contains(.command) else { return .ignored }
+            pasteClipboard()
+            return .handled
+        }
+        // Cmd-E: split the single selected MIDI clip at the playhead (arrangement focus only).
+        .onKeyPress(keys: [KeyEquivalent("e")], phases: .down) { press in
+            guard press.modifiers.contains(.command) else { return .ignored }
+            splitSelectionAtPlayhead()
+            return .handled
+        }
         .onDisappear {
             if session.continuousGestureLive {
                 store.endArrangementGesture()
                 session.continuousGestureLive = false
             }
         }
+        // Drop selection entries that no longer exist (undo, delete, track remove).
+        .onChange(of: store.project.tracks) { _, _ in
+            let live = Set(store.project.tracks.flatMap(\.clips).map(\.id))
+            selectedClipIDs = selectedClipIDs.intersection(live)
+        }
     }
 
-    private func lane(track: Track) -> some View {
+    private func lane(track: Track, trackIndex: Int) -> some View {
         ZStack(alignment: .topLeading) {
             Canvas { context, size in
                 let beatCount = Int(ceil(contentBeats))
@@ -373,7 +449,7 @@ struct ArrangementLanesView: View {
             .allowsHitTesting(false)
 
             ForEach(track.clips) { clip in
-                clipBlock(clip)
+                clipBlock(clip, trackIndex: trackIndex)
             }
         }
         .frame(width: totalWidth, height: Self.laneHeight, alignment: .topLeading)
@@ -383,7 +459,7 @@ struct ArrangementLanesView: View {
     }
 
     @ViewBuilder
-    private func clipBlock(_ clip: Clip) -> some View {
+    private func clipBlock(_ clip: Clip, trackIndex: Int) -> some View {
         let x = BeatTimeline.x(forBeat: clip.startBeat)
         let w = max(BeatTimeline.width(forBeats: clip.lengthBeats), 6)
         let h = Self.laneHeight - 8
@@ -394,7 +470,8 @@ struct ArrangementLanesView: View {
         let label = clip.name.isEmpty
             ? (clip.kind == .midi ? "MIDI" : "Audio")
             : clip.name
-        let selected = store.pianoRollClipID == clip.id && clip.kind == .midi
+        let selected = selectedClipIDs.contains(clip.id)
+        let openInRoll = store.pianoRollClipID == clip.id && clip.kind == .midi
 
         ZStack(alignment: .trailing) {
             RoundedRectangle(cornerRadius: 4)
@@ -402,8 +479,12 @@ struct ArrangementLanesView: View {
                 .overlay(
                     RoundedRectangle(cornerRadius: 4)
                         .strokeBorder(
-                            selected ? Color.primary.opacity(0.55) : Color.primary.opacity(0.25),
-                            lineWidth: selected ? 1.5 : 0.5
+                            selected
+                                ? Color.white.opacity(0.95)
+                                : (openInRoll
+                                   ? Color.primary.opacity(0.55)
+                                   : Color.primary.opacity(0.25)),
+                            lineWidth: selected ? 2.0 : (openInRoll ? 1.5 : 0.5)
                         )
                 )
                 .overlay(alignment: .leading) {
@@ -415,7 +496,7 @@ struct ArrangementLanesView: View {
                         .padding(.trailing, handleW + 2)
                 }
             Rectangle()
-                .fill(Color.primary.opacity(0.22))
+                .fill(Color.primary.opacity(selected ? 0.35 : 0.22))
                 .frame(width: handleW)
                 .contentShape(Rectangle())
                 .onHover { hovering in
@@ -431,27 +512,182 @@ struct ArrangementLanesView: View {
         .contentShape(Rectangle())
         .offset(x: x, y: 4)
         .help("\(label) · beat \(formatBeat(clip.startBeat)) · len \(formatBeat(clip.lengthBeats))")
-        .gesture(moveGesture(for: clip))
+        .gesture(moveGesture(for: clip, trackIndex: trackIndex))
+        .contextMenu {
+            if clip.kind == .midi {
+                Button("Split at Playhead") {
+                    selectedClipIDs = [clip.id]
+                    splitSelectionAtPlayhead()
+                }
+            } else {
+                Button("Split at Playhead") {
+                    store.statusMessage = MutationError.cannotSplitAudioClip.description
+                }
+                .disabled(true)
+            }
+        }
     }
 
-    private func moveGesture(for clip: Clip) -> some Gesture {
+    // MARK: - Empty background (marquee + clear selection)
+
+    private func emptyBackgroundGesture() -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .named("arrangementGrid"))
             .onChanged { value in
+                isFocused = true
+                let moved = hypot(value.translation.width, value.translation.height)
+                if marqueeStart == nil {
+                    marqueeStart = value.startLocation
+                    marqueeCurrent = value.location
+                    return
+                }
+                marqueeCurrent = value.location
+                if moved >= Self.clickSlop {
+                    marqueeLive = true
+                }
+            }
+            .onEnded { value in
+                let moved = hypot(value.translation.width, value.translation.height)
+                if marqueeLive {
+                    applyMarqueeSelection(additive: NSEvent.modifierFlags.contains(.shift))
+                } else if moved < Self.clickSlop {
+                    // Pure click on empty: clear selection (does not deselect the roll clip
+                    // pointer unless the open clip was only selected here).
+                    if !NSEvent.modifierFlags.contains(.shift) {
+                        selectedClipIDs = []
+                    }
+                }
+                marqueeStart = nil
+                marqueeCurrent = nil
+                marqueeLive = false
+            }
+    }
+
+    @ViewBuilder
+    private func marqueeOverlay() -> some View {
+        if marqueeLive, let start = marqueeStart, let current = marqueeCurrent {
+            let rect = CGRect(
+                x: min(start.x, current.x),
+                y: min(start.y, current.y),
+                width: abs(current.x - start.x),
+                height: abs(current.y - start.y)
+            )
+            Rectangle()
+                .fill(Color.accentColor.opacity(0.12))
+                .overlay(Rectangle().strokeBorder(Color.accentColor.opacity(0.7), lineWidth: 1))
+                .frame(width: rect.width, height: rect.height)
+                .offset(x: rect.minX, y: rect.minY)
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func applyMarqueeSelection(additive: Bool) {
+        guard let start = marqueeStart, let current = marqueeCurrent else { return }
+        let beatA = BeatTimeline.beat(atX: start.x)
+        let beatB = BeatTimeline.beat(atX: current.x)
+        let trackA = trackIndex(atY: start.y)
+        let trackB = trackIndex(atY: current.y)
+        let hits = ArrangementSelection.clipsTouchingMarquee(
+            clips: allClips.map {
+                (id: $0.id, startBeat: $0.startBeat, lengthBeats: $0.lengthBeats,
+                 trackIndex: $0.trackIndex)
+            },
+            beatA: beatA, beatB: beatB, trackA: trackA, trackB: trackB
+        )
+        if additive {
+            selectedClipIDs.formUnion(hits)
+        } else {
+            selectedClipIDs = Set(hits)
+        }
+        // Load a single MIDI hit into the roll so the pane stays useful.
+        if hits.count == 1, let only = hits.first,
+           let entry = allClips.first(where: { $0.id == only }),
+           entry.clip.kind == .midi {
+            store.openPianoRoll(clipID: only)
+        }
+    }
+
+    private func trackIndex(atY y: CGFloat) -> Int {
+        guard trackCount > 0 else { return 0 }
+        let raw = Int(floor(y / Self.laneHeight))
+        return min(max(0, raw), trackCount - 1)
+    }
+
+    // MARK: - Move / select
+
+    private func moveGesture(for clip: Clip, trackIndex: Int) -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .named("arrangementGrid"))
+            .onChanged { value in
+                isFocused = true
                 let moved = hypot(value.translation.width, value.translation.height)
                 if session.moveOrigin == nil {
-                    session.moveOrigin = MoveOrigin(clipID: clip.id, startBeat: clip.startBeat)
+                    applyClipClickSelection(clip)
+                    // If shift-deselect removed the clip under the pointer, do not start a
+                    // group move. Otherwise move every currently selected clip.
+                    let moving: [(id: UUID, startBeat: Double, trackIndex: Int)]
+                    if selectedClipIDs.contains(clip.id) {
+                        moving = allClips
+                            .filter { selectedClipIDs.contains($0.id) }
+                            .map { (id: $0.id, startBeat: $0.startBeat, trackIndex: $0.trackIndex) }
+                    } else {
+                        moving = []
+                    }
+                    session.moveOrigin = MultiMoveOrigin(clips: moving, primaryID: clip.id)
                     return
                 }
                 guard moved >= Self.clickSlop else { return }
+                guard let origin = session.moveOrigin, origin.primaryID == clip.id,
+                      !origin.clips.isEmpty else { return }
                 if !session.continuousGestureLive {
-                    store.beginArrangementGesture(name: "Move Clip")
+                    let name = origin.clips.count > 1 ? "Move Clips" : "Move Clip"
+                    store.beginArrangementGesture(name: name)
                     session.continuousGestureLive = true
                 }
-                guard let origin = session.moveOrigin, origin.clipID == clip.id else { return }
-                let beatDelta = Double(value.translation.width / BeatTimeline.beatWidth)
-                let rawStart = origin.startBeat + beatDelta
-                let newStart = max(0, ArrangementLayout.snap(rawStart, to: snapBeats))
-                store.arrangementMoveClip(id: clip.id, toStartBeat: newStart)
+                guard let primary = origin.clips.first(where: { $0.id == origin.primaryID })
+                        ?? origin.clips.first else { return }
+                let beatDeltaRaw = Double(value.translation.width / BeatTimeline.beatWidth)
+                let snappedPrimaryStart = ArrangementLayout.snap(
+                    primary.startBeat + beatDeltaRaw, to: snapBeats)
+                let beatDelta = snappedPrimaryStart - primary.startBeat
+                let trackDelta = Int((value.translation.height / Self.laneHeight).rounded())
+                guard let proposed = ArrangementSelection.applyGroupDelta(
+                    origins: origin.clips.map { (startBeat: $0.startBeat, trackIndex: $0.trackIndex) },
+                    beatDelta: beatDelta,
+                    trackDelta: trackDelta,
+                    trackCount: trackCount
+                ) else {
+                    // Would go before beat 0 or off the track list: reject as a whole.
+                    return
+                }
+                // Kind check before mutating: refuse incompatible track landings clearly.
+                // Clip identity (and kind) is stable for the gesture; look up live locations.
+                let trackKinds = store.project.tracks.map(\.kind)
+                var kindsToCheck: [ClipKind] = []
+                kindsToCheck.reserveCapacity(origin.clips.count)
+                for entry in origin.clips {
+                    guard let loc = store.project.clipLocation(id: entry.id) else { return }
+                    kindsToCheck.append(
+                        store.project.tracks[loc.trackIndex].clips[loc.clipIndex].kind)
+                }
+                let compatible = ArrangementSelection.placementsCompatible(
+                    clipKinds: kindsToCheck,
+                    trackKinds: trackKinds,
+                    trackIndices: proposed.map(\.trackIndex)
+                )
+                if !compatible {
+                    for (i, k) in kindsToCheck.enumerated() {
+                        let ti = proposed[i].trackIndex
+                        if !Project.trackAccepts(clipKind: k, trackKind: trackKinds[ti]) {
+                            store.statusMessage = MutationError.incompatibleClipTrack(
+                                clipKind: k, trackKind: trackKinds[ti]).description
+                            break
+                        }
+                    }
+                    return
+                }
+                let placements = zip(origin.clips, proposed).map {
+                    (id: $0.0.id, startBeat: $0.1.startBeat, trackIndex: $0.1.trackIndex)
+                }
+                store.arrangementMoveClips(placements)
             }
             .onEnded { value in
                 let moved = hypot(value.translation.width, value.translation.height)
@@ -459,7 +695,8 @@ struct ArrangementLanesView: View {
                     store.endArrangementGesture()
                     session.continuousGestureLive = false
                 } else if moved < Self.clickSlop {
-                    if clip.kind == .midi {
+                    // Pure click: selection already applied; open MIDI in the roll.
+                    if clip.kind == .midi, selectedClipIDs.contains(clip.id) {
                         store.openPianoRoll(clipID: clip.id)
                     }
                 }
@@ -467,11 +704,30 @@ struct ArrangementLanesView: View {
             }
     }
 
+    /// Click a clip: select it. Shift-click toggles membership. Clicking an already-selected
+    /// clip without shift keeps the whole selection (so a drag can move the group).
+    private func applyClipClickSelection(_ clip: Clip) {
+        let shift = NSEvent.modifierFlags.contains(.shift)
+        if shift {
+            if selectedClipIDs.contains(clip.id) {
+                selectedClipIDs.remove(clip.id)
+            } else {
+                selectedClipIDs.insert(clip.id)
+            }
+        } else if !selectedClipIDs.contains(clip.id) {
+            selectedClipIDs = [clip.id]
+        }
+    }
+
     private func resizeGesture(for clip: Clip) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .named("arrangementGrid"))
             .onChanged { value in
+                isFocused = true
                 if session.resizeOrigin == nil {
                     session.resizeOrigin = ResizeOrigin(clipID: clip.id, lengthBeats: clip.lengthBeats)
+                    if !selectedClipIDs.contains(clip.id) {
+                        selectedClipIDs = [clip.id]
+                    }
                     return
                 }
                 let moved = abs(value.translation.width)
@@ -499,24 +755,135 @@ struct ArrangementLanesView: View {
             }
     }
 
+    // MARK: - Clipboard actions
+
+    /// Split the single selected clip at the playhead. Multiple selection is refused with a
+    /// clear message; audio and out-of-bounds playheads surface via the store (never silent).
+    private func splitSelectionAtPlayhead() {
+        guard !selectedClipIDs.isEmpty else { return }
+        guard selectedClipIDs.count == 1, let id = selectedClipIDs.first else {
+            store.statusMessage = "Select one clip to split."
+            return
+        }
+        let playhead = store.playbackBeat ?? 0
+        if let pair = store.arrangementSplitClip(id: id, atArrangementBeat: playhead) {
+            selectedClipIDs = [pair.left, pair.right]
+        }
+    }
+
+    private func deleteSelection() {
+        guard !selectedClipIDs.isEmpty else { return }
+        let ids = Array(selectedClipIDs)
+        store.arrangementDeleteClips(ids: ids)
+        selectedClipIDs = []
+    }
+
+    private func copySelection() {
+        let selected = allClips.filter { selectedClipIDs.contains($0.id) }
+        guard !selected.isEmpty else { return }
+        clipClipboard = selected.map {
+            ClipboardClip(
+                clip: $0.clip,
+                startBeat: $0.startBeat,
+                sourceTrackIndex: $0.trackIndex,
+                sourceTrackID: store.project.tracks[$0.trackIndex].id
+            )
+        }
+    }
+
+    private func cutSelection() {
+        copySelection()
+        guard !selectedClipIDs.isEmpty else { return }
+        let ids = Array(selectedClipIDs)
+        store.arrangementDeleteClips(ids: ids, undoName: "Cut Clips")
+        selectedClipIDs = []
+    }
+
+    private func pasteClipboard() {
+        guard !clipClipboard.isEmpty else { return }
+        let playhead = store.playbackBeat ?? 0
+        let starts = ArrangementSelection.pasteStartBeats(
+            clipboardStarts: clipClipboard.map(\.startBeat),
+            playheadBeat: playhead
+        )
+        guard starts.count == clipClipboard.count else { return }
+        guard starts.allSatisfy({ $0 >= 0 }) else {
+            store.statusMessage = "Those clips can’t paste before beat 0."
+            return
+        }
+
+        // Default: each clip returns to its source track. If the active (selected) track is
+        // different from the first clipboard clip’s source, paste the whole set onto that
+        // track (kind rules still apply).
+        let preferActive: Int? = {
+            guard let idx = store.project.trackIndex(id: store.activeTrackID) else { return nil }
+            guard let firstSource = clipClipboard.first?.sourceTrackID else { return nil }
+            return firstSource == store.activeTrackID ? nil : idx
+        }()
+
+        var specs: [(clip: Clip, startBeat: Double, trackIndex: Int)] = []
+        specs.reserveCapacity(clipClipboard.count)
+        for (i, item) in clipClipboard.enumerated() {
+            let trackIndex: Int
+            if let preferActive {
+                trackIndex = preferActive
+            } else if let live = store.project.trackIndex(id: item.sourceTrackID) {
+                trackIndex = live
+            } else if store.project.tracks.indices.contains(item.sourceTrackIndex) {
+                trackIndex = item.sourceTrackIndex
+            } else {
+                store.statusMessage = "That track isn’t in this project."
+                return
+            }
+            let destKind = store.project.tracks[trackIndex].kind
+            guard Project.trackAccepts(clipKind: item.clip.kind, trackKind: destKind) else {
+                store.statusMessage = MutationError.incompatibleClipTrack(
+                    clipKind: item.clip.kind, trackKind: destKind).description
+                return
+            }
+            specs.append((clip: item.clip, startBeat: starts[i], trackIndex: trackIndex))
+        }
+        let newIDs = store.arrangementPasteClips(specs)
+        if !newIDs.isEmpty {
+            selectedClipIDs = Set(newIDs)
+            // Open the first MIDI paste in the roll when present.
+            if let firstMIDI = newIDs.first(where: { id in
+                guard let loc = store.project.clipLocation(id: id) else { return false }
+                return store.project.tracks[loc.trackIndex].clips[loc.clipIndex].kind == .midi
+            }) {
+                store.openPianoRoll(clipID: firstMIDI)
+            }
+        }
+    }
+
     private func formatBeat(_ v: Double) -> String {
         if v == floor(v) { return String(Int(v)) }
         return String(format: "%.2f", v)
     }
 
+    // MARK: - Gesture bookkeeping
+
     private final class GestureSession {
-        var moveOrigin: MoveOrigin?
+        var moveOrigin: MultiMoveOrigin?
         var resizeOrigin: ResizeOrigin?
         var continuousGestureLive = false
     }
 
-    private struct MoveOrigin {
-        let clipID: UUID
-        let startBeat: Double
+    private struct MultiMoveOrigin {
+        let clips: [(id: UUID, startBeat: Double, trackIndex: Int)]
+        let primaryID: UUID
     }
 
     private struct ResizeOrigin {
         let clipID: UUID
         let lengthBeats: Double
+    }
+
+    private struct ClipboardClip {
+        /// Snapshot of clip content (notes, media, kind, name, length). Paste deep-copies it.
+        var clip: Clip
+        var startBeat: Double
+        var sourceTrackIndex: Int
+        var sourceTrackID: UUID
     }
 }

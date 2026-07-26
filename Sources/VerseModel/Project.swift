@@ -220,6 +220,7 @@ public struct Project: Codable, Sendable, Identifiable {
 public enum MutationError: Error, Equatable, CustomStringConvertible {
     case clipNotFound
     case noteNotFound
+    case trackNotFound
     case negativeStartBeat
     case negativeNoteStartBeat
     case invalidQuantizeGrid(Double)
@@ -230,6 +231,12 @@ public enum MutationError: Error, Equatable, CustomStringConvertible {
     case invalidNoteLength(Double)
     /// Clip length is not positive (or otherwise unusable).
     case invalidClipLength(Double)
+    /// Clip kind does not match the destination track kind (MIDI→instrument, audio→audio).
+    case incompatibleClipTrack(clipKind: ClipKind, trackKind: TrackKind)
+    /// Audio clips cannot be split (schema has no start-offset field yet).
+    case cannotSplitAudioClip
+    /// Split point is at or outside the clip’s own time range (would yield a zero-length half).
+    case splitOutOfBounds
 
     public var description: String {
         switch self {
@@ -237,6 +244,8 @@ public enum MutationError: Error, Equatable, CustomStringConvertible {
             return "That clip isn’t in this project."
         case .noteNotFound:
             return "That note isn’t in this clip."
+        case .trackNotFound:
+            return "That track isn’t in this project."
         case .negativeStartBeat:
             return "A clip can’t start before beat 0."
         case .negativeNoteStartBeat:
@@ -251,6 +260,19 @@ public enum MutationError: Error, Equatable, CustomStringConvertible {
             return "A note’s length must be greater than 0 beats (got \(length))."
         case .invalidClipLength(let length):
             return "A clip’s length must be greater than 0 beats (got \(length))."
+        case .incompatibleClipTrack(let clipKind, let trackKind):
+            switch (clipKind, trackKind) {
+            case (.midi, .audio):
+                return "A MIDI clip can only go on an instrument track, not an audio track."
+            case (.audio, .instrument):
+                return "An audio clip can only go on an audio track, not an instrument track."
+            default:
+                return "That clip can’t go on that track."
+            }
+        case .cannotSplitAudioClip:
+            return "Audio clips can’t be split yet. Only MIDI clips can be split."
+        case .splitOutOfBounds:
+            return "Move the playhead inside the clip to split it. Splitting at the start or end would leave an empty half."
         }
     }
 }
@@ -288,15 +310,22 @@ public extension Project {
             max(lengthBeats, Self.minimumClipLengthBeats)
     }
 
-    /// Duplicate a clip. The copy gets a fresh clip UUID and every contained `Note` gets a
-    /// fresh UUID. The copy is placed at `startBeat + lengthBeats` of the original.
-    @discardableResult
-    mutating func duplicateClip(id: UUID) throws -> Clip {
-        guard let loc = clipLocation(id: id) else { throw MutationError.clipNotFound }
-        let original = tracks[loc.trackIndex].clips[loc.clipIndex]
+    /// Whether a clip of `clipKind` may live on a track of `trackKind`.
+    /// MIDI clips need instrument tracks; audio clips need audio tracks.
+    static func trackAccepts(clipKind: ClipKind, trackKind: TrackKind) -> Bool {
+        switch (clipKind, trackKind) {
+        case (.midi, .instrument), (.audio, .audio): return true
+        default: return false
+        }
+    }
+
+    /// Deep-copy a clip value: fresh clip UUID and fresh UUID for every contained note.
+    /// Placement, track membership, and `startBeat` are the caller’s job (this only
+    /// regenerates identity). Shared by `duplicateClip` and arrangement paste so there is
+    /// one copy path for new UUIDs.
+    static func deepCopyClip(_ original: Clip) -> Clip {
         var copy = original
         copy.id = UUID()
-        copy.startBeat = original.startBeat + original.lengthBeats
         if let notes = original.midiNotes {
             copy.midiNotes = notes.map { note in
                 var n = note
@@ -304,8 +333,149 @@ public extension Project {
                 return n
             }
         }
+        return copy
+    }
+
+    /// Duplicate a clip. The copy gets a fresh clip UUID and every contained `Note` gets a
+    /// fresh UUID (via `deepCopyClip`). The copy is placed at `startBeat + lengthBeats` of
+    /// the original, on the same track.
+    @discardableResult
+    mutating func duplicateClip(id: UUID) throws -> Clip {
+        guard let loc = clipLocation(id: id) else { throw MutationError.clipNotFound }
+        let original = tracks[loc.trackIndex].clips[loc.clipIndex]
+        var copy = Self.deepCopyClip(original)
+        copy.startBeat = original.startBeat + original.lengthBeats
         tracks[loc.trackIndex].clips.append(copy)
         return copy
+    }
+
+    /// Remove a clip by id from its track. Other clips are untouched.
+    mutating func removeClip(id: UUID) throws {
+        guard let loc = clipLocation(id: id) else { throw MutationError.clipNotFound }
+        tracks[loc.trackIndex].clips.remove(at: loc.clipIndex)
+    }
+
+    /// Split a MIDI clip at an arrangement-absolute beat into two abutting halves on the
+    /// same track. Notes entirely before the split stay in the left half; notes entirely
+    /// after move to the right with `startBeat` rebased; notes that cross the split become
+    /// two notes whose lengths sum to the original. Both result clips and every note get
+    /// fresh UUIDs. Audio is refused; a split at or outside the clip bounds is refused
+    /// (zero-length half).
+    @discardableResult
+    mutating func splitClip(id: UUID, atArrangementBeat playhead: Double) throws -> (left: Clip, right: Clip) {
+        guard let loc = clipLocation(id: id) else { throw MutationError.clipNotFound }
+        let original = tracks[loc.trackIndex].clips[loc.clipIndex]
+        guard original.kind == .midi else { throw MutationError.cannotSplitAudioClip }
+        let local = playhead - original.startBeat
+        guard local > 0, local < original.lengthBeats else {
+            throw MutationError.splitOutOfBounds
+        }
+
+        let leftLen = local
+        let rightLen = original.lengthBeats - local
+        var leftNotes: [Note] = []
+        var rightNotes: [Note] = []
+        for note in original.midiNotes ?? [] {
+            let noteEnd = note.startBeat + note.lengthBeats
+            if noteEnd <= local {
+                // Entirely before the split: keep local start, new UUID.
+                leftNotes.append(Note(
+                    id: UUID(),
+                    startBeat: note.startBeat,
+                    lengthBeats: note.lengthBeats,
+                    pitch: note.pitch,
+                    velocity: note.velocity,
+                    pitchBend: note.pitchBend
+                ))
+            } else if note.startBeat >= local {
+                // Entirely after: rebase into the right clip.
+                rightNotes.append(Note(
+                    id: UUID(),
+                    startBeat: note.startBeat - local,
+                    lengthBeats: note.lengthBeats,
+                    pitch: note.pitch,
+                    velocity: note.velocity,
+                    pitchBend: note.pitchBend
+                ))
+            } else {
+                // Crosses the boundary: one note ending at the split, one starting there.
+                let leftPartLen = local - note.startBeat
+                let rightPartLen = noteEnd - local
+                leftNotes.append(Note(
+                    id: UUID(),
+                    startBeat: note.startBeat,
+                    lengthBeats: leftPartLen,
+                    pitch: note.pitch,
+                    velocity: note.velocity,
+                    pitchBend: note.pitchBend
+                ))
+                rightNotes.append(Note(
+                    id: UUID(),
+                    startBeat: 0,
+                    lengthBeats: rightPartLen,
+                    pitch: note.pitch,
+                    velocity: note.velocity,
+                    pitchBend: note.pitchBend
+                ))
+            }
+        }
+
+        let left = Clip(
+            id: UUID(),
+            kind: .midi,
+            name: original.name,
+            startBeat: original.startBeat,
+            lengthBeats: leftLen,
+            mediaFile: nil,
+            midiNotes: leftNotes
+        )
+        let right = Clip(
+            id: UUID(),
+            kind: .midi,
+            name: original.name,
+            startBeat: playhead,
+            lengthBeats: rightLen,
+            mediaFile: nil,
+            midiNotes: rightNotes
+        )
+
+        tracks[loc.trackIndex].clips.remove(at: loc.clipIndex)
+        tracks[loc.trackIndex].clips.insert(left, at: loc.clipIndex)
+        tracks[loc.trackIndex].clips.insert(right, at: loc.clipIndex + 1)
+        return (left, right)
+    }
+
+    /// Move a clip to another track and/or start beat. Rejects negative starts and kind
+    /// mismatches (MIDI only on instrument tracks, audio only on audio tracks). Same-track
+    /// moves only update `startBeat` when provided.
+    mutating func moveClip(id: UUID, toTrackIndex destTrack: Int, startBeat: Double? = nil) throws {
+        guard tracks.indices.contains(destTrack) else { throw MutationError.trackNotFound }
+        guard let loc = clipLocation(id: id) else { throw MutationError.clipNotFound }
+        if let startBeat, startBeat < 0 { throw MutationError.negativeStartBeat }
+        var clip = tracks[loc.trackIndex].clips[loc.clipIndex]
+        let destKind = tracks[destTrack].kind
+        guard Self.trackAccepts(clipKind: clip.kind, trackKind: destKind) else {
+            throw MutationError.incompatibleClipTrack(clipKind: clip.kind, trackKind: destKind)
+        }
+        if let startBeat {
+            clip.startBeat = startBeat
+        }
+        if loc.trackIndex == destTrack {
+            tracks[loc.trackIndex].clips[loc.clipIndex] = clip
+            return
+        }
+        tracks[loc.trackIndex].clips.remove(at: loc.clipIndex)
+        tracks[destTrack].clips.append(clip)
+    }
+
+    /// Append a clip onto a track. Rejects kind mismatch. Used by paste after `deepCopyClip`.
+    mutating func insertClip(_ clip: Clip, onTrackIndex trackIndex: Int) throws {
+        guard tracks.indices.contains(trackIndex) else { throw MutationError.trackNotFound }
+        let trackKind = tracks[trackIndex].kind
+        guard Self.trackAccepts(clipKind: clip.kind, trackKind: trackKind) else {
+            throw MutationError.incompatibleClipTrack(clipKind: clip.kind, trackKind: trackKind)
+        }
+        tracks[trackIndex].clips.append(clip)
     }
 
     /// Quantize note **starts** in a clip to the nearest grid point.

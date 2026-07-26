@@ -181,11 +181,21 @@ struct PianoRollEmbeddedView: View {
         .focusable()
         .focused($isFocused)
         .focusEffectDisabled()
+        // Focus ring: roll owns Cmd-C/X/V for notes only when this surface is focused
+        // (arrangement has its own ring and clip shortcuts when focused).
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .strokeBorder(Color.accentColor.opacity(isFocused ? 0.85 : 0), lineWidth: 2)
+                .padding(-2)
+                .allowsHitTesting(false)
+        )
         .onChange(of: clipID) { _, _ in
             selectedNoteIDs = []
             pitchNavOffset = 0
             gutterDragStartOffset = nil
-            isFocused = true
+            // Do not steal keyboard focus here: selecting a clip in the arrangement must
+            // leave arrangement focus so Cmd-C/X/V still copy clips. The roll takes focus
+            // when the user clicks/drags inside it (or on first appear of the pane).
         }
         .onDeleteCommand { deleteSelection() }
         .onKeyPress(.delete) {
@@ -455,6 +465,7 @@ struct PianoRollEmbeddedView: View {
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .named("pianoRollGrid"))
                     .onChanged { value in
+                        isFocused = true
                         if marqueeStart == nil {
                             marqueeStart = value.startLocation
                             marqueeCurrent = value.location
@@ -612,6 +623,7 @@ struct PianoRollEmbeddedView: View {
     private func moveGesture(for note: Note, rowHeight: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .named("pianoRollGrid"))
             .onChanged { value in
+                isFocused = true
                 let moved = hypot(value.translation.width, value.translation.height)
                 if moveOrigin == nil {
                     // First update: update selection, snapshot the group that will move.
@@ -704,6 +716,7 @@ struct PianoRollEmbeddedView: View {
     private func resizeGesture(for note: Note) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .named("pianoRollGrid"))
             .onChanged { value in
+                isFocused = true
                 if resizeOrigin == nil {
                     resizeOrigin = ResizeOrigin(noteID: note.id, lengthBeats: note.lengthBeats)
                     if !selectedNoteIDs.contains(note.id) {

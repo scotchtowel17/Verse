@@ -172,6 +172,190 @@ func runModelChecks(_ tk: TestKit) {
         }
     }
 
+    tk.suite("Model: deepCopyClip regenerates clip and note UUIDs") {
+        let n1 = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        let n2 = Note(startBeat: 1, lengthBeats: 0.5, pitch: 64, velocity: 80)
+        let original = Clip(kind: .midi, name: "src", startBeat: 4, lengthBeats: 8,
+                            midiNotes: [n1, n2])
+        let copy = Project.deepCopyClip(original)
+        tk.expect(copy.id != original.id, "deep copy has a new clip UUID")
+        tk.expectEqual(copy.startBeat, 4, "deepCopy leaves startBeat for the caller")
+        tk.expectEqual(copy.lengthBeats, 8, "length preserved")
+        tk.expectEqual(copy.name, "src", "name preserved")
+        tk.expectEqual(copy.midiNotes?.count, 2, "notes deep-copied")
+        let origIDs = Set([n1.id, n2.id])
+        let copyIDs = Set((copy.midiNotes ?? []).map(\.id))
+        tk.expect(origIDs.isDisjoint(with: copyIDs), "every note UUID regenerated")
+        tk.expectEqual(copy.midiNotes?[0].pitch, 60, "note payload preserved")
+
+        let audio = Clip(kind: .audio, name: "take", startBeat: 0, lengthBeats: 2,
+                         mediaFile: "take-1.wav")
+        let audioCopy = Project.deepCopyClip(audio)
+        tk.expect(audioCopy.id != audio.id, "audio deep copy has new clip UUID")
+        tk.expectEqual(audioCopy.mediaFile, "take-1.wav", "media path shared (not re-copied)")
+        tk.expect(audioCopy.midiNotes == nil, "audio copy has no notes")
+    }
+
+    tk.suite("Model: removeClip and moveClip track + kind rules") {
+        var p = Project.newUntitled()
+        p.tracks.append(Track(kind: .audio, name: "Audio"))
+        p.tracks.append(Track(kind: .instrument, name: "Lead", instrument: .grandPiano))
+        let midi = Clip(kind: .midi, name: "phrase", startBeat: 2, lengthBeats: 4,
+                        midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
+        let audio = Clip(kind: .audio, name: "take", startBeat: 0, lengthBeats: 2,
+                         mediaFile: "t.wav")
+        p.tracks[0].clips = [midi]
+        p.tracks[1].clips = [audio]
+
+        tk.expect(Project.trackAccepts(clipKind: .midi, trackKind: .instrument),
+                  "MIDI accepts instrument")
+        tk.expect(!Project.trackAccepts(clipKind: .midi, trackKind: .audio),
+                  "MIDI rejects audio track")
+        tk.expect(Project.trackAccepts(clipKind: .audio, trackKind: .audio),
+                  "audio accepts audio")
+        tk.expect(!Project.trackAccepts(clipKind: .audio, trackKind: .instrument),
+                  "audio rejects instrument")
+
+        // Move MIDI to another instrument track.
+        try p.moveClip(id: midi.id, toTrackIndex: 2, startBeat: 8)
+        tk.expectEqual(p.tracks[0].clips.count, 0, "MIDI left source track")
+        tk.expectEqual(p.tracks[2].clips.count, 1, "MIDI on dest instrument track")
+        tk.expectEqual(p.tracks[2].clips[0].startBeat, 8, "startBeat updated on cross-track move")
+        tk.expectEqual(p.tracks[2].clips[0].id, midi.id, "clip id stable on move")
+
+        tk.expectThrows("MIDI cannot land on audio track") {
+            try p.moveClip(id: midi.id, toTrackIndex: 1, startBeat: 0)
+        }
+        tk.expectEqual(p.tracks[2].clips.count, 1, "failed move leaves clip on instrument")
+        tk.expectEqual(p.tracks[1].clips.count, 1, "audio track still only has audio clip")
+
+        tk.expectThrows("audio cannot land on instrument track") {
+            try p.moveClip(id: audio.id, toTrackIndex: 0)
+        }
+
+        // Same-track start only.
+        try p.moveClip(id: midi.id, toTrackIndex: 2, startBeat: 1)
+        tk.expectEqual(p.tracks[2].clips[0].startBeat, 1, "same-track start update")
+
+        try p.removeClip(id: midi.id)
+        tk.expectEqual(p.tracks[2].clips.count, 0, "removeClip drops the clip")
+        tk.expectThrows("remove unknown clip") {
+            try p.removeClip(id: UUID())
+        }
+
+        let msg = MutationError.incompatibleClipTrack(clipKind: .midi, trackKind: .audio)
+            .description
+        tk.expect(msg.contains("MIDI"), "incompatible message names MIDI")
+        tk.expect(msg.contains("instrument") || msg.contains("audio"),
+                  "incompatible message names track kinds")
+    }
+
+    tk.suite("Model U2: splitClip divides notes; preserves total duration") {
+        var p = Project.newUntitled()
+        // Clip spans arrangement 4…12 (length 8). Split at arrangement beat 8 → local 4.
+        // before: 0…2, crossing: 3…6 (crosses 4), after: 5…6.5
+        let before = Note(startBeat: 0, lengthBeats: 2, pitch: 60, velocity: 100)
+        let crossing = Note(startBeat: 3, lengthBeats: 3, pitch: 64, velocity: 90)
+        let after = Note(startBeat: 5, lengthBeats: 1.5, pitch: 67, velocity: 80)
+        let origTotal = before.lengthBeats + crossing.lengthBeats + after.lengthBeats
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 4, lengthBeats: 8,
+                        midiNotes: [before, crossing, after])
+        p.tracks[0].clips = [clip]
+        let origClipID = clip.id
+        let origNoteIDs = Set([before.id, crossing.id, after.id])
+
+        let pair = try p.splitClip(id: clip.id, atArrangementBeat: 8)
+
+        tk.expectEqual(p.tracks[0].clips.count, 2, "original replaced by two halves")
+        let left = p.tracks[0].clips[0]
+        let right = p.tracks[0].clips[1]
+        tk.expectEqual(left.id, pair.left.id, "return matches left placement")
+        tk.expectEqual(right.id, pair.right.id, "return matches right placement")
+        tk.expect(left.id != origClipID, "left half has a fresh clip UUID")
+        tk.expect(right.id != origClipID, "right half has a fresh clip UUID")
+        tk.expect(left.id != right.id, "halves have distinct UUIDs")
+        tk.expectEqual(left.startBeat, 4, "left starts where original did")
+        tk.expectEqual(left.lengthBeats, 4, "left runs to playhead")
+        tk.expectEqual(right.startBeat, 8, "right starts at playhead")
+        tk.expectEqual(right.lengthBeats, 4, "right runs to original end")
+        tk.expectEqual(left.startBeat + left.lengthBeats, right.startBeat,
+                       "no gap between halves")
+        tk.expectEqual(right.startBeat + right.lengthBeats, 12,
+                       "right end matches original end")
+
+        // Note partition: left has before + left half of crossing; right has right half + after.
+        tk.expectEqual(left.midiNotes?.count, 2, "left: before + left of crossing")
+        tk.expectEqual(right.midiNotes?.count, 2, "right: right of crossing + after")
+        let leftNotes = left.midiNotes!
+        let rightNotes = right.midiNotes!
+        tk.expectEqual(leftNotes[0].pitch, 60, "before stays left")
+        tk.expectEqual(leftNotes[0].startBeat, 0, "before start unchanged")
+        tk.expectEqual(leftNotes[0].lengthBeats, 2, "before length unchanged")
+        tk.expectEqual(leftNotes[1].pitch, 64, "crossing left half")
+        tk.expectEqual(leftNotes[1].startBeat, 3, "crossing left keeps original start")
+        tk.expectEqual(leftNotes[1].lengthBeats, 1, "crossing left ends at boundary (3→4)")
+        tk.expectEqual(rightNotes[0].pitch, 64, "crossing right half")
+        tk.expectEqual(rightNotes[0].startBeat, 0, "crossing right starts at 0 in new clip")
+        tk.expectEqual(rightNotes[0].lengthBeats, 2, "crossing right is remainder (4→6)")
+        tk.expectEqual(leftNotes[1].lengthBeats + rightNotes[0].lengthBeats, 3,
+                       "crossing halves sum to original length")
+        tk.expectEqual(rightNotes[1].pitch, 67, "after note on right")
+        tk.expectEqual(rightNotes[1].startBeat, 1, "after rebased: 5 − 4 = 1")
+        tk.expectEqual(rightNotes[1].lengthBeats, 1.5, "after length unchanged")
+
+        let newTotal = (leftNotes + rightNotes).map(\.lengthBeats).reduce(0, +)
+        tk.expectEqual(newTotal, origTotal, "total note duration preserved across split")
+        let newNoteIDs = Set((leftNotes + rightNotes).map(\.id))
+        tk.expectEqual(newNoteIDs.count, 4, "four notes after split (crossing became two)")
+        tk.expect(origNoteIDs.isDisjoint(with: newNoteIDs), "every note UUID regenerated")
+        tk.expectEqual(leftNotes.count + rightNotes.count, 4, "note count: 3 original → 4")
+    }
+
+    tk.suite("Model U2: splitClip refuses audio, edges, and missing clip") {
+        var p = Project.newUntitled()
+        p.tracks.append(Track(kind: .audio, name: "Audio"))
+        let midi = Clip(kind: .midi, name: "phrase", startBeat: 2, lengthBeats: 4,
+                        midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
+        let audio = Clip(kind: .audio, name: "take", startBeat: 0, lengthBeats: 4,
+                         mediaFile: "t.wav")
+        p.tracks[0].clips = [midi]
+        p.tracks[1].clips = [audio]
+
+        tk.expectThrows("reject audio split") {
+            try p.splitClip(id: audio.id, atArrangementBeat: 2)
+        }
+        tk.expectEqual(p.tracks[1].clips.count, 1, "refused audio split leaves clip")
+        tk.expectEqual(p.tracks[1].clips[0].id, audio.id, "audio id stable after refuse")
+
+        tk.expectThrows("reject split at exact start") {
+            try p.splitClip(id: midi.id, atArrangementBeat: 2)
+        }
+        tk.expectThrows("reject split at exact end") {
+            try p.splitClip(id: midi.id, atArrangementBeat: 6)
+        }
+        tk.expectThrows("reject split before clip") {
+            try p.splitClip(id: midi.id, atArrangementBeat: 1)
+        }
+        tk.expectThrows("reject split after clip") {
+            try p.splitClip(id: midi.id, atArrangementBeat: 7)
+        }
+        tk.expectEqual(p.tracks[0].clips.count, 1, "failed splits leave MIDI clip intact")
+        tk.expectEqual(p.tracks[0].clips[0].lengthBeats, 4, "failed splits leave length")
+
+        tk.expectThrows("reject unknown clip on split") {
+            try p.splitClip(id: UUID(), atArrangementBeat: 1)
+        }
+
+        let audioMsg = MutationError.cannotSplitAudioClip.description
+        tk.expect(audioMsg.contains("Audio") || audioMsg.contains("audio"),
+                  "audio refusal message names audio")
+        tk.expect(audioMsg.contains("MIDI") || audioMsg.contains("can’t") || audioMsg.contains("can't"),
+                  "audio refusal is plain language")
+        let boundsMsg = MutationError.splitOutOfBounds.description
+        tk.expect(boundsMsg.contains("playhead") || boundsMsg.contains("start") || boundsMsg.contains("end"),
+                  "bounds refusal explains why")
+    }
+
     tk.suite("Model: quantizeNotes") {
         var p = Project.newUntitled()
         // Off-grid starts: 0.3 → 0.25 (1/16), 1.1 → 1.0, near end that would snap past length.
