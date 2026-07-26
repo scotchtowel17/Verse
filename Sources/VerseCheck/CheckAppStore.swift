@@ -2347,4 +2347,84 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         store.showPianoRollGhosts = false
         tk.expect(!store.showPianoRollGhosts, "ghosts toggle can turn off")
     }
+
+    // MARK: - Step Y3: roll toolbar / ghosts confirmed / pitch zoom widens window
+
+    tk.suite("Y3 ghosts non-empty for overlapping other track; exclude open clip notes") {
+        // Lead clip open (72-79); Chords and Bass overlap in time with notes elsewhere in pitch.
+        let leadID = UUID()
+        let chordsID = UUID()
+        let bassID = UUID()
+        let leadNotes = (72...79).map { Note(startBeat: 0, lengthBeats: 1, pitch: $0, velocity: 100) }
+        let chordNotes = (60...69).map { Note(startBeat: 0, lengthBeats: 2, pitch: $0, velocity: 80) }
+        let bassNotes = [Note(startBeat: 0, lengthBeats: 2, pitch: 36, velocity: 90),
+                         Note(startBeat: 1, lengthBeats: 1, pitch: 43, velocity: 90)]
+        let leadClip = Clip(kind: .midi, name: "Lead", startBeat: 0, lengthBeats: 4,
+                            midiNotes: leadNotes)
+        let chordsClip = Clip(kind: .midi, name: "Chords", startBeat: 0, lengthBeats: 4,
+                              midiNotes: chordNotes)
+        let bassClip = Clip(kind: .midi, name: "Bass", startBeat: 0, lengthBeats: 4,
+                            midiNotes: bassNotes)
+        let tracks = [
+            Track(id: leadID, kind: .instrument, name: "Lead", colorIndex: 0,
+                  instrument: .grandPiano, clips: [leadClip]),
+            Track(id: chordsID, kind: .instrument, name: "Chords", colorIndex: 2,
+                  instrument: .grandPiano, clips: [chordsClip]),
+            Track(id: bassID, kind: .instrument, name: "Bass", colorIndex: 4,
+                  instrument: .grandPiano, clips: [bassClip]),
+        ]
+
+        let ghosts = PianoRollGhosts.notes(
+            openClipStart: leadClip.startBeat,
+            openClipLength: leadClip.lengthBeats,
+            openTrackID: leadID,
+            tracks: tracks
+        )
+        tk.expect(!ghosts.isEmpty,
+                  "ghost set is non-empty when another track has an overlapping clip")
+        tk.expectEqual(ghosts.count, chordNotes.count + bassNotes.count,
+                       "every note from overlapping other-track clips is a ghost")
+        let openNoteIDs = Set(leadNotes.map(\.id))
+        tk.expect(ghosts.allSatisfy { !openNoteIDs.contains($0.id) },
+                  "ghosts exclude the edited clip’s own notes")
+        tk.expect(ghosts.allSatisfy { $0.sourceTrackID != leadID },
+                  "ghosts never list the open track")
+        tk.expect(ghosts.contains { $0.sourceTrackID == chordsID && (60...69).contains($0.pitch) },
+                  "chord ghosts present")
+        tk.expect(ghosts.contains { $0.sourceTrackID == bassID && ($0.pitch == 36 || $0.pitch == 43) },
+                  "bass ghosts present")
+    }
+
+    tk.suite("Y3 pitch zoom-out widens window enough for distant ghosts") {
+        // Same situation as the live bug: Lead focus ~75-76, chords 60-69, bass 36/43.
+        let focus = PianoRollLayout.focusPitch(
+            notes: (72...79).map { Note(startBeat: 0, lengthBeats: 1, pitch: $0, velocity: 100) }
+        )
+        tk.expect(focus >= 72 && focus <= 79, "lead mean focus sits in the lead register")
+
+        let pane = PianoRollLayout.defaultPitchPaneHeight
+        let atDefault = PianoRollLayout.visiblePitchRange(
+            focusPitch: focus, paneHeight: pane, rowHeight: PianoRollLayout.rowHeight)
+        let atMin = PianoRollLayout.visiblePitchRange(
+            focusPitch: focus, paneHeight: pane, rowHeight: PianoRollLayout.minRowHeight)
+
+        let defaultSpan = atDefault.upperBound - atDefault.lowerBound + 1
+        let minSpan = atMin.upperBound - atMin.lowerBound + 1
+        tk.expect(minSpan > defaultSpan,
+                  "pitch zoom-out draws more rows (\(minSpan) > \(defaultSpan))")
+        tk.expect(
+            atMin.lowerBound <= 60 && atMin.upperBound >= 69,
+            "full pitch zoom-out includes chord ghosts 60-69 (range \(PianoRollLayout.rangeLabel(atMin)))"
+        )
+        tk.expect(
+            atMin.lowerBound <= 36 && atMin.upperBound >= 43,
+            "full pitch zoom-out includes bass ghosts 36 and 43 (range \(PianoRollLayout.rangeLabel(atMin)))"
+        )
+        // T4 invariant still holds at the new min row height.
+        tk.expectEqual(
+            minSpan,
+            PianoRollLayout.drawnRowCount(paneHeight: pane, rowHeight: PianoRollLayout.minRowHeight),
+            "drawn rows still equal range span at min row height"
+        )
+    }
 }

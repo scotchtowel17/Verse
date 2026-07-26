@@ -346,9 +346,65 @@ struct PianoRollEmbeddedView: View {
         }
     }
 
+    /// Pinned controls above the pitch pane (Y3): never wrap into multi-line labels.
+    /// Wide layout shows everything; narrower widths collapse secondary chrome into a menu.
     private var snapBar: some View {
-        HStack(spacing: 8) {
-            Text("Snap").font(.callout).foregroundStyle(.secondary)
+        ViewThatFits(in: .horizontal) {
+            snapBarContents(includeStatus: true, includeSnapLabel: true, snapWidth: 200)
+            snapBarContents(includeStatus: false, includeSnapLabel: false, snapWidth: 180)
+            snapBarMinimal
+        }
+        .lineLimit(1)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// Full / medium toolbar row. All groups use `fixedSize` so labels never stack one letter per line.
+    private func snapBarContents(
+        includeStatus: Bool,
+        includeSnapLabel: Bool,
+        snapWidth: CGFloat
+    ) -> some View {
+        HStack(spacing: 6) {
+            snapPickerGroup(showLabel: includeSnapLabel, width: snapWidth)
+            toolbarDivider
+            pitchNavGroup
+            toolbarDivider
+            // Distinct axes: time = left/right, pitch = up/down (not four identical magnifiers).
+            timeZoomGroup
+            pitchZoomGroup
+            ghostsToggle
+            if includeStatus {
+                Spacer(minLength: 4)
+                noteStatusText
+            } else {
+                Spacer(minLength: 0)
+                overflowMenu(includeStatus: true)
+            }
+        }
+    }
+
+    /// Narrowest layout: snap + pitch range + overflow for zooms / ghosts / status.
+    private var snapBarMinimal: some View {
+        HStack(spacing: 6) {
+            snapPickerGroup(showLabel: false, width: 160)
+            pitchNavGroup
+            Spacer(minLength: 0)
+            overflowMenu(includeStatus: true)
+        }
+    }
+
+    private var toolbarDivider: some View {
+        Divider().frame(height: 16)
+    }
+
+    private func snapPickerGroup(showLabel: Bool, width: CGFloat) -> some View {
+        HStack(spacing: 4) {
+            if showLabel {
+                Text("Snap")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+            }
             Picker("Snap", selection: snapBeatsBinding) {
                 Text("Off").tag(0.0)
                 Text("1/4").tag(1.0)
@@ -357,13 +413,19 @@ struct PianoRollEmbeddedView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 220)
+            .frame(width: width)
             .help("Grid snap for note start and length. Off allows free placement.")
             .onChange(of: store.pianoRollSnapBeats) { _, newValue in
                 if newValue > 0 { lastGridSnapBeats = newValue }
             }
+        }
+        .fixedSize(horizontal: true, vertical: true)
+        .layoutPriority(2)
+    }
 
-            // Explicit pitch navigation (replaces vertical scroll).
+    /// Octave shift + visible range label (always single-line).
+    private var pitchNavGroup: some View {
+        HStack(spacing: 2) {
             Button {
                 shiftPitchWindow(by: 12)
             } label: {
@@ -381,44 +443,20 @@ struct PianoRollEmbeddedView: View {
             Text(PianoRollLayout.rangeLabel(pitchRange))
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
                 .foregroundStyle(.secondary)
+                .fixedSize()
                 .help("Visible pitch range (drag the key gutter to shift)")
-
-            // Horizontal zoom: same value as arrangement (Y2 / X2).
-            rollZoomControls
-
-            // Vertical zoom: pitch row height only (Y2).
-            pitchZoomControls
-
-            Toggle(isOn: Binding(
-                get: { store.showPianoRollGhosts },
-                set: { store.showPianoRollGhosts = $0 }
-            )) {
-                Text("Ghosts")
-                    .font(.caption)
-            }
-            .toggleStyle(.checkbox)
-            .help("Show other tracks’ notes that overlap this clip (dimmed, not editable)")
-
-            Spacer()
-            if !store.selectedNoteIDs.isEmpty {
-                Text(store.selectedNoteIDs.count == 1
-                     ? "Delete removes selection"
-                     : "\(store.selectedNoteIDs.count) selected · Delete removes all")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            }
-            Text("\(notes.count) note\(notes.count == 1 ? "" : "s")")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
+        .fixedSize(horizontal: true, vertical: true)
+        .layoutPriority(1)
     }
 
-    /// Time zoom controls on the roll; writes `store.timelineZoom` shared with the arrangement.
-    private var rollZoomControls: some View {
+    /// Horizontal (time) zoom: same `timelineZoom` as arrangement. Axis icon is left/right.
+    private var timeZoomGroup: some View {
         HStack(spacing: 2) {
-            Text("Time")
-                .font(.caption2)
+            Image(systemName: "arrow.left.and.right")
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
+                .help("Time zoom (shared with arrangement)")
             Button {
                 store.zoomTimelineOut()
             } label: {
@@ -431,6 +469,7 @@ struct PianoRollEmbeddedView: View {
                 .font(.system(size: 10, weight: .medium, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 32, alignment: .trailing)
+                .fixedSize()
                 .help("Timeline zoom (shared with arrangement)")
             Button {
                 store.zoomTimelineIn()
@@ -441,18 +480,22 @@ struct PianoRollEmbeddedView: View {
             .disabled(store.timelineZoom >= BeatTimeline.maxZoom - 1e-9)
             .help(ActionBarLogic.zoomInHelp(zoom: store.timelineZoom).help)
         }
+        .fixedSize(horizontal: true, vertical: true)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Time zoom")
     }
 
-    /// Pitch-row height zoom (more or fewer pitches visible). Independent of time zoom.
-    private var pitchZoomControls: some View {
+    /// Vertical (pitch) zoom: row height only. Axis icon is up/down, not another magnifier pair.
+    private var pitchZoomGroup: some View {
         HStack(spacing: 2) {
-            Text("Pitch")
-                .font(.caption2)
+            Image(systemName: "arrow.up.and.down")
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
+                .help("Pitch zoom (row height)")
             Button {
                 store.zoomPianoRollPitchOut()
             } label: {
-                Image(systemName: "minus.magnifyingglass")
+                Image(systemName: "minus")
             }
             .controlSize(.small)
             .disabled(store.pianoRollRowHeight <= PianoRollLayout.minRowHeight + 0.01)
@@ -460,12 +503,92 @@ struct PianoRollEmbeddedView: View {
             Button {
                 store.zoomPianoRollPitchIn()
             } label: {
-                Image(systemName: "plus.magnifyingglass")
+                Image(systemName: "plus")
             }
             .controlSize(.small)
             .disabled(store.pianoRollRowHeight >= PianoRollLayout.maxRowHeight - 0.01)
             .help("Show fewer pitches (taller rows)")
         }
+        .fixedSize(horizontal: true, vertical: true)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Pitch zoom")
+    }
+
+    /// Icon-only ghosts control so the old “G / h / o / s / t / s” vertical crush cannot return.
+    private var ghostsToggle: some View {
+        Toggle(isOn: Binding(
+            get: { store.showPianoRollGhosts },
+            set: { store.showPianoRollGhosts = $0 }
+        )) {
+            Image(systemName: store.showPianoRollGhosts
+                  ? "rectangle.on.rectangle"
+                  : "rectangle.dashed")
+                .font(.system(size: 12, weight: .medium))
+        }
+        .toggleStyle(.button)
+        .controlSize(.small)
+        .help(store.showPianoRollGhosts
+              ? "Hide other tracks’ overlapping notes"
+              : "Show other tracks’ notes that overlap this clip (dimmed, not editable)")
+        .accessibilityLabel("Ghost notes")
+        .fixedSize()
+    }
+
+    @ViewBuilder
+    private var noteStatusText: some View {
+        if !store.selectedNoteIDs.isEmpty {
+            Text(store.selectedNoteIDs.count == 1
+                 ? "Delete removes selection"
+                 : "\(store.selectedNoteIDs.count) selected")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: true)
+        }
+        Text("\(notes.count) note\(notes.count == 1 ? "" : "s")")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: true)
+    }
+
+    /// Overflow for zooms / ghosts / status when the row cannot fit them inline.
+    private func overflowMenu(includeStatus: Bool) -> some View {
+        Menu {
+            Section("Time zoom") {
+                Button("Zoom time out") { store.zoomTimelineOut() }
+                    .disabled(store.timelineZoom <= BeatTimeline.minZoom + 1e-9)
+                Button("Zoom time in") { store.zoomTimelineIn() }
+                    .disabled(store.timelineZoom >= BeatTimeline.maxZoom - 1e-9)
+                Text(horizontalZoomLabel)
+            }
+            Section("Pitch zoom") {
+                Button("Show more pitches") { store.zoomPianoRollPitchOut() }
+                    .disabled(store.pianoRollRowHeight <= PianoRollLayout.minRowHeight + 0.01)
+                Button("Show fewer pitches") { store.zoomPianoRollPitchIn() }
+                    .disabled(store.pianoRollRowHeight >= PianoRollLayout.maxRowHeight - 0.01)
+            }
+            Section("Ghosts") {
+                Button(store.showPianoRollGhosts ? "Hide ghost notes" : "Show ghost notes") {
+                    store.showPianoRollGhosts.toggle()
+                }
+            }
+            if includeStatus {
+                Section("Notes") {
+                    Text("\(notes.count) note\(notes.count == 1 ? "" : "s")")
+                    if !store.selectedNoteIDs.isEmpty {
+                        Text("\(store.selectedNoteIDs.count) selected")
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.system(size: 13, weight: .medium))
+        }
+        .menuStyle(.borderlessButton)
+        .controlSize(.small)
+        .help("More piano-roll controls")
+        .fixedSize()
     }
 
     private var horizontalZoomLabel: String {
@@ -1126,8 +1249,10 @@ struct PianoRollEmbeddedView: View {
 public enum PianoRollLayout {
     /// Pixel height of one pitch row at default vertical zoom (shared by default band sizing).
     public static let rowHeight: CGFloat = 18
-    /// Shortest pitch row (max pitches visible). Vertical zoom clamp (Y2).
-    public static let minRowHeight: CGFloat = 10
+    /// Shortest pitch row (max pitches visible). Vertical zoom clamp (Y2 / Y3).
+    /// Low enough that zoom-out can expose distant ghost notes (e.g. bass under a lead clip)
+    /// without leaving the T4 whole-row invariant.
+    public static let minRowHeight: CGFloat = 5
     /// Tallest pitch row (fewest pitches visible). Vertical zoom clamp (Y2).
     public static let maxRowHeight: CGFloat = 36
     /// Multiplicative step for pitch-row zoom in / out buttons.
@@ -1137,7 +1262,8 @@ public enum PianoRollLayout {
     public static let defaultViewportPitchRows = 24
 
     /// Space reserved above the pitch pane for the pinned Snap / pitch-nav / zoom toolbar.
-    public static let snapToolbarHeight: CGFloat = 40
+    /// Single-line only (Y3): multi-line chrome steals pane height and defeats pitch zoom-out.
+    public static let snapToolbarHeight: CGFloat = 36
 
     /// Default pitch-pane height (~2 octaves of rows), used before GeometryReader measures.
     public static var defaultPitchPaneHeight: CGFloat {

@@ -390,7 +390,7 @@ the upper half of the keyboard makes no sound.
 4. Vertical zoom must keep the bounded-window invariant from T4: the number of rows drawn always
    equals the span the range label reports, at every zoom level.
 
-## Step Y3 — Roll toolbar is overcrowded, and ghosts are unconfirmed — PENDING
+## Step Y3 — Roll toolbar is overcrowded, and ghosts are unconfirmed — DONE
 
 Y2's substance works and was verified live: the selected track is unmistakable (selection ring
 on the row, tinted lane) while the other tracks stay fully legible, the roll carries its own
