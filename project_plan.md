@@ -1113,3 +1113,47 @@ Three related changes to the roll's interaction model.
    Never per-note and never per drag update.
 
 Selection state is view-local; do not put it in the persisted model. No schema change.
+
+---
+
+# Phase T — Piano roll becomes an inline pane, aligned to the arrangement
+
+Owner: "I need to be able to see the other tracks and where they line up when I'm using the
+piano roll, and I don't think the piano roll should be like a separate pop-out window. It
+should just be like an interface change."
+
+The roll is currently a modal `.sheet`. That is the wrong shape: it hides the arrangement, so
+you cannot see how the notes you are editing line up against the other tracks' clips, and it
+makes the main transport unreachable (which is why S1 had to duplicate transport controls into
+the roll).
+
+## Step T1 — Inline, aligned piano roll — PENDING
+
+1. **Remove the sheet.** The piano roll becomes a pane inside the main window, below the
+   arrangement, with the Tracks list and Arrangement still visible above it. No modal
+   presentation, no Done button dismissing a sheet. A collapse/expand control is fine.
+2. **Shared time axis. This is the point of the whole change.** The roll and the arrangement
+   must use the same beats-per-point scale and the same horizontal scroll offset, so a note at
+   beat 8 in the roll sits directly under whatever is at beat 8 in the arrangement lanes.
+   Scrolling one scrolls the other. Factor the beat-to-x mapping into one shared source of truth
+   rather than duplicating it in two views.
+3. **One ruler, one playhead.** A single beat ruler serves both, and the playhead is a single
+   vertical line that reads continuously from the arrangement lanes down through the roll grid.
+   Clicking or dragging the ruler scrubs, as it does today.
+4. **Selecting a clip in the arrangement loads it into the roll below.** A single click on a MIDI
+   clip selects it and shows its notes; the roll header names the clip and track. With no clip
+   selected the roll shows an empty grid and says what to do.
+5. **The roll's duplicated transport buttons can go**, since the main transport bar is now
+   reachable. Keep ruler scrubbing and keep Space for play/pause. Do not lose pause-holds-position
+   or rewind.
+6. **Preserve every Phase S editing behaviour exactly**: double-click to add, marquee select,
+   shift-click toggle, whole-selection move preserving formation, Cmd-C/X/V with paste at the
+   playhead, Delete removes the selection, and one undo entry per completed gesture.
+7. **Vertical space is now tight** with three stacked sections. The Tracks list already collapsed
+   to nothing once at the default window size. Give each section a sensible minimum, make the
+   roll collapsible, and let the user drag the divider between arrangement and roll. It must be
+   usable at the default window size, not only full screen.
+8. The clip's own note area still scrolls vertically by pitch, independently of the shared
+   horizontal axis.
+
+No schema change. Selection stays view-local.
