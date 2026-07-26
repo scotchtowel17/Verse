@@ -1350,7 +1350,7 @@ arrangement gestures and a one-group Claude patch commit), snapshots via `Projec
 asserts undo depth equals recorded count, then redo-forward and undo-back with full JSON
 identity at every step. **50/50 trials passed. No defects found.**
 
-## Step V2 — Prove MIDI capture end to end — PENDING
+## Step V2 — Prove MIDI capture end to end — DONE
 
 `AppStore` MIDI capture into a clip has never been confirmed by hand; the physical controller
 has never been attached and the record-arm state was invisible at the time. It can still be
@@ -1368,3 +1368,10 @@ proven headlessly.
    running.
 6. Timing assertions must be tolerant of scheduling jitter, and must never be wall-clock upper
    bounds. Assert ordering and approximate beat position, not elapsed time.
+
+**Resolution (V2):** Harness suites in `Sources/VerseCheck/CheckMIDI.swift`
+(`runMIDICaptureV2Checks`): virtual CoreMIDI phrase C60@97 / E64@80 / G67@110 held until stop;
+asserts pitches, velocities, approximate start beats (±0.5 beat slack vs transport sample
+window), phrase ordering, held-note close-out near stop beat, exactly one “Record MIDI” undo
+(stack empty after one undo), and zero capture when unarmed or when the transport is not
+running. Physical controller remains unverified. **No defects found.**

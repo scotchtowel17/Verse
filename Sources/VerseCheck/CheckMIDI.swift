@@ -373,6 +373,248 @@ private func runMIDILiveChecks(_ tk: TestKit) {
         tk.expectEqual(clips.first?.midiNotes?.first?.pitch, 72, "captured pitch")
         tk.expectEqual(store.undoName, "Record MIDI", "undo label")
     }
+
+    // MARK: V2 — prove MIDI capture end to end (virtual CoreMIDI)
+
+    runMIDICaptureV2Checks(tk)
+}
+
+// MARK: - Step V2: MIDI capture end-to-end via virtual CoreMIDI
+
+/// Headless proof that arm + play + virtual MIDI phrase becomes one undoable MIDI clip.
+/// Timing asserts use transport beats only (ordering + approximate position). Wait timeouts
+/// spin the run loop; they are not pass/fail upper bounds on wall-clock performance.
+@MainActor
+private func runMIDICaptureV2Checks(_ tk: TestKit) {
+    /// Slack for CoreMIDI → main-queue hop and transport beat sampling jitter (beats, not seconds).
+    let beatSlack = 0.5
+
+    tk.suite("V2 MIDI capture: virtual source phrase → clip pitches, velocities, beats, undo") {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VerseCheck-V2-MIDI-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let virtName = "VerseCheck-V2-\(UUID().uuidString.prefix(8))"
+        let virtual = try VirtualMIDISource(name: virtName)
+        defer { virtual.tearDown() }
+
+        let store = AppStore(recoveryBaseDir: dir)
+        store.startEngineIfNeeded()
+        // Fresh project: empty undo stack, one instrument track, no clips.
+        tk.expect(!store.canUndo, "V2 starts with empty undo stack")
+        let trackID = store.activeTrackID
+        tk.expect(store.project.tracks.first { $0.id == trackID }?.kind == .instrument,
+                  "active track is instrument")
+        tk.expect(store.project.tracks.first { $0.id == trackID }?.clips.isEmpty == true,
+                  "armed track has no clips yet")
+
+        waitUntil(timeout: 3.0) {
+            store.rescanMIDISources()
+            return store.midiSourceNames.contains(where: { $0.contains("VerseCheck-V2") || $0 == virtName })
+        }
+        tk.expect(
+            store.midiSourceNames.contains(where: { $0.contains("VerseCheck-V2") || $0 == virtName }),
+            "virtual source connected for capture (names: \(store.midiSourceNames))"
+        )
+
+        store.startRecording()
+        tk.expect(store.isRecording, "record armed")
+        store.startPlayback()
+        tk.expect(store.isPlaying, "transport running")
+        // Wait until past the scheduling lead so currentBeat advances with wall time.
+        waitUntil(timeout: 2.0) { (store.playbackBeat ?? 0) > 0.15 }
+
+        // Phrase: C4 (60) vel 97, E4 (64) vel 80 closed by note-off; G4 (67) vel 110 held until stop.
+        struct ExpectedNote {
+            let pitch: UInt8
+            let velocity: UInt8
+            var beatBefore: Double = 0
+            var beatAfter: Double = 0
+        }
+        var expected: [ExpectedNote] = [
+            ExpectedNote(pitch: 60, velocity: 97),
+            ExpectedNote(pitch: 64, velocity: 80),
+            ExpectedNote(pitch: 67, velocity: 110),
+        ]
+
+        // Note 0: on then off after playhead advances.
+        expected[0].beatBefore = store.playbackBeat ?? 0
+        virtual.send(bytes: [0x90, expected[0].pitch, expected[0].velocity])
+        let cOn = waitUntil(timeout: 3.0) { store.heldNotes.contains(Int(expected[0].pitch)) }
+        expected[0].beatAfter = store.playbackBeat ?? expected[0].beatBefore
+        tk.expect(cOn, "virtual note-on C reaches AppStore")
+
+        let afterC = expected[0].beatAfter
+        waitUntil(timeout: 3.0) { (store.playbackBeat ?? 0) >= afterC + 0.35 }
+        virtual.send(bytes: [0x80, expected[0].pitch, 0])
+        waitUntil(timeout: 3.0) { !store.heldNotes.contains(Int(expected[0].pitch)) }
+
+        // Note 1: on then off later.
+        expected[1].beatBefore = store.playbackBeat ?? 0
+        virtual.send(bytes: [0x90, expected[1].pitch, expected[1].velocity])
+        let eOn = waitUntil(timeout: 3.0) { store.heldNotes.contains(Int(expected[1].pitch)) }
+        expected[1].beatAfter = store.playbackBeat ?? expected[1].beatBefore
+        tk.expect(eOn, "virtual note-on E reaches AppStore")
+
+        let afterE = expected[1].beatAfter
+        waitUntil(timeout: 3.0) { (store.playbackBeat ?? 0) >= afterE + 0.35 }
+        virtual.send(bytes: [0x80, expected[1].pitch, 0])
+        waitUntil(timeout: 3.0) { !store.heldNotes.contains(Int(expected[1].pitch)) }
+
+        // Note 2: held open until stop (close-out at stop position).
+        expected[2].beatBefore = store.playbackBeat ?? 0
+        virtual.send(bytes: [0x90, expected[2].pitch, expected[2].velocity])
+        let gOn = waitUntil(timeout: 3.0) { store.heldNotes.contains(Int(expected[2].pitch)) }
+        expected[2].beatAfter = store.playbackBeat ?? expected[2].beatBefore
+        tk.expect(gOn, "virtual note-on G reaches AppStore (held for stop close-out)")
+
+        let holdFrom = expected[2].beatAfter
+        waitUntil(timeout: 3.0) { (store.playbackBeat ?? 0) >= holdFrom + 0.4 }
+        let beatJustBeforeStop = store.playbackBeat ?? holdFrom
+
+        store.stopRecording()
+        store.stopPlayback()
+        store.panic()
+
+        tk.expect(!store.isRecording, "disarmed after stop")
+        tk.expect(!store.isPlaying, "transport stopped")
+
+        // Exactly one undo entry for the whole take.
+        tk.expectEqual(store.undoName, "Record MIDI", "undo label is Record MIDI")
+        tk.expect(store.canUndo, "undo available after take")
+        // Probe depth: one undo must empty the stack (no second entry from the take).
+        store.undo()
+        tk.expect(!store.canUndo, "exactly one undo entry for the take (stack empty after one undo)")
+        store.redo()
+        tk.expectEqual(store.undoName, "Record MIDI", "redo restores the single Record MIDI entry")
+
+        let track = store.project.tracks.first { $0.id == trackID }
+        let midiClip = track?.clips.first { $0.kind == .midi }
+        tk.expect(midiClip != nil, "MIDI clip on the armed instrument track")
+        let notes = midiClip?.midiNotes ?? []
+        tk.expectEqual(notes.count, 3, "phrase has three captured notes (got \(notes.count))")
+
+        // Clip-relative startBeat equals arrangement beat when clip starts at 0 (fresh track).
+        let clipStart = midiClip?.startBeat ?? 0
+        tk.expectEqual(clipStart, 0, "new capture clip starts at beat 0")
+
+        for exp in expected {
+            guard let note = notes.first(where: { $0.pitch == Int(exp.pitch) }) else {
+                tk.expect(false, "captured pitch \(exp.pitch) present")
+                continue
+            }
+            tk.expectEqual(note.velocity, Int(exp.velocity),
+                           "velocity \(exp.velocity) preserved for pitch \(exp.pitch)")
+            // Approximate start: between send-before and land-after, with jitter slack.
+            let lo = exp.beatBefore - beatSlack
+            let hi = exp.beatAfter + beatSlack
+            tk.expect(note.startBeat >= lo && note.startBeat <= hi,
+                      "pitch \(exp.pitch) startBeat \(note.startBeat) ≈ transport [\(exp.beatBefore), \(exp.beatAfter)] ±\(beatSlack)")
+            tk.expect(note.startBeat >= 0, "startBeat non-negative for pitch \(exp.pitch)")
+            tk.expect(note.lengthBeats >= Project.minimumNoteLengthBeats,
+                      "length at least minimum for pitch \(exp.pitch) (got \(note.lengthBeats))")
+        }
+
+        // Ordering: earlier phrase notes start no later than later ones (beat order).
+        if let c = notes.first(where: { $0.pitch == 60 }),
+           let e = notes.first(where: { $0.pitch == 64 }),
+           let g = notes.first(where: { $0.pitch == 67 }) {
+            tk.expect(c.startBeat <= e.startBeat + beatSlack,
+                      "C starts at or before E (C=\(c.startBeat), E=\(e.startBeat))")
+            tk.expect(e.startBeat <= g.startBeat + beatSlack,
+                      "E starts at or before G (E=\(e.startBeat), G=\(g.startBeat))")
+            // Held G closed at stop: end beat near playhead at stopRecording, not zero/infinite.
+            let gEnd = g.startBeat + g.lengthBeats
+            tk.expect(g.lengthBeats < 100, "held note not left unbounded (length \(g.lengthBeats))")
+            tk.expect(abs(gEnd - beatJustBeforeStop) <= beatSlack + 0.25,
+                      "held G closed near stop beat \(beatJustBeforeStop) (end \(gEnd))")
+            tk.expect(gEnd > g.startBeat, "held G has positive duration after close-out")
+        }
+    }
+
+    tk.suite("V2 MIDI capture: nothing captured when unarmed") {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VerseCheck-V2-Unarmed-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let virtName = "VerseCheck-V2U-\(UUID().uuidString.prefix(8))"
+        let virtual = try VirtualMIDISource(name: virtName)
+        defer { virtual.tearDown() }
+
+        let store = AppStore(recoveryBaseDir: dir)
+        store.startEngineIfNeeded()
+        waitUntil(timeout: 3.0) {
+            store.rescanMIDISources()
+            return store.midiSourceNames.contains(where: { $0.contains("VerseCheck-V2U") || $0 == virtName })
+        }
+
+        tk.expect(!store.isRecording, "not armed")
+        store.startPlayback()
+        waitUntil(timeout: 2.0) { (store.playbackBeat ?? 0) > 0.1 }
+
+        virtual.send(bytes: [0x90, 72, 100])
+        waitUntil(timeout: 3.0) { store.heldNotes.contains(72) }
+        virtual.send(bytes: [0x80, 72, 0])
+        waitUntil(timeout: 3.0) { !store.heldNotes.contains(72) }
+
+        store.stopPlayback()
+        store.panic()
+
+        let midiNotes = store.project.tracks
+            .flatMap(\.clips)
+            .filter { $0.kind == .midi }
+            .flatMap { $0.midiNotes ?? [] }
+        tk.expect(midiNotes.isEmpty, "no MIDI notes when record was unarmed")
+        tk.expect(store.undoName != "Record MIDI", "no Record MIDI undo when unarmed")
+        tk.expect(!store.canUndo || store.undoName != "Record MIDI",
+                  "undo stack has no capture entry when unarmed")
+    }
+
+    tk.suite("V2 MIDI capture: nothing captured when transport not running") {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VerseCheck-V2-Stopped-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let virtName = "VerseCheck-V2S-\(UUID().uuidString.prefix(8))"
+        let virtual = try VirtualMIDISource(name: virtName)
+        defer { virtual.tearDown() }
+
+        let store = AppStore(recoveryBaseDir: dir)
+        store.startEngineIfNeeded()
+        waitUntil(timeout: 3.0) {
+            store.rescanMIDISources()
+            return store.midiSourceNames.contains(where: { $0.contains("VerseCheck-V2S") || $0 == virtName })
+        }
+
+        store.startRecording()
+        tk.expect(store.isRecording, "armed")
+        tk.expect(!store.isPlaying, "transport not running")
+
+        // Live play still works; capture must not.
+        virtual.send(bytes: [0x90, 74, 90])
+        waitUntil(timeout: 3.0) { store.heldNotes.contains(74) }
+        tk.expect(store.heldNotes.contains(74), "note still plays while stopped")
+        virtual.send(bytes: [0x80, 74, 0])
+        waitUntil(timeout: 3.0) { !store.heldNotes.contains(74) }
+
+        // Second note left "open" would only matter if capture ran; commit should stay empty.
+        virtual.send(bytes: [0x90, 76, 70])
+        waitUntil(timeout: 3.0) { store.heldNotes.contains(76) }
+
+        store.stopRecording()
+        store.panic()
+
+        let midiNotes = store.project.tracks
+            .flatMap(\.clips)
+            .filter { $0.kind == .midi }
+            .flatMap { $0.midiNotes ?? [] }
+        tk.expect(midiNotes.isEmpty, "no MIDI notes when transport was not running")
+        tk.expect(!store.canUndo, "empty take commits no undo entry")
+        tk.expect(store.undoName != "Record MIDI", "no Record MIDI undo without transport")
+    }
 }
 
 // MARK: - Virtual source helper
