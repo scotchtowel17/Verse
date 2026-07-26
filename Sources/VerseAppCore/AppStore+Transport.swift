@@ -152,6 +152,15 @@ extension AppStore {
             return
         }
         loopRegion = range
+        // Confirm the set in the header so a successful click is never a silent no-op (Z4).
+        let lo = formatLoopBeat(range.lowerBound)
+        let hi = formatLoopBeat(range.upperBound)
+        statusMessage = "Loop region set to beats \(lo)-\(hi)."
+    }
+
+    private func formatLoopBeat(_ v: Double) -> String {
+        if v == floor(v) { return String(Int(v)) }
+        return String(format: "%.2f", v)
     }
 
     /// Pause: stop audio but hold the current playhead so the next play resumes from there.
@@ -245,6 +254,23 @@ extension AppStore {
         recovery.autosave(project)
     }
 
+    /// Rename a track (one undo entry). Empty / whitespace-only names are refused.
+    public func renameTrack(_ id: UUID, to name: String) {
+        guard project.trackIndex(id: id) != nil else {
+            statusMessage = "That track isn’t in this project."
+            return
+        }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            statusMessage = "A track needs a name."
+            return
+        }
+        if project.track(id: id)?.name == trimmed { return }
+        history.record(project, name: "Rename Track")
+        mutate(id) { $0.name = trimmed }
+        recovery.autosave(project)
+    }
+
     public func deleteTrack(_ id: UUID) {
         // Refuse emptying the project: the UI always shows a trash control, so this is a
         // real user ask that must not fail silently.
@@ -261,6 +287,7 @@ extension AppStore {
         engine.removeTrack(id: id)
         project.tracks.removeAll { $0.id == id }
         trackEffects.removeValue(forKey: id)
+        armedTrackIDs.remove(id)
         if activeTrackID == id {
             activeTrackID = project.tracks.first(where: { $0.kind == .instrument })?.id ?? project.tracks.first!.id
         }

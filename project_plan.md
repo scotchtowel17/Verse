@@ -496,7 +496,7 @@ four more buttons: group straight and triplet values so the control stays compac
 deforms or clips at realistic widths. The same divisions must be available to the arrangement
 and the roll, and quantize must use whichever is selected.
 
-## Step Z4 — Loop region not confirmed on screen — OPEN
+## Step Z4 — Loop region not confirmed on screen — DONE
 
 Z3's loop region is implemented and unit-tested (a region set from a clip matches that clip's
 bounds, playback with a region repeats rather than running to the arrangement end, clearing
@@ -504,6 +504,77 @@ restores the whole-arrangement fallback). It could NOT be confirmed by hand: aft
 attempts using both the roll's loop control and the action bar's loop button, no loop band ever
 appeared in the shared ruler.
 
-Either the region is not being set by those controls, or it is set but not drawn. Determine
-which. The ruler band is the whole point of the feature, since a loop you cannot see is a loop
-you cannot trust or adjust. Confirm by running the app, not by adding another assertion.
+**Root cause (fixed in AA3):** the region *was* being set correctly by the controls
+(`setLoopRegionFromSelectedClip` and ruler Option-drag), but the band failed to *draw*. The
+loop band was painted only inside a SwiftUI `Canvas` drawing closure that read
+`store.loopRegion`. Canvas renderer closures are not reliably dependency-tracked for
+`@Observable`, so setting the region never forced a ruler repaint. Fix: read loop state in the
+view body and draw the band as a real `RoundedRectangle` overlay (orange, visible when loop is
+on or off), with a status message when set from a clip.
+
+---
+
+# Phase AA — One track row, and a subtractive pass
+
+Owner: "less is more. Minimalist but the functions that survive are hyper functional."
+
+So this is not only the merge. It is a subtraction pass with the merge at its centre. Measured
+today: 16 controls in a track row, snap rendered in two separate places, zoom controls in both
+the action bar and the roll toolbar, and permanent instructional sentences occupying chrome.
+
+## Step AA1 — Merge the track list into the arrangement — DONE
+
+Verse renders each track's identity twice: once in the Tracks section with its controls, and
+again as a lane label in the Arrangement. Soundtrap, and every other DAW, has one row per track
+whose left end is the controls and whose right end is that track's timeline.
+
+1. **One row per track.** The track controls become the lane's left gutter. Delete the separate
+   Tracks section and the duplicated lane labels entirely.
+2. **This recovers a whole stacked section of vertical height**, which is the point. Three
+   separate defects this session traced to the piano roll being starved of room. Give the
+   recovered space to the roll and arrangement rather than padding.
+3. Selecting the row selects the track, exactly as selecting a lane does now.
+
+## Step AA2 — Subtract — DONE
+
+A control earns its place on screen or it moves into a menu. Judgement, not a formula.
+
+1. **Always visible in a track row**: colour strip, name, record arm, mute, solo, volume, and a
+   level indicator. These are touched constantly while writing.
+2. **Into a per-track menu**: instrument choice, pan, effect, colour, rename, delete. Each is
+   deliberate and infrequent. The menu must be one click and must not hide anything destructive
+   behind ambiguity.
+3. **One snap control, not two.** Snap currently renders separately for the arrangement and the
+   roll. Decide whether they are one value: if yes, show it once; if they are genuinely
+   independent, make that legible rather than looking like the same control twice.
+4. **Zoom appears in both the action bar and the roll toolbar.** Keep one. Time zoom is shared
+   between the two views anyway, so it belongs in one place.
+5. **Remove the permanent instructional sentences** ("Select · drag to move · right edge to
+   resize · click MIDI for piano roll" and the roll's equivalent). Teaching text that never goes
+   away is chrome. Keep such hints for empty states only, where they are genuinely useful, which
+   is already how the empty roll behaves.
+6. Every surviving control must be hyper functional: correct disabled states with a tooltip
+   saying why, keyboard equivalents where they exist, and no dead affordances.
+
+## Step AA3 — Per-track record arm, and fix the loop region — DONE
+
+1. **Per-track record arm.** Today there is one global record button and the destination is
+   implied by whichever track is active, which is ambiguous once MIDI capture is involved. Arm
+   is now per track, in the row. The transport record button starts and stops the take; the
+   armed track or tracks receive it. If nothing is armed, say so rather than silently recording
+   nowhere.
+2. **Fix Z4, the loop region that never appears.** It is unit-tested but no loop band has ever
+   been seen in the ruler. Determine whether the controls fail to set it or it fails to draw,
+   fix the real cause, and confirm by running the app. A loop you cannot see is a loop you
+   cannot trust or adjust.
+
+Preserve every behaviour: shared time axis, ghosts, velocity editing, zoom on both axes, the T4
+row-count invariant, one undo entry per gesture, and the Cmd-C/V focus routing.
+
+## Step AA4 — Default split now starves the arrangement — DONE
+
+AA1 recovered vertical space and gave essentially all of it to the roll. With three tracks the
+arrangement shows about two and a half rows and the third is clipped, so a song with more than a
+couple of parts cannot be seen at a glance. Choose a default split that shows roughly four track
+rows before the roll begins, keep the divider draggable, and let the arrangement scroll beyond
+that. Do not go back to starving the roll; both need a fair share.

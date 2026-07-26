@@ -6,20 +6,24 @@ import VerseModel
 /// Menu style with Straight and Triplets sections keeps the control narrow so the
 /// dense toolbars never deform or clip at realistic widths. Segmented buttons were
 /// already overflowing before 1/32 and the three triplet values were added.
+///
+/// Arrangement (clips) and roll (notes) keep independent snap values. Call sites pass
+/// a distinct `label` so the two never look like the same control twice (AA2).
 struct SnapGridPicker: View {
     @Binding var snapBeats: Double
-    var showLabel: Bool = true
+    /// Visible label before the menu. Empty string hides the label.
+    var label: String = "Snap"
     var helpText: String
 
     var body: some View {
         HStack(spacing: 4) {
-            if showLabel {
-                Text("Snap")
+            if !label.isEmpty {
+                Text(label)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize()
             }
-            Picker("Snap", selection: $snapBeats) {
+            Picker(label.isEmpty ? "Snap" : label, selection: $snapBeats) {
                 Text("Off").tag(SnapGrid.off)
                 Section("Straight") {
                     Text("1/4").tag(SnapGrid.quarter)

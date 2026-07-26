@@ -2,131 +2,255 @@ import SwiftUI
 import VerseModel
 import VerseEngine
 
-/// The track list with per-track mix controls, instrument choice, and effect inserts.
-struct TrackListView: View {
-    @Environment(AppStore.self) private var store
-
-    /// Enough height for at least one full track row (instrument, volume, pan, M/S, effect).
-    /// Without a floor the flexible ScrollView collapses to zero at the default window size.
-    private static let rowMinHeight: CGFloat = 72
-    /// Cap tracks so the arrangement + inline piano roll keep room at the default window size.
-    private static let listMaxHeight: CGFloat = 160
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Tracks").font(.headline)
-                Spacer()
-                Button { store.addInstrumentTrack() } label: { Label("Instrument", systemImage: "pianokeys") }
-                    .controlSize(.small)
-                Button { store.addAudioTrack() } label: { Label("Audio", systemImage: "waveform") }
-                    .controlSize(.small)
-            }
-            ScrollView {
-                VStack(spacing: 6) {
-                    ForEach(store.project.tracks) { track in
-                        TrackRow(track: track)
-                    }
-                }
-            }
-            .frame(minHeight: Self.rowMinHeight, maxHeight: Self.listMaxHeight)
-            // Fixed band: do not compete with the timeline for leftover height.
-            .layoutPriority(0)
-        }
-        .fixedSize(horizontal: false, vertical: true)
-    }
-}
-
-private struct TrackRow: View {
+/// Compact always-visible track controls for the arrangement lane gutter (Phase AA).
+///
+/// Always on the row: colour strip, name, record arm, mute, solo, volume, level.
+/// Deliberate actions live in a one-click per-track menu: instrument, pan, effect,
+/// colour, rename, piano roll, delete.
+struct TrackLaneGutter: View {
     @Environment(AppStore.self) private var store
     let track: Track
 
-    /// Working track (Y2): roll binding from track-row selection, instrument or audio.
+    @State private var showRenameAlert = false
+    @State private var renameDraft = ""
+    @State private var showPanPopover = false
+
+    /// Working track (Y2): roll binding from row selection, instrument or audio.
     private var isSelected: Bool { track.id == store.rollTrackID }
     private var identity: TrackIdentityColor.Swatch { TrackIdentityColor.swatch(for: track.colorIndex) }
 
-    var body: some View {
-        HStack(spacing: 10) {
-            // Identity strip: thicker when selected so the working track is obvious (Y2).
-            RoundedRectangle(cornerRadius: 2)
-                .fill(identity.solid)
-                .frame(width: isSelected ? 6 : 4)
-                .padding(.vertical, 2)
-
-            Image(systemName: track.kind == .instrument ? "pianokeys" : "waveform")
-                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(track.name).font(.callout).fontWeight(isSelected ? .semibold : .regular)
-                MeterBar(level: store.trackLevel(track.id), height: 5,
-                         identityColor: identity.solid)
-                    .frame(width: 130)
-            }
-            .frame(width: 150, alignment: .leading)
-            .contentShape(Rectangle())
-            .onTapGesture { store.selectTrack(track.id) }
-
-            colorPicker
-
-            if track.kind == .instrument {
-                instrumentPicker
-            } else {
-                Text("\(track.clips.count) clip(s)").font(.caption).foregroundStyle(.secondary).frame(width: 130)
-            }
-
-            // Volume
-            Slider(value: Binding(get: { track.volume }, set: { store.setVolume($0, track.id) }), in: 0...1)
-                .frame(width: 90)
-            // Pan
-            Slider(value: Binding(get: { track.pan }, set: { store.setPan($0, track.id) }), in: -1...1)
-                .frame(width: 60)
-                .help("Pan")
-
-            Button { store.toggleMute(track.id) } label: { Text("M") }
-                .buttonStyle(.bordered).tint(track.mute ? .orange : nil).controlSize(.small)
-            Button { store.toggleSolo(track.id) } label: { Text("S") }
-                .buttonStyle(.bordered).tint(track.solo ? .blue : nil).controlSize(.small)
-
-            Picker("", selection: Binding(
-                get: { store.effect(for: track.id) },
-                set: { store.setEffect($0, track.id) })) {
-                ForEach(VerseAudioEngine.BuiltInEffect.allCases) { Text($0.label).tag($0) }
-            }.labelsHidden().frame(width: 90).help("Insert effect")
-
-            if track.kind == .instrument {
-                Button {
-                    store.openPianoRoll(forTrack: track.id)
-                } label: {
-                    Image(systemName: "rectangle.split.2x1")
-                }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
-                .help("Show piano roll for this track")
-            }
-
-            Button(role: .destructive) { store.deleteTrack(track.id) } label: { Image(systemName: "trash") }
-                .buttonStyle(.borderless).controlSize(.small)
-        }
-        .padding(8)
-        // Selected: track colour + system accent. Unselected rows stay fully legible (Y2).
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(isSelected
-                      ? identity.solid.opacity(0.16)
-                      : Color.black.opacity(0.04))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(
-                    isSelected ? Color.accentColor.opacity(0.85) : Color.clear,
-                    lineWidth: isSelected ? 1.5 : 0
-                )
-        )
+    /// Per-track record arm (AA3). Independent of whether a take is currently running.
+    private var isArmedVisual: Bool {
+        store.isTrackArmed(track.id)
     }
 
-    /// Eight-slot identity colour menu. Does not offer semantic colours (record/play/selection).
-    private var colorPicker: some View {
+    var body: some View {
+        HStack(spacing: 0) {
+            // Identity strip: thicker when selected so the working track is obvious (Y2).
+            Rectangle()
+                .fill(identity.solid)
+                .frame(width: isSelected ? 6 : 4)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 3) {
+                    Text(track.name)
+                        .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                        .lineLimit(1)
+                        .help(track.name)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture { store.selectTrack(track.id) }
+
+                    armButton
+                    muteButton
+                    soloButton
+                    trackMenu
+                }
+
+                HStack(spacing: 4) {
+                    Slider(
+                        value: Binding(
+                            get: { track.volume },
+                            set: { store.setVolume($0, track.id) }
+                        ),
+                        in: 0...1
+                    )
+                    .controlSize(.mini)
+                    .frame(maxWidth: .infinity)
+                    .help("Volume")
+                    .accessibilityLabel("Volume")
+
+                    MeterBar(
+                        level: store.trackLevel(track.id),
+                        height: 5,
+                        identityColor: identity.solid
+                    )
+                    .frame(width: 36)
+                    .help("Level")
+                    .accessibilityLabel("Level meter")
+                }
+            }
+            .padding(.leading, 4)
+            .padding(.trailing, 4)
+            .padding(.vertical, 4)
+        }
+        .frame(width: BeatTimeline.gutterWidth, height: ArrangementLanesView.laneHeight, alignment: .leading)
+        .background(isSelected ? identity.solid.opacity(0.16) : Color.black.opacity(0.03))
+        .overlay(alignment: .trailing) {
+            if isSelected {
+                Rectangle()
+                    .fill(Color.accentColor.opacity(0.85))
+                    .frame(width: 2)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.black.opacity(0.08)).frame(height: 0.5)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { store.selectTrack(track.id) }
+        .alert("Rename Track", isPresented: $showRenameAlert) {
+            TextField("Name", text: $renameDraft)
+            Button("Rename") {
+                store.renameTrack(track.id, to: renameDraft)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Choose a short name for this track.")
+        }
+        .popover(isPresented: $showPanPopover, arrowEdge: .trailing) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Pan")
+                    .font(.caption.weight(.semibold))
+                Slider(
+                    value: Binding(
+                        get: { track.pan },
+                        set: { store.setPan($0, track.id) }
+                    ),
+                    in: -1...1
+                )
+                .frame(width: 160)
+                Text(panLabel(track.pan))
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+            }
+            .padding(12)
+        }
+    }
+
+    // MARK: - Always-visible buttons
+
+    private var armButton: some View {
+        let blocked = store.copilotPreviewBlocksTransport
+        return Button {
+            armTapped()
+        } label: {
+            Text("R")
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .frame(minWidth: 16)
+        }
+        .buttonStyle(.bordered)
+        .tint(isArmedVisual ? .red : nil)
+        .controlSize(.mini)
+        .disabled(blocked)
+        .help(armHelp(blocked: blocked))
+        .accessibilityLabel(isArmedVisual ? "Armed for recording" : "Record arm")
+        .accessibilityValue(isArmedVisual ? "Armed" : "Not armed")
+    }
+
+    private var muteButton: some View {
+        Button { store.toggleMute(track.id) } label: {
+            Text("M")
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .frame(minWidth: 16)
+        }
+        .buttonStyle(.bordered)
+        .tint(track.mute ? .orange : nil)
+        .controlSize(.mini)
+        .help(track.mute ? "Unmute track" : "Mute track")
+        .accessibilityLabel("Mute")
+        .accessibilityValue(track.mute ? "On" : "Off")
+    }
+
+    private var soloButton: some View {
+        Button { store.toggleSolo(track.id) } label: {
+            Text("S")
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .frame(minWidth: 16)
+        }
+        .buttonStyle(.bordered)
+        .tint(track.solo ? .blue : nil)
+        .controlSize(.mini)
+        .help(track.solo ? "Unsolo track" : "Solo track")
+        .accessibilityLabel("Solo")
+        .accessibilityValue(track.solo ? "On" : "Off")
+    }
+
+    // MARK: - Per-track menu (one click)
+
+    private var trackMenu: some View {
         Menu {
+            if track.kind == .instrument {
+                instrumentMenu
+                Divider()
+            }
+
+            Button("Pan…") {
+                store.selectTrack(track.id)
+                showPanPopover = true
+            }
+
+            effectMenu
+
+            colorMenu
+
+            Divider()
+
+            Button("Rename…") {
+                renameDraft = track.name
+                showRenameAlert = true
+            }
+
+            if track.kind == .instrument {
+                Button("Show Piano Roll") {
+                    store.openPianoRoll(forTrack: track.id)
+                }
+            }
+
+            Divider()
+
+            Button("Delete Track", role: .destructive) {
+                store.deleteTrack(track.id)
+            }
+            .disabled(store.project.tracks.count <= 1)
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.system(size: 12, weight: .medium))
+                .frame(width: 18, height: 18)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .frame(width: 18)
+        .help("Track options")
+        .accessibilityLabel("Track menu")
+    }
+
+    @ViewBuilder
+    private var instrumentMenu: some View {
+        let selection = Binding(
+            get: { store.presetSelectionKey(for: track) },
+            set: { store.selectPreset(selectionKey: $0, for: track.id) }
+        )
+        Picker("Instrument", selection: selection) {
+            ForEach(SoundBank.presetCategories, id: \.self) { category in
+                Section(category) {
+                    ForEach(SoundBank.presets(in: category), id: \.selectionKey) { preset in
+                        Text(preset.name).tag(preset.selectionKey)
+                    }
+                }
+            }
+            // Off-list GM program (e.g. Claude setInstrument): show honestly, not blank.
+            if let inst = track.instrument, SoundBank.preset(matching: inst) == nil {
+                Text(SoundBank.customLabel(for: inst))
+                    .tag(SoundBank.selectionKey(for: inst))
+            }
+        }
+    }
+
+    private var effectMenu: some View {
+        Picker("Effect", selection: Binding(
+            get: { store.effect(for: track.id) },
+            set: { store.setEffect($0, track.id) }
+        )) {
+            ForEach(VerseAudioEngine.BuiltInEffect.allCases) { effect in
+                Text(effect.label).tag(effect)
+            }
+        }
+    }
+
+    private var colorMenu: some View {
+        Menu("Colour") {
             ForEach(0..<TrackPalette.count, id: \.self) { index in
                 let swatch = TrackIdentityColor.swatch(for: index)
                 Button {
@@ -141,41 +265,38 @@ private struct TrackRow: View {
                     }
                 }
             }
-        } label: {
-            Circle()
-                .fill(identity.solid)
-                .frame(width: 14, height: 14)
-                .overlay(Circle().strokeBorder(Color.primary.opacity(0.25), lineWidth: 0.5))
         }
-        .menuStyle(.borderlessButton)
-        .frame(width: 22)
-        .help("Track colour")
     }
 
-    /// Bound to program + bank (not track.name) so a new project's "Piano" track still shows
-    /// Grand Piano selected, and renaming never blanks the instrument.
-    @ViewBuilder
-    private var instrumentPicker: some View {
-        let selection = Binding(
-            get: { store.presetSelectionKey(for: track) },
-            set: { store.selectPreset(selectionKey: $0, for: track.id) }
-        )
-        Picker("", selection: selection) {
-            ForEach(SoundBank.presetCategories, id: \.self) { category in
-                Section(category) {
-                    ForEach(SoundBank.presets(in: category), id: \.selectionKey) { preset in
-                        Text(preset.name).tag(preset.selectionKey)
-                    }
-                }
-            }
-            // Off-list GM program (e.g. Claude setInstrument): show honestly, not blank.
-            // Only present when this track's instrument is not in the curated list.
-            if let inst = track.instrument, SoundBank.preset(matching: inst) == nil {
-                Text(SoundBank.customLabel(for: inst))
-                    .tag(SoundBank.selectionKey(for: inst))
-            }
+    // MARK: - Arm semantics (AA3: per-track arm; transport record starts/stops the take)
+
+    private func armTapped() {
+        store.selectTrack(track.id)
+        store.toggleTrackArm(track.id)
+    }
+
+    private func armHelp(blocked: Bool) -> String {
+        if blocked {
+            return "Unavailable while reviewing Claude changes"
         }
-        .labelsHidden()
-        .frame(width: 130)
+        if isArmedVisual {
+            if store.isRecording && store.isPlaying {
+                return "Armed and recording. Click R to disarm this track, or ⌘R to stop the take."
+            }
+            if store.isRecording {
+                return "Armed for this take. Press play to capture, or click R to disarm."
+            }
+            return "Armed. Press the transport record button to start a take, or click R to disarm."
+        }
+        if track.kind == .audio {
+            return "Arm this track for audio recording"
+        }
+        return "Arm this track for MIDI recording"
+    }
+
+    private func panLabel(_ pan: Double) -> String {
+        if abs(pan) < 0.02 { return "Center" }
+        if pan < 0 { return String(format: "L %.0f%%", abs(pan) * 100) }
+        return String(format: "R %.0f%%", pan * 100)
     }
 }

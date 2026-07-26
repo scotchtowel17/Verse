@@ -17,7 +17,7 @@ public struct ContentView: View {
                 ActionBar(fitAvailableWidth: max(1, geo.size.width - BeatTimeline.gutterWidth))
             }
             .frame(height: 32)
-            TrackListView()
+            // Track controls live in the arrangement lane gutter (AA1): one row per track.
             // Shared arrangement + inline piano roll (one time axis, one H scroll).
             TimelineWorkspaceView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

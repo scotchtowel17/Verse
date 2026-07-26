@@ -288,9 +288,10 @@ private func runMIDILiveChecks(_ tk: TestKit) {
 
         let store = AppStore(recoveryBaseDir: dir)
         store.startEngineIfNeeded()
-        // Active track is the default instrument; arm record (MIDI path works even if mic fails).
+        // Arm the active instrument, then start the take (AA3: arm and take are separate).
+        store.setTrackArmed(store.activeTrackID, true)
         store.startRecording()
-        tk.expect(store.isRecording, "recording armed for MIDI capture")
+        tk.expect(store.isRecording, "take running for MIDI capture")
         store.startPlayback()
         tk.expect(store.isPlaying, "transport playing during capture")
 
@@ -312,7 +313,7 @@ private func runMIDILiveChecks(_ tk: TestKit) {
         store.stopPlayback()
         store.panic()
 
-        tk.expect(!store.isRecording, "recording disarmed after stop")
+        tk.expect(!store.isRecording, "take stopped after stop")
         tk.expectEqual(store.undoName, "Record MIDI", "one undo entry labelled Record MIDI")
 
         let track = store.project.tracks.first { $0.id == store.activeTrackID }
@@ -355,6 +356,7 @@ private func runMIDILiveChecks(_ tk: TestKit) {
         // Default project instrument track has no clips.
         tk.expect(store.project.tracks[0].clips.isEmpty, "fresh track has no clips")
 
+        store.setTrackArmed(store.project.tracks[0].id, true)
         store.startRecording()
         store.startPlayback()
         waitUntil(timeout: 1.0) { (store.playbackBeat ?? 0) > 0.05 }
@@ -418,8 +420,9 @@ private func runMIDICaptureV2Checks(_ tk: TestKit) {
             "virtual source connected for capture (names: \(store.midiSourceNames))"
         )
 
+        store.setTrackArmed(trackID, true)
         store.startRecording()
-        tk.expect(store.isRecording, "record armed")
+        tk.expect(store.isRecording, "take running")
         store.startPlayback()
         tk.expect(store.isPlaying, "transport running")
         // Wait until past the scheduling lead so currentBeat advances with wall time.
@@ -589,8 +592,9 @@ private func runMIDICaptureV2Checks(_ tk: TestKit) {
             return store.midiSourceNames.contains(where: { $0.contains("VerseCheck-V2S") || $0 == virtName })
         }
 
+        store.setTrackArmed(store.activeTrackID, true)
         store.startRecording()
-        tk.expect(store.isRecording, "armed")
+        tk.expect(store.isRecording, "take running")
         tk.expect(!store.isPlaying, "transport not running")
 
         // Live play still works; capture must not.

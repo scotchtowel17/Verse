@@ -23,6 +23,8 @@ struct PianoRollChrome: View {
         HStack(spacing: 10) {
             Label("Piano roll", systemImage: "rectangle.split.2x1")
                 .font(.subheadline.weight(.semibold))
+            // Status only (clip / track name). Permanent how-to chrome lives in empty states
+            // inside the grid (AA2), not here.
             if let track, track.kind == .audio {
                 Text("· \(track.name)")
                     .foregroundStyle(.secondary)
@@ -40,17 +42,7 @@ struct PianoRollChrome: View {
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
-                } else {
-                    Text("Double-click the grid to add a note")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
                 }
-            } else {
-                Text("Select a track to edit notes")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
             }
             Spacer()
             Button {
@@ -362,6 +354,7 @@ struct PianoRollEmbeddedView: View {
     }
 
     /// Full / medium toolbar row. All groups use `fixedSize` so labels never stack one letter per line.
+    /// Time zoom lives only on the action bar (AA2); pitch zoom stays here (roll-only axis).
     private func snapBarContents(
         includeStatus: Bool,
         includeSnapLabel: Bool
@@ -371,8 +364,6 @@ struct PianoRollEmbeddedView: View {
             toolbarDivider
             pitchNavGroup
             toolbarDivider
-            // Distinct axes: time = left/right, pitch = up/down (not four identical magnifiers).
-            timeZoomGroup
             pitchZoomGroup
             ghostsToggle
             velocityModeToggle
@@ -387,7 +378,7 @@ struct PianoRollEmbeddedView: View {
         }
     }
 
-    /// Narrowest layout: snap + pitch range + overflow for zooms / ghosts / status.
+    /// Narrowest layout: snap + pitch range + overflow for pitch zoom / ghosts / status.
     private var snapBarMinimal: some View {
         HStack(spacing: 6) {
             snapPickerGroup(showLabel: false)
@@ -402,10 +393,11 @@ struct PianoRollEmbeddedView: View {
     }
 
     private func snapPickerGroup(showLabel: Bool) -> some View {
+        // Note snap is independent of clip snap; label keeps the two legible (AA2).
         SnapGridPicker(
             snapBeats: snapBeatsBinding,
-            showLabel: showLabel,
-            helpText: "Grid snap for note start and length. Off allows free placement."
+            label: showLabel ? "Notes" : "",
+            helpText: "Note snap: grid for note start and length. Off allows free placement."
         )
         .onChange(of: store.pianoRollSnapBeats) { _, newValue in
             if newValue > 0 { lastGridSnapBeats = newValue }
@@ -440,42 +432,7 @@ struct PianoRollEmbeddedView: View {
         .layoutPriority(1)
     }
 
-    /// Horizontal (time) zoom: same `timelineZoom` as arrangement. Axis icon is left/right.
-    private var timeZoomGroup: some View {
-        HStack(spacing: 2) {
-            Image(systemName: "arrow.left.and.right")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .help("Time zoom (shared with arrangement)")
-            Button {
-                store.zoomTimelineOut()
-            } label: {
-                Image(systemName: "minus.magnifyingglass")
-            }
-            .controlSize(.small)
-            .disabled(store.timelineZoom <= BeatTimeline.minZoom + 1e-9)
-            .help(ActionBarLogic.zoomOutHelp(zoom: store.timelineZoom).help)
-            Text(horizontalZoomLabel)
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 32, alignment: .trailing)
-                .fixedSize()
-                .help("Timeline zoom (shared with arrangement)")
-            Button {
-                store.zoomTimelineIn()
-            } label: {
-                Image(systemName: "plus.magnifyingglass")
-            }
-            .controlSize(.small)
-            .disabled(store.timelineZoom >= BeatTimeline.maxZoom - 1e-9)
-            .help(ActionBarLogic.zoomInHelp(zoom: store.timelineZoom).help)
-        }
-        .fixedSize(horizontal: true, vertical: true)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Time zoom")
-    }
-
-    /// Vertical (pitch) zoom: row height only. Axis icon is up/down, not another magnifier pair.
+    /// Vertical (pitch) zoom: row height only. Time zoom is on the action bar only (AA2).
     private var pitchZoomGroup: some View {
         HStack(spacing: 2) {
             Image(systemName: "arrow.up.and.down")
@@ -571,9 +528,7 @@ struct PianoRollEmbeddedView: View {
     @ViewBuilder
     private var noteStatusText: some View {
         if !store.selectedNoteIDs.isEmpty {
-            Text(store.selectedNoteIDs.count == 1
-                 ? "Delete removes selection"
-                 : "\(store.selectedNoteIDs.count) selected")
+            Text("\(store.selectedNoteIDs.count) selected")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
@@ -586,16 +541,10 @@ struct PianoRollEmbeddedView: View {
             .fixedSize(horizontal: true, vertical: true)
     }
 
-    /// Overflow for zooms / ghosts / status when the row cannot fit them inline.
+    /// Overflow for pitch zoom / ghosts / status when the row cannot fit them inline.
+    /// Time zoom is not duplicated here (action bar only, AA2).
     private func overflowMenu(includeStatus: Bool) -> some View {
         Menu {
-            Section("Time zoom") {
-                Button("Zoom time out") { store.zoomTimelineOut() }
-                    .disabled(store.timelineZoom <= BeatTimeline.minZoom + 1e-9)
-                Button("Zoom time in") { store.zoomTimelineIn() }
-                    .disabled(store.timelineZoom >= BeatTimeline.maxZoom - 1e-9)
-                Text(horizontalZoomLabel)
-            }
             Section("Pitch zoom") {
                 Button("Show more pitches") { store.zoomPianoRollPitchOut() }
                     .disabled(store.pianoRollRowHeight <= PianoRollLayout.minRowHeight + 0.01)
@@ -637,11 +586,6 @@ struct PianoRollEmbeddedView: View {
         .controlSize(.small)
         .help("More piano-roll controls")
         .fixedSize()
-    }
-
-    private var horizontalZoomLabel: String {
-        let pct = Int((store.timelineZoom * 100).rounded())
-        return "\(pct)%"
     }
 
     private func shiftPitchWindow(by delta: Int) {
