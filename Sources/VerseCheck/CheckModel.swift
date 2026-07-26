@@ -882,4 +882,64 @@ func runModelChecks(_ tk: TestKit) {
         }
         tk.expectEqual(p.tracks[0].clips[0].midiNotes?[1].lengthBeats, 2, "sibling still untouched after fails")
     }
+
+    // MARK: - Step Z1: setNoteVelocity
+
+    tk.suite("Model: setNoteVelocity") {
+        var p = Project.newUntitled()
+        let n1 = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        let n2 = Note(startBeat: 2, lengthBeats: 2, pitch: 64, velocity: 90)
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 8,
+                        midiNotes: [n1, n2])
+        p.tracks[0].clips = [clip]
+
+        try p.setNoteVelocity(id: n1.id, inClip: clip.id, velocity: 42)
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].velocity, 42, "velocity updated")
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].pitch, 60, "pitch untouched")
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].startBeat, 0, "start untouched")
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].lengthBeats, 1, "length untouched")
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[1].velocity, 90, "sibling velocity untouched")
+
+        try p.setNoteVelocity(id: n1.id, inClip: clip.id, velocity: 1)
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].velocity, 1, "velocity 1 accepted")
+        try p.setNoteVelocity(id: n1.id, inClip: clip.id, velocity: 127)
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].velocity, 127, "velocity 127 accepted")
+
+        tk.expectThrows("reject velocity 0") {
+            try p.setNoteVelocity(id: n1.id, inClip: clip.id, velocity: 0)
+        }
+        tk.expectThrows("reject velocity 128") {
+            try p.setNoteVelocity(id: n1.id, inClip: clip.id, velocity: 128)
+        }
+        tk.expectThrows("reject negative velocity") {
+            try p.setNoteVelocity(id: n1.id, inClip: clip.id, velocity: -1)
+        }
+        tk.expectEqual(p.tracks[0].clips[0].midiNotes?[0].velocity, 127,
+                       "failed set leaves prior velocity")
+
+        tk.expectThrows("reject unknown note on set velocity") {
+            try p.setNoteVelocity(id: UUID(), inClip: clip.id, velocity: 64)
+        }
+        tk.expectThrows("reject unknown clip on set velocity") {
+            try p.setNoteVelocity(id: n1.id, inClip: UUID(), velocity: 64)
+        }
+    }
+
+    tk.suite("Model: note velocity round-trips through save and load") {
+        var p = Project.newUntitled()
+        p.title = "Velocity Song"
+        let soft = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 32)
+        let hard = Note(startBeat: 1, lengthBeats: 0.5, pitch: 64, velocity: 120)
+        p.tracks[0].clips = [
+            Clip(kind: .midi, name: "dyn", startBeat: 0, lengthBeats: 4, midiNotes: [soft, hard])
+        ]
+        let data = try p.jsonData()
+        let back = try Project.fromJSON(data)
+        let notes = back.tracks[0].clips[0].midiNotes ?? []
+        tk.expectEqual(notes.count, 2, "two notes after load")
+        tk.expectEqual(notes[0].velocity, 32, "soft velocity round-trips")
+        tk.expectEqual(notes[1].velocity, 120, "hard velocity round-trips")
+        tk.expectEqual(notes[0].id, soft.id, "soft note id stable")
+        tk.expectEqual(notes[1].id, hard.id, "hard note id stable")
+    }
 }

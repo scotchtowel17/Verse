@@ -125,6 +125,12 @@ public enum PatchPreviewRenderer {
                 let clip = clipLabel(clipRef, project: project)
                 lines.append(
                     "Move a note in \(clip) on \(track) to pitch \(pitch) at beat \(formatNumber(startBeat))")
+
+            case .setNoteVelocity(let ref, let clipRef, _, let velocity):
+                let track = trackLabel(ref, project: project, temps: tempTrackNames)
+                let clip = clipLabel(clipRef, project: project)
+                lines.append(
+                    "Set velocity of a note in \(clip) on \(track) to \(velocity)")
             }
         }
 

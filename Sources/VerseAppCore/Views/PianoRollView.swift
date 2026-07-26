@@ -101,7 +101,9 @@ struct PianoRollEmbeddedView: View {
     @State private var moveOrigin: MoveOrigin?
     /// Drag-resize bookkeeping.
     @State private var resizeOrigin: ResizeOrigin?
-    /// True while a continuous move/resize gesture is live (guards double-begin).
+    /// Drag-velocity bookkeeping (origins for the whole selection).
+    @State private var velocityOrigin: VelocityOrigin?
+    /// True while a continuous move/resize/velocity gesture is live (guards double-begin).
     @State private var continuousGestureLive = false
     /// Marquee rubber-band on empty grid (view-local).
     @State private var marqueeStart: CGPoint?
@@ -373,6 +375,8 @@ struct PianoRollEmbeddedView: View {
             timeZoomGroup
             pitchZoomGroup
             ghostsToggle
+            velocityModeToggle
+            defaultVelocityControl
             if includeStatus {
                 Spacer(minLength: 4)
                 noteStatusText
@@ -534,6 +538,50 @@ struct PianoRollEmbeddedView: View {
         .fixedSize()
     }
 
+    /// Velocity mode: drag notes up/down to change dynamics (Option/⌘-drag also works).
+    private var velocityModeToggle: some View {
+        Toggle(isOn: Binding(
+            get: { store.pianoRollVelocityMode },
+            set: { store.pianoRollVelocityMode = $0 }
+        )) {
+            Text("V")
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .frame(minWidth: 14)
+        }
+        .toggleStyle(.button)
+        .controlSize(.small)
+        .help(store.pianoRollVelocityMode
+              ? "Velocity mode on: drag a note up or down to change dynamics. Click again to move notes."
+              : "Velocity mode: drag notes up/down to edit dynamics. Option or ⌘-drag also works without this mode.")
+        .accessibilityLabel("Velocity mode")
+        .fixedSize()
+    }
+
+    /// Default velocity for newly drawn notes (session preference).
+    private var defaultVelocityControl: some View {
+        Menu {
+            ForEach([40, 64, 80, 100, 110, 127], id: \.self) { v in
+                Button {
+                    store.defaultNoteVelocity = v
+                } label: {
+                    if v == store.defaultNoteVelocity {
+                        Label("\(v)", systemImage: "checkmark")
+                    } else {
+                        Text("\(v)")
+                    }
+                }
+            }
+        } label: {
+            Text("vel \(store.defaultNoteVelocity)")
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+        }
+        .menuStyle(.borderlessButton)
+        .controlSize(.small)
+        .help("Default velocity for newly drawn notes (1–127)")
+        .accessibilityLabel("Default note velocity \(store.defaultNoteVelocity)")
+        .fixedSize()
+    }
+
     @ViewBuilder
     private var noteStatusText: some View {
         if !store.selectedNoteIDs.isEmpty {
@@ -571,6 +619,20 @@ struct PianoRollEmbeddedView: View {
             Section("Ghosts") {
                 Button(store.showPianoRollGhosts ? "Hide ghost notes" : "Show ghost notes") {
                     store.showPianoRollGhosts.toggle()
+                }
+            }
+            Section("Velocity") {
+                Button(store.pianoRollVelocityMode
+                       ? "Exit velocity mode"
+                       : "Velocity mode (drag notes up/down)") {
+                    store.pianoRollVelocityMode.toggle()
+                }
+                Menu("Default velocity: \(store.defaultNoteVelocity)") {
+                    ForEach([40, 64, 80, 100, 110, 127], id: \.self) { v in
+                        Button(v == store.defaultNoteVelocity ? "✓ \(v)" : "\(v)") {
+                            store.defaultNoteVelocity = v
+                        }
+                    }
                 }
             }
             if includeStatus {
@@ -920,17 +982,33 @@ struct PianoRollEmbeddedView: View {
         let selected = store.selectedNoteIDs.contains(note.id)
         // Proportional, capped resize zone so short notes (default 1/16) keep a move body.
         let handleW = PianoRollLayout.resizeHandleWidth(noteWidth: w)
+        let velNorm = CGFloat(PianoRollSelection.clampedVelocity(note.velocity)) / 127.0
+        // Soft notes stay legible; hard notes read denser. Selected notes stay slightly brighter.
+        let fillOpacity = selected
+            ? (0.55 + 0.40 * velNorm)
+            : (0.28 + 0.45 * velNorm)
+        let barHeight = max(2, (h - 2) * velNorm)
 
         ZStack(alignment: .trailing) {
-            // Note fill matches track identity; selection is a border (system accent), not identity.
+            // Note fill matches track identity; intensity follows velocity (Z1).
             RoundedRectangle(cornerRadius: 3)
-                .fill(selected ? trackIdentity.solid.opacity(0.92) : trackIdentity.fill)
+                .fill(trackIdentity.solid.opacity(fillOpacity))
                 .overlay(
                     RoundedRectangle(cornerRadius: 3)
-                        .strokeBorder(selected ? Color.accentColor : trackIdentity.solid.opacity(0.7),
+                        .strokeBorder(selected ? Color.accentColor : trackIdentity.solid.opacity(0.75),
                                       lineWidth: selected ? 1.5 : 0.5)
                 )
-            // Right-edge resize handle (high priority so it wins over body move).
+            // Inner velocity bar along the bottom so dynamics are readable at a glance.
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.primary.opacity(selected ? 0.45 : 0.32))
+                    .frame(height: barHeight)
+                    .padding(.horizontal, 1.5)
+                    .padding(.bottom, 1)
+            }
+            .allowsHitTesting(false)
+            // Right-edge resize handle (high priority so it wins over body move/velocity).
             Rectangle()
                 .fill(Color.primary.opacity(selected ? 0.35 : 0.18))
                 .frame(width: handleW)
@@ -947,38 +1025,53 @@ struct PianoRollEmbeddedView: View {
         .frame(width: w, height: h)
         .contentShape(Rectangle())
         .offset(x: x, y: y + 1)
-        .help("Pitch \(note.pitch) · beat \(formatBeat(note.startBeat)) · len \(formatBeat(note.lengthBeats))")
-        // Move/select on the body. Pure click (below slop) selects + auditions without undo.
+        .help("Pitch \(note.pitch) · beat \(formatBeat(note.startBeat)) · len \(formatBeat(note.lengthBeats)) · vel \(note.velocity)")
+        // Move/select or velocity-edit on the body. Pure click (below slop) selects + auditions.
         .gesture(moveGesture(for: note, rowHeight: rowHeight))
     }
 
     // MARK: - Gestures
+
+    /// True when the body drag should edit velocity (mode toggle, or Option/⌘ modifier).
+    private var wantsVelocityEdit: Bool {
+        if store.pianoRollVelocityMode { return true }
+        let flags = NSEvent.modifierFlags
+        return flags.contains(.option) || flags.contains(.command)
+    }
 
     private func moveGesture(for note: Note, rowHeight: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .named("pianoRollGrid"))
             .onChanged { value in
                 isFocused = true
                 let moved = hypot(value.translation.width, value.translation.height)
+
+                // Velocity gesture path (mode or Option/⌘). Locked for the whole drag once set.
+                if velocityOrigin != nil {
+                    applyVelocityDrag(value: value, note: note, moved: moved)
+                    return
+                }
                 if moveOrigin == nil {
-                    // First update: update selection, snapshot the group that will move.
-                    // Only begin undo once motion exceeds slop so a pure click does not
-                    // leave a no-op move on the stack.
+                    // First update: selection, then branch move vs velocity.
                     applyNoteClickSelection(note)
-                    // If shift-deselect removed the note under the pointer, do not start a
-                    // group move (toggle only). Otherwise move every currently selected note.
-                    let moving: [Note]
+                    let editing: [Note]
                     if store.selectedNoteIDs.contains(note.id) {
-                        moving = notes.filter { store.selectedNoteIDs.contains($0.id) }
+                        editing = notes.filter { store.selectedNoteIDs.contains($0.id) }
                     } else {
-                        moving = []
+                        editing = []
                     }
-                    let origins = moving.map {
-                        (id: $0.id, pitch: $0.pitch, startBeat: $0.startBeat)
+                    if wantsVelocityEdit {
+                        let origins = editing.map { (id: $0.id, velocity: $0.velocity) }
+                        velocityOrigin = VelocityOrigin(notes: origins, primaryID: note.id)
+                    } else {
+                        let origins = editing.map {
+                            (id: $0.id, pitch: $0.pitch, startBeat: $0.startBeat)
+                        }
+                        moveOrigin = MoveOrigin(notes: origins, primaryID: note.id)
                     }
-                    moveOrigin = MoveOrigin(notes: origins, primaryID: note.id)
                     store.pianoRollAuditionStart(note.pitch)
                     return
                 }
+
                 guard moved >= Self.clickSlop else { return }
                 guard let origin = moveOrigin, origin.primaryID == note.id,
                       !origin.notes.isEmpty else { return }
@@ -1029,7 +1122,33 @@ struct PianoRollEmbeddedView: View {
                     store.pianoRollAuditionStop()
                 }
                 moveOrigin = nil
+                velocityOrigin = nil
             }
+    }
+
+    private func applyVelocityDrag(value: DragGesture.Value, note: Note, moved: CGFloat) {
+        guard moved >= Self.clickSlop else { return }
+        guard let origin = velocityOrigin, origin.primaryID == note.id,
+              !origin.notes.isEmpty else { return }
+        if !continuousGestureLive {
+            store.beginPianoRollGesture(name: "Set Velocity")
+            continuousGestureLive = true
+        }
+        let delta = PianoRollSelection.velocityDelta(fromTranslationHeight: value.translation.height)
+        let proposed = PianoRollSelection.applyGroupVelocityDelta(
+            origins: origin.notes.map(\.velocity),
+            delta: delta
+        )
+        let updates = zip(origin.notes, proposed).map {
+            (id: $0.0.id, velocity: $0.1)
+        }
+        store.pianoRollSetNoteVelocities(updates)
+        // Audition the primary pitch at its new velocity so dynamics are audible while dragging.
+        if let idx = origin.notes.firstIndex(where: { $0.id == origin.primaryID }) {
+            store.pianoRollAuditionStart(note.pitch, velocity: proposed[idx])
+        } else if let first = proposed.first {
+            store.pianoRollAuditionStart(note.pitch, velocity: first)
+        }
     }
 
     /// Click a note: select it. Shift-click toggles membership. Clicking an already-selected
@@ -1232,6 +1351,12 @@ struct PianoRollEmbeddedView: View {
     private struct ResizeOrigin {
         let noteID: UUID
         let lengthBeats: Double
+    }
+
+    private struct VelocityOrigin {
+        /// Selection snapshot at drag start (id, velocity). Relative deltas applied from these.
+        let notes: [(id: UUID, velocity: Int)]
+        let primaryID: UUID
     }
 
     private struct ClipboardNote: Equatable {
@@ -1594,6 +1719,24 @@ public enum PianoRollSelection {
             result.append((pitch: p, startBeat: s))
         }
         return result
+    }
+
+    /// Apply the same velocity delta to every origin velocity. Each result is clamped to
+    /// MIDI 1…127 independently so relative differences are preserved until a note hits
+    /// a bound (notes do not all flatten to one value).
+    public static func applyGroupVelocityDelta(origins: [Int], delta: Int) -> [Int] {
+        origins.map { min(127, max(1, $0 + delta)) }
+    }
+
+    /// Map a vertical drag (points; up is negative in SwiftUI) to a velocity delta.
+    /// Two points ≈ one velocity unit so a short drag is usable and a long drag covers range.
+    public static func velocityDelta(fromTranslationHeight height: CGFloat) -> Int {
+        Int((-height / 2.0).rounded())
+    }
+
+    /// Clamp a velocity into the legal MIDI note-on range 1…127.
+    public static func clampedVelocity(_ velocity: Int) -> Int {
+        min(127, max(1, velocity))
     }
 
     // MARK: Track-first clip resolution (W1)

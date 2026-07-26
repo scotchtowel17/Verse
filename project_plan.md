@@ -437,7 +437,7 @@ Measured against Verse today:
   but nothing names the harmony in a clip.
 - **No per-clip loop.** The transport loops the whole arrangement; Soundtrap loops a pattern.
 
-## Step Z1 — Per-note velocity editing — PENDING
+## Step Z1 — Per-note velocity editing — DONE
 
 1. **Velocity must be visible on the note itself.** Draw it as fill intensity or an inner bar so
    a glance shows the dynamic shape of a phrase. It must stay legible against every track colour

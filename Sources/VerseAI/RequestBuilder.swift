@@ -11,7 +11,7 @@ public enum RequestBuilder {
         "setTimeSignature", "setTrackMix", "deleteClip", "renameTrack",
         "quantizeNotes", "transposeNotes", "moveClip",
         "resizeClip", "duplicateClip", "splitClip", "moveClipToTrack",
-        "deleteNote", "moveNote"
+        "deleteNote", "moveNote", "setNoteVelocity"
     ]
 
     public static func buildJSON(project: Project, userPrompt: String, appVersion: String = "0.1.0") -> String {

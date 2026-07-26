@@ -120,6 +120,16 @@ public final class AppStore {
     public var showPianoRollGhosts: Bool = true
     /// Pitch row height in the piano roll (vertical zoom). Horizontal zoom is `timelineZoom`.
     public var pianoRollRowHeight: CGFloat = PianoRollLayout.rowHeight
+    /// When true, dragging a note body adjusts velocity (vertical) instead of pitch/time.
+    /// Option or Command + drag also reaches velocity without this mode (Z1).
+    public var pianoRollVelocityMode: Bool = false
+    /// Velocity assigned to newly drawn notes (1…127). Session preference; not project data.
+    public var defaultNoteVelocity: Int = 100 {
+        didSet {
+            let clamped = PianoRollSelection.clampedVelocity(defaultNoteVelocity)
+            if defaultNoteVelocity != clamped { defaultNoteVelocity = clamped }
+        }
+    }
 
     // MIDI input (Phase M): connected CoreMIDI source display names, sorted.
     public var midiSourceNames: [String] = []
@@ -150,6 +160,8 @@ public final class AppStore {
     @ObservationIgnored private var arrangementGestureActive = false
     /// Pitch currently sounding from a piano-roll audition (separate from keyboard holds).
     @ObservationIgnored private var pianoRollAuditionPitch: Int?
+    /// Velocity of the current roll audition (so velocity-drag can re-trigger on change only).
+    @ObservationIgnored private var pianoRollAuditionVelocity: Int?
 
     /// Pending MIDI notes captured during an armed record take (arrangement-absolute starts).
     struct MIDICaptureState {
@@ -372,11 +384,12 @@ public final class AppStore {
     /// (the empty roll treats clip start as 0).
     @discardableResult
     public func pianoRollAddNote(pitch: Int, startBeat: Double, lengthBeats: Double,
-                                 velocity: Int = 100) -> UUID? {
+                                 velocity: Int? = nil) -> UUID? {
         if pianoRollIsAudioTrack {
             statusMessage = "Audio tracks don’t have notes. Select an instrument track."
             return nil
         }
+        let resolvedVelocity = PianoRollSelection.clampedVelocity(velocity ?? defaultNoteVelocity)
         var working = project
         let noteID: UUID
         let targetClipID: UUID
@@ -384,7 +397,7 @@ public final class AppStore {
             if let clipID = effectivePianoRollClipID {
                 targetClipID = clipID
                 noteID = try working.addNote(toClip: clipID, pitch: pitch, startBeat: startBeat,
-                                             lengthBeats: lengthBeats, velocity: velocity)
+                                             lengthBeats: lengthBeats, velocity: resolvedVelocity)
             } else {
                 // On-demand clip + note: one undo for both.
                 guard let idx = working.trackIndex(id: rollTrackID),
@@ -406,7 +419,7 @@ public final class AppStore {
                 targetClipID = clip.id
                 noteID = try working.addNote(toClip: clip.id, pitch: pitch,
                                              startBeat: place.localNoteStart,
-                                             lengthBeats: lengthBeats, velocity: velocity)
+                                             lengthBeats: lengthBeats, velocity: resolvedVelocity)
             }
         } catch let err as MutationError {
             statusMessage = err.description
@@ -521,16 +534,43 @@ public final class AppStore {
         }
     }
 
+    /// Continuous velocity update for one or more notes. Caller must
+    /// `beginPianoRollGesture(name: "Set Velocity")` first. Velocities must already be in
+    /// 1…127 (the view clamps via `PianoRollSelection.applyGroupVelocityDelta`). No-ops if
+    /// no gesture is active so a missed begin cannot mutate without undo.
+    public func pianoRollSetNoteVelocities(_ updates: [(id: UUID, velocity: Int)]) {
+        guard pianoRollGestureActive, let clipID = effectivePianoRollClipID, !updates.isEmpty else {
+            return
+        }
+        var working = project
+        do {
+            for u in updates {
+                try working.setNoteVelocity(id: u.id, inClip: clipID, velocity: u.velocity)
+            }
+            project = working
+        } catch {
+            // Out-of-range mid-drag should not happen after view clamping; ignore so the
+            // gesture can recover on the next sample. High-frequency path.
+        }
+    }
+
     /// Audition a pitch on the roll’s track. Replaces any previous roll audition note.
-    public func pianoRollAuditionStart(_ pitch: Int) {
+    /// `velocity` defaults to a comfortable mid-loud value; velocity editing passes the live value.
+    /// Same pitch+velocity is a no-op so continuous move does not click on every frame.
+    public func pianoRollAuditionStart(_ pitch: Int, velocity: Int = 96) {
         // `activeTrackID` is always set; the Optional wrapping is only for `??` with the
         // optional roll track. The else branch is unreachable.
         guard let tid = pianoRollTrackID ?? Optional(activeTrackID) else { return }
-        if let prev = pianoRollAuditionPitch, prev != pitch {
+        let vel = PianoRollSelection.clampedVelocity(velocity)
+        if pianoRollAuditionPitch == pitch, pianoRollAuditionVelocity == vel {
+            return
+        }
+        if let prev = pianoRollAuditionPitch {
             engine.noteOff(prev, trackID: tid)
         }
         pianoRollAuditionPitch = pitch
-        engine.noteOn(pitch, velocity: 96, trackID: tid)
+        pianoRollAuditionVelocity = vel
+        engine.noteOn(pitch, velocity: vel, trackID: tid)
     }
 
     /// Silence the roll’s audition note, if any.
@@ -540,6 +580,7 @@ public final class AppStore {
         let tid = pianoRollTrackID ?? activeTrackID
         engine.noteOff(pitch, trackID: tid)
         pianoRollAuditionPitch = nil
+        pianoRollAuditionVelocity = nil
     }
 
     // MARK: Arrangement editing (one undo entry per completed gesture)

@@ -48,6 +48,8 @@ public enum TypedOp {
     case deleteNote(track: TrackRef, clip: ClipRef, note: NoteRef)
     /// Move one note’s pitch and start inside its clip.
     case moveNote(track: TrackRef, clip: ClipRef, note: NoteRef, pitch: Int, startBeat: Double)
+    /// Set one note’s velocity (1–127) inside its clip.
+    case setNoteVelocity(track: TrackRef, clip: ClipRef, note: NoteRef, velocity: Int)
 }
 
 public struct PatchError: Error, Equatable, CustomStringConvertible {
@@ -71,7 +73,7 @@ public let versePatchOps: Set<String> = [
     "setInstrument", "setTrackMix", "addMidiClip", "addNotes", "deleteClip",
     "quantizeNotes", "transposeNotes", "moveClip",
     "resizeClip", "duplicateClip", "splitClip", "moveClipToTrack",
-    "deleteNote", "moveNote"
+    "deleteNote", "moveNote", "setNoteVelocity"
 ]
 
 // MARK: - JSON coercion helpers (tolerant of NSNumber/Int/Double)
