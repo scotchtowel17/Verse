@@ -57,8 +57,9 @@ struct PianoRollChrome: View {
 // MARK: - Embedded roll grid (shared BeatTimeline + parent H scroll)
 
 /// Note grid for the open MIDI clip. Horizontal time uses `BeatTimeline` in arrangement-
-/// absolute coordinates so notes line up under the arrangement lanes. Vertical pitch scroll
-/// is owned by the parent workspace band.
+/// absolute coordinates so notes line up under the arrangement lanes. Vertical pitch is a
+/// bounded window (no inner ScrollView): only the rows that fit the pane, recomputed from
+/// height and focus (T4).
 struct PianoRollEmbeddedView: View {
     @Environment(AppStore.self) private var store
 
@@ -90,17 +91,17 @@ struct PianoRollEmbeddedView: View {
     /// Double-click detection on empty grid (add note).
     @State private var lastEmptyClickTime: Date?
     @State private var lastEmptyClickPoint: CGPoint?
-    /// Last measured pitch-ScrollView height. Expand and divider drag change this without
-    /// changing clipID, so centring must re-run when it moves (T3).
-    @State private var pitchViewportHeight: CGFloat = 0
+    /// Measured pitch-pane height. Drives `visiblePitchRange` (no scroll offset).
+    @State private var pitchPaneHeight: CGFloat = 0
+    /// User pitch navigation relative to the clip focus pitch (octave buttons / gutter drag).
+    /// Reset to 0 when the open clip changes so the window re-centres on the music.
+    @State private var pitchNavOffset: Int = 0
+    /// Gutter-drag bookkeeping: pitchNavOffset snapshot at drag start.
+    @State private var gutterDragStartOffset: Int?
 
     private static let rowHeight: CGFloat = PianoRollLayout.rowHeight
     private static let clickSlop: CGFloat = 4
     private static let doubleClickSeconds: TimeInterval = 0.4
-    /// ScrollViewReader target for the pitch that should open centred in the viewport.
-    private static let pitchFocusID = "pianoRollPitchFocus"
-    /// Ignore sub-point height noise from layout thrash.
-    private static let heightChangeEpsilon: CGFloat = 0.5
 
     private var clipID: UUID? { store.pianoRollClipID }
 
@@ -119,24 +120,29 @@ struct PianoRollEmbeddedView: View {
         max(1, store.project.timeSignature.num)
     }
 
-    /// Inclusive pitch rows drawn on the roll. All notes always fall inside this range so
-    /// opening the roll shows existing content without any scrolling.
-    private var pitchRange: ClosedRange<Int> {
-        PianoRollLayout.displayPitchRange(notes: notes)
+    /// Mean pitch of the open clip (middle C when empty). Unchanged by navigation.
+    private var focusPitch: Int { PianoRollLayout.focusPitch(notes: notes) }
+
+    /// Window centre after explicit octave / gutter navigation.
+    private var windowCenterPitch: Int {
+        min(127, max(0, focusPitch + pitchNavOffset))
     }
 
-    private var pitchLow: Int { pitchRange.lowerBound }
-    private var pitchHigh: Int { pitchRange.upperBound }
-    private var pitchCount: Int { pitchHigh - pitchLow + 1 }
+    /// Inclusive pitch rows drawn on the roll. Pure function of focus, pane height, and
+    /// row height: no scroll offset, so expand / resize cannot go stale.
+    private var pitchRange: ClosedRange<Int> {
+        let h = pitchPaneHeight > 0 ? pitchPaneHeight : PianoRollLayout.defaultPitchPaneHeight
+        return PianoRollLayout.visiblePitchRange(
+            focusPitch: windowCenterPitch,
+            paneHeight: h,
+            rowHeight: Self.rowHeight
+        )
+    }
 
     var body: some View {
         let rowH = Self.rowHeight
-        let gridHeight = CGFloat(max(1, pitchCount)) * rowH
-        let focusPitch = PianoRollLayout.focusPitch(notes: notes)
-
-        // Snap toolbar is pinned outside the pitch ScrollView so it stays visible at every
-        // band height (T2). Vertical pitch scroll is owned here; horizontal time scroll stays
-        // with the parent workspace (shared axis).
+        // Snap toolbar stays above the pitch pane. Horizontal time scroll stays with the
+        // parent workspace (shared axis). No vertical ScrollView on pitch (T4).
         VStack(alignment: .leading, spacing: 0) {
             if clip != nil {
                 snapBar
@@ -144,30 +150,29 @@ struct PianoRollEmbeddedView: View {
                     .padding(.vertical, 4)
             }
             GeometryReader { geo in
-                ScrollViewReader { proxy in
-                    ScrollView(.vertical, showsIndicators: true) {
-                        pitchGrid(rowHeight: rowH, gridHeight: gridHeight, focusPitch: focusPitch)
-                            // Top-pin when the band is taller than content (same class of bug as R3).
-                            .frame(minHeight: geo.size.height, alignment: .topLeading)
-                    }
-                    .onAppear {
-                        isFocused = true
-                        pitchViewportHeight = geo.size.height
-                        scrollPitchIntoView(proxy)
-                    }
-                    .onChange(of: clipID) { _, _ in
-                        selectedNoteIDs = []
-                        isFocused = true
-                        scrollPitchIntoView(proxy)
-                    }
-                    // Expand / divider drag change height only; clipID stays the same.
-                    .onChange(of: geo.size.height) { _, newHeight in
-                        let previous = pitchViewportHeight
-                        pitchViewportHeight = newHeight
-                        guard newHeight > 0 else { return }
-                        guard abs(newHeight - previous) > Self.heightChangeEpsilon else { return }
-                        scrollPitchIntoView(proxy)
-                    }
+                let paneH = geo.size.height
+                let range = PianoRollLayout.visiblePitchRange(
+                    focusPitch: windowCenterPitch,
+                    paneHeight: paneH,
+                    rowHeight: rowH
+                )
+                let rowCount = range.upperBound - range.lowerBound + 1
+                let gridHeight = CGFloat(max(1, rowCount)) * rowH
+                pitchGrid(
+                    rowHeight: rowH,
+                    gridHeight: gridHeight,
+                    pitchLow: range.lowerBound,
+                    pitchHigh: range.upperBound
+                )
+                .frame(width: (showsGutter ? BeatTimeline.gutterWidth : 0) + totalWidth,
+                       height: paneH,
+                       alignment: .topLeading)
+                .onAppear {
+                    isFocused = true
+                    pitchPaneHeight = paneH
+                }
+                .onChange(of: geo.size.height) { _, newHeight in
+                    pitchPaneHeight = newHeight
                 }
             }
         }
@@ -176,6 +181,12 @@ struct PianoRollEmbeddedView: View {
         .focusable()
         .focused($isFocused)
         .focusEffectDisabled()
+        .onChange(of: clipID) { _, _ in
+            selectedNoteIDs = []
+            pitchNavOffset = 0
+            gutterDragStartOffset = nil
+            isFocused = true
+        }
         .onDeleteCommand { deleteSelection() }
         .onKeyPress(.delete) {
             deleteSelection()
@@ -209,47 +220,40 @@ struct PianoRollEmbeddedView: View {
         }
     }
 
-    /// Pitch rows + note grid (scrolls vertically). Toolbar stays outside this content.
+    /// Pitch rows + note grid for the computed visible range only (no vertical scroll).
     @ViewBuilder
-    private func pitchGrid(rowHeight: CGFloat, gridHeight: CGFloat, focusPitch: Int) -> some View {
+    private func pitchGrid(
+        rowHeight: CGFloat,
+        gridHeight: CGFloat,
+        pitchLow: Int,
+        pitchHigh: Int
+    ) -> some View {
         HStack(alignment: .top, spacing: 0) {
             if showsGutter {
-                pianoGutter(rowHeight: rowHeight, totalHeight: gridHeight)
+                pianoGutter(
+                    rowHeight: rowHeight,
+                    totalHeight: gridHeight,
+                    pitchLow: pitchLow,
+                    pitchHigh: pitchHigh
+                )
             }
             ZStack(alignment: .topLeading) {
                 if clip == nil {
-                    emptyClipPlaceholder(totalHeight: max(gridHeight, 80))
+                    emptyClipPlaceholder(totalHeight: max(gridHeight, 80),
+                                         pitchLow: pitchLow, pitchHigh: pitchHigh)
                 } else {
-                    gridLayer(rowHeight: rowHeight, totalHeight: gridHeight)
+                    gridLayer(rowHeight: rowHeight, totalHeight: gridHeight,
+                              pitchLow: pitchLow, pitchHigh: pitchHigh)
                     // Clip span highlight under notes (arrangement-absolute).
                     clipSpanOverlay(totalHeight: gridHeight)
-                    emptyGridHitTarget(rowHeight: rowHeight, totalHeight: gridHeight)
-                    notesLayer(rowHeight: rowHeight)
+                    emptyGridHitTarget(rowHeight: rowHeight, totalHeight: gridHeight,
+                                       pitchLow: pitchLow, pitchHigh: pitchHigh)
+                    notesLayer(rowHeight: rowHeight, pitchLow: pitchLow, pitchHigh: pitchHigh)
                     marqueeOverlay()
                 }
-                // Scroll anchor at the focus pitch row so open centres on the clip's notes.
-                Color.clear
-                    .frame(width: 1, height: rowHeight)
-                    .offset(y: yForPitch(focusPitch, rowHeight: rowHeight))
-                    .id(Self.pitchFocusID)
-                    .allowsHitTesting(false)
             }
             .frame(width: totalWidth, height: max(gridHeight, 80), alignment: .topLeading)
             .coordinateSpace(name: "pianoRollGrid")
-        }
-    }
-
-    /// Centre the pitch viewport on the selected clip's notes (middle C when empty).
-    ///
-    /// Layout can settle over more than one run-loop turn (expand from collapsed, divider
-    /// drag). A single async hop is not enough: scroll while height is still 0 or mid-change
-    /// is a no-op or wrong. Yield twice so content size and the measured band height land.
-    private func scrollPitchIntoView(_ proxy: ScrollViewProxy) {
-        Task { @MainActor in
-            await Task.yield()
-            proxy.scrollTo(Self.pitchFocusID, anchor: .center)
-            await Task.yield()
-            proxy.scrollTo(Self.pitchFocusID, anchor: .center)
         }
     }
 
@@ -269,6 +273,27 @@ struct PianoRollEmbeddedView: View {
             .onChange(of: snapBeats) { _, newValue in
                 if newValue > 0 { lastGridSnapBeats = newValue }
             }
+
+            // Explicit pitch navigation (replaces vertical scroll).
+            Button {
+                shiftPitchWindow(by: 12)
+            } label: {
+                Image(systemName: "chevron.up")
+            }
+            .controlSize(.small)
+            .help("Raise pitch window by one octave")
+            Button {
+                shiftPitchWindow(by: -12)
+            } label: {
+                Image(systemName: "chevron.down")
+            }
+            .controlSize(.small)
+            .help("Lower pitch window by one octave")
+            Text(PianoRollLayout.rangeLabel(pitchRange))
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .help("Visible pitch range (drag the key gutter to shift)")
+
             Spacer()
             if !selectedNoteIDs.isEmpty {
                 Text(selectedNoteIDs.count == 1
@@ -283,9 +308,18 @@ struct PianoRollEmbeddedView: View {
         }
     }
 
-    private func emptyClipPlaceholder(totalHeight: CGFloat) -> some View {
+    private func shiftPitchWindow(by delta: Int) {
+        pitchNavOffset = min(127 - focusPitch, max(-focusPitch, pitchNavOffset + delta))
+    }
+
+    private func emptyClipPlaceholder(
+        totalHeight: CGFloat,
+        pitchLow: Int,
+        pitchHigh: Int
+    ) -> some View {
         ZStack {
-            gridLayer(rowHeight: Self.rowHeight, totalHeight: totalHeight)
+            gridLayer(rowHeight: Self.rowHeight, totalHeight: totalHeight,
+                      pitchLow: pitchLow, pitchHigh: pitchHigh)
             Text("Click a MIDI clip in the arrangement to edit notes here")
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -311,10 +345,15 @@ struct PianoRollEmbeddedView: View {
 
     // MARK: - Gutter (piano keys)
 
-    private func pianoGutter(rowHeight: CGFloat, totalHeight: CGFloat) -> some View {
+    private func pianoGutter(
+        rowHeight: CGFloat,
+        totalHeight: CGFloat,
+        pitchLow: Int,
+        pitchHigh: Int
+    ) -> some View {
         ZStack(alignment: .topLeading) {
             ForEach((pitchLow...pitchHigh).reversed(), id: \.self) { pitch in
-                let y = yForPitch(pitch, rowHeight: rowHeight)
+                let y = yForPitch(pitch, pitchHigh: pitchHigh, rowHeight: rowHeight)
                 Rectangle()
                     .fill(Self.isBlackKey(pitch) ? Color.black.opacity(0.78) : Color.white)
                     .frame(width: BeatTimeline.gutterWidth, height: rowHeight)
@@ -325,7 +364,7 @@ struct PianoRollEmbeddedView: View {
                     }
                     .overlay(alignment: .trailing) {
                         if pitch % 12 == 0 {
-                            Text(Self.pitchLabel(pitch))
+                            Text(PianoRollLayout.pitchLabel(pitch))
                                 .font(.system(size: 9, weight: .medium, design: .monospaced))
                                 .foregroundStyle(Self.isBlackKey(pitch)
                                                  ? Color.white.opacity(0.85)
@@ -337,17 +376,43 @@ struct PianoRollEmbeddedView: View {
             }
         }
         .frame(width: BeatTimeline.gutterWidth, height: totalHeight, alignment: .topLeading)
+        .contentShape(Rectangle())
+        .gesture(gutterPitchDragGesture(rowHeight: rowHeight))
         .overlay(alignment: .trailing) {
             Rectangle().fill(Color.black.opacity(0.2)).frame(width: 1)
         }
+        .help("Drag up or down to shift the pitch window")
+    }
+
+    /// Vertical drag on the key gutter shifts the pitch window (explicit navigation, T4).
+    private func gutterPitchDragGesture(rowHeight: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                if gutterDragStartOffset == nil {
+                    gutterDragStartOffset = pitchNavOffset
+                }
+                guard let startOffset = gutterDragStartOffset else { return }
+                // Drag up (negative y) raises the window (higher pitches), matching
+                // the roll orientation (high pitches at the top).
+                let rowDelta = Int((-value.translation.height / rowHeight).rounded())
+                pitchNavOffset = min(127 - focusPitch, max(-focusPitch, startOffset + rowDelta))
+            }
+            .onEnded { _ in
+                gutterDragStartOffset = nil
+            }
     }
 
     // MARK: - Grid (arrangement-absolute beat columns)
 
-    private func gridLayer(rowHeight: CGFloat, totalHeight: CGFloat) -> some View {
+    private func gridLayer(
+        rowHeight: CGFloat,
+        totalHeight: CGFloat,
+        pitchLow: Int,
+        pitchHigh: Int
+    ) -> some View {
         Canvas { context, size in
             for pitch in pitchLow...pitchHigh {
-                let y = yForPitch(pitch, rowHeight: rowHeight)
+                let y = yForPitch(pitch, pitchHigh: pitchHigh, rowHeight: rowHeight)
                 if Self.isBlackKey(pitch) {
                     let rect = CGRect(x: 0, y: y, width: size.width, height: rowHeight)
                     context.fill(Path(rect), with: .color(Color.black.opacity(0.06)))
@@ -378,7 +443,12 @@ struct PianoRollEmbeddedView: View {
 
     /// Empty grid: pure click clears selection; double-click adds a note; drag draws a
     /// marquee and selects every note it touches.
-    private func emptyGridHitTarget(rowHeight: CGFloat, totalHeight: CGFloat) -> some View {
+    private func emptyGridHitTarget(
+        rowHeight: CGFloat,
+        totalHeight: CGFloat,
+        pitchLow: Int,
+        pitchHigh: Int
+    ) -> some View {
         Color.clear
             .contentShape(Rectangle())
             .frame(width: totalWidth, height: totalHeight)
@@ -403,14 +473,17 @@ struct PianoRollEmbeddedView: View {
                             marqueeLive = false
                         }
                         if marqueeLive {
-                            applyMarqueeSelection(rowHeight: rowHeight)
+                            applyMarqueeSelection(
+                                rowHeight: rowHeight, pitchLow: pitchLow, pitchHigh: pitchHigh)
                             lastEmptyClickTime = nil
                             lastEmptyClickPoint = nil
                             return
                         }
                         let moved = hypot(value.translation.width, value.translation.height)
                         guard moved < Self.clickSlop else { return }
-                        handleEmptyGridClick(at: value.location, rowHeight: rowHeight)
+                        handleEmptyGridClick(
+                            at: value.location, rowHeight: rowHeight,
+                            pitchLow: pitchLow, pitchHigh: pitchHigh)
                     }
             )
     }
@@ -433,13 +506,18 @@ struct PianoRollEmbeddedView: View {
         }
     }
 
-    private func handleEmptyGridClick(at location: CGPoint, rowHeight: CGFloat) {
+    private func handleEmptyGridClick(
+        at location: CGPoint,
+        rowHeight: CGFloat,
+        pitchLow: Int,
+        pitchHigh: Int
+    ) {
         let now = Date()
         if let lastTime = lastEmptyClickTime,
            let lastPoint = lastEmptyClickPoint,
            now.timeIntervalSince(lastTime) <= Self.doubleClickSeconds,
            hypot(location.x - lastPoint.x, location.y - lastPoint.y) < Self.clickSlop * 2 {
-            addNote(at: location, rowHeight: rowHeight)
+            addNote(at: location, rowHeight: rowHeight, pitchLow: pitchLow, pitchHigh: pitchHigh)
             lastEmptyClickTime = nil
             lastEmptyClickPoint = nil
             return
@@ -450,15 +528,21 @@ struct PianoRollEmbeddedView: View {
         lastEmptyClickPoint = location
     }
 
-    private func applyMarqueeSelection(rowHeight: CGFloat) {
+    private func applyMarqueeSelection(
+        rowHeight: CGFloat,
+        pitchLow: Int,
+        pitchHigh: Int
+    ) {
         guard let start = marqueeStart, let current = marqueeCurrent else { return }
         // Grid x is arrangement-absolute; selection helpers use clip-local starts.
         let localA = BeatTimeline.localBeat(
             absolute: BeatTimeline.beat(atX: start.x), clipStart: clipStart)
         let localB = BeatTimeline.localBeat(
             absolute: BeatTimeline.beat(atX: current.x), clipStart: clipStart)
-        let pitchA = pitchAt(y: start.y, rowHeight: rowHeight)
-        let pitchB = pitchAt(y: current.y, rowHeight: rowHeight)
+        let pitchA = pitchAt(y: start.y, pitchLow: pitchLow, pitchHigh: pitchHigh,
+                             rowHeight: rowHeight)
+        let pitchB = pitchAt(y: current.y, pitchLow: pitchLow, pitchHigh: pitchHigh,
+                             rowHeight: rowHeight)
         let ids = PianoRollSelection.notesTouchingMarquee(
             notes: notes, beatA: localA, beatB: localB, pitchA: pitchA, pitchB: pitchB
         )
@@ -467,21 +551,26 @@ struct PianoRollEmbeddedView: View {
 
     // MARK: - Notes
 
-    private func notesLayer(rowHeight: CGFloat) -> some View {
+    private func notesLayer(
+        rowHeight: CGFloat,
+        pitchLow: Int,
+        pitchHigh: Int
+    ) -> some View {
         ZStack(alignment: .topLeading) {
-            ForEach(notes) { note in
-                noteBlock(note, rowHeight: rowHeight)
+            // Only notes inside the visible pitch window are drawn; navigate to reach others.
+            ForEach(notes.filter { $0.pitch >= pitchLow && $0.pitch <= pitchHigh }) { note in
+                noteBlock(note, rowHeight: rowHeight, pitchHigh: pitchHigh)
             }
         }
     }
 
     @ViewBuilder
-    private func noteBlock(_ note: Note, rowHeight: CGFloat) -> some View {
+    private func noteBlock(_ note: Note, rowHeight: CGFloat, pitchHigh: Int) -> some View {
         // Arrangement-absolute x so beat N sits under arrangement beat N.
         let absStart = BeatTimeline.absoluteStart(
             clipStart: clipStart, noteLocalStart: note.startBeat)
         let x = BeatTimeline.x(forBeat: absStart)
-        let y = yForPitch(note.pitch, rowHeight: rowHeight)
+        let y = yForPitch(note.pitch, pitchHigh: pitchHigh, rowHeight: rowHeight)
         let w = max(BeatTimeline.width(forBeats: note.lengthBeats), 6)
         let h = max(rowHeight - 2, 6)
         let selected = selectedNoteIDs.contains(note.id)
@@ -649,8 +738,14 @@ struct PianoRollEmbeddedView: View {
 
     // MARK: - Actions
 
-    private func addNote(at location: CGPoint, rowHeight: CGFloat) {
-        let pitch = pitchAt(y: location.y, rowHeight: rowHeight)
+    private func addNote(
+        at location: CGPoint,
+        rowHeight: CGFloat,
+        pitchLow: Int,
+        pitchHigh: Int
+    ) {
+        let pitch = pitchAt(y: location.y, pitchLow: pitchLow, pitchHigh: pitchHigh,
+                            rowHeight: rowHeight)
         let absBeat = BeatTimeline.beat(atX: location.x)
         let localRaw = BeatTimeline.localBeat(absolute: absBeat, clipStart: clipStart)
         // Notes before the clip start cannot be stored (model uses clip-local ≥ 0).
@@ -722,15 +817,16 @@ struct PianoRollEmbeddedView: View {
 
     // MARK: - Coordinate helpers
 
-    private func yForPitch(_ pitch: Int, rowHeight: CGFloat) -> CGFloat {
-        // High pitches at the top of the stack (standard piano-roll orientation).
-        CGFloat(pitchHigh - pitch) * rowHeight
+    /// High pitches at the top of the stack (standard piano-roll orientation).
+    /// Uses the same pitchHigh as `visiblePitchRange` so paint and hit-testing agree.
+    private func yForPitch(_ pitch: Int, pitchHigh: Int, rowHeight: CGFloat) -> CGFloat {
+        PianoRollLayout.yForPitch(pitch, pitchHigh: pitchHigh, rowHeight: rowHeight)
     }
 
-    private func pitchAt(y: CGFloat, rowHeight: CGFloat) -> Int {
-        let idx = Int((y / rowHeight).rounded(.down))
-        let pitch = pitchHigh - idx
-        return min(pitchHigh, max(pitchLow, pitch))
+    /// Map a y in the pitch grid to a MIDI pitch using the same window as painting.
+    private func pitchAt(y: CGFloat, pitchLow: Int, pitchHigh: Int, rowHeight: CGFloat) -> Int {
+        PianoRollLayout.pitchAt(y: y, pitchLow: pitchLow, pitchHigh: pitchHigh,
+                                rowHeight: rowHeight)
     }
 
     private func formatBeat(_ v: Double) -> String {
@@ -744,13 +840,6 @@ struct PianoRollEmbeddedView: View {
         case 1, 3, 6, 8, 10: return true
         default: return false
         }
-    }
-
-    private static func pitchLabel(_ pitch: Int) -> String {
-        let names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-        let name = names[pitch % 12]
-        let octave = (pitch / 12) - 1
-        return "\(name)\(octave)"
     }
 
     // MARK: - Gesture origin snapshots
@@ -777,23 +866,25 @@ struct PianoRollEmbeddedView: View {
 // MARK: - Layout (testable)
 
 /// Pure layout helpers for the piano roll. Kept free of SwiftUI so VerseCheck can lock the
-/// “notes visible on open” contract without rendering.
+/// visible pitch window without rendering.
 public enum PianoRollLayout {
     /// Pixel height of one pitch row (shared by the roll view and default band sizing).
     public static let rowHeight: CGFloat = 18
 
-    /// About three octaves of pitch rows (content range pad around the clip's notes).
-    public static let minPitchSpan = 36
-
     /// Default expanded roll viewport: about two octaves of pitch rows.
     public static let defaultViewportPitchRows = 24
 
-    /// Space reserved above the pitch ScrollView for the pinned Snap / note-count toolbar.
+    /// Space reserved above the pitch pane for the pinned Snap / pitch-nav toolbar.
     public static let snapToolbarHeight: CGFloat = 40
+
+    /// Default pitch-pane height (~2 octaves of rows), used before GeometryReader measures.
+    public static var defaultPitchPaneHeight: CGFloat {
+        CGFloat(defaultViewportPitchRows) * rowHeight
+    }
 
     /// Default expanded roll band height (pinned toolbar + ~2 octaves of rows).
     public static var defaultBandHeight: CGFloat {
-        CGFloat(defaultViewportPitchRows) * rowHeight + snapToolbarHeight
+        defaultPitchPaneHeight + snapToolbarHeight
     }
 
     /// Max pixel width of the right-edge resize handle on a note block.
@@ -827,43 +918,40 @@ public enum PianoRollLayout {
         return max(grid, Project.minimumNoteLengthBeats)
     }
 
-    /// Inclusive pitch window: always covers every note, at least ~3 octaves, clamped to 0…127.
-    /// The vertical ScrollView then centres on `focusPitch` so notes land in the viewport.
-    public static func displayPitchRange(notes: [Note]) -> ClosedRange<Int> {
-        let minP: Int
-        let maxP: Int
-        if notes.isEmpty {
-            minP = 60
-            maxP = 60
-        } else {
-            minP = notes.map(\.pitch).min() ?? 60
-            maxP = notes.map(\.pitch).max() ?? 60
-        }
-        var low = minP
-        var high = maxP
-        let span = high - low
-        if span < minPitchSpan {
-            let pad = (minPitchSpan - span) / 2
-            low -= pad
-            high = low + minPitchSpan
-        } else {
-            low -= 2
-            high += 2
-        }
+    /// Contiguous pitch range to draw for a pane of the given height.
+    ///
+    /// Returns as many whole rows as fit `paneHeight`, centred on `focusPitch`, clamped so
+    /// the range never leaves 0…127. When clamped at either end the window shifts rather
+    /// than shrinking, so the pane stays full (until the full MIDI keyboard is shown).
+    /// This is the single source of truth for paint and hit-testing (T4).
+    public static func visiblePitchRange(
+        focusPitch: Int,
+        paneHeight: CGFloat,
+        rowHeight: CGFloat
+    ) -> ClosedRange<Int> {
+        let rh = max(rowHeight, 1)
+        let rowCount = max(1, Int(floor(paneHeight / rh)))
+        let focus = min(127, max(0, focusPitch))
+        // Prefer equal space above and below; when odd count, the extra row sits below.
+        let below = (rowCount - 1) / 2
+        var low = focus - below
+        var high = low + rowCount - 1
         if low < 0 {
-            high = min(127, high - low)
+            high -= low
             low = 0
         }
         if high > 127 {
-            low = max(0, low - (high - 127))
+            low -= (high - 127)
             high = 127
         }
-        if low > high { return 48...84 }
+        if low < 0 { low = 0 }
+        if high > 127 { high = 127 }
+        if low > high { return 0...0 }
         return low...high
     }
 
     /// Pitch that should sit at the vertical centre of the viewport when a clip opens.
-    /// Empty clip (no notes) falls back to middle C (60), matching the empty display range.
+    /// Empty clip (no notes) falls back to middle C (60).
     public static func focusPitch(notes: [Note]) -> Int {
         guard !notes.isEmpty else { return 60 }
         let sum = notes.reduce(0) { $0 + $1.pitch }
@@ -875,23 +963,32 @@ public enum PianoRollLayout {
         CGFloat(pitchHigh - pitch) * rowHeight
     }
 
-    /// Scroll offset that places `focusPitch` at the vertical centre of the viewport.
-    /// Clamped so the scroll stays within content bounds (no overscroll).
-    public static func verticalScrollOffset(
-        focusPitch: Int,
-        pitchRange: ClosedRange<Int>,
-        rowHeight: CGFloat,
-        viewportHeight: CGFloat
-    ) -> CGFloat {
-        let pitchLow = pitchRange.lowerBound
-        let pitchHigh = pitchRange.upperBound
-        let contentHeight = CGFloat(max(1, pitchHigh - pitchLow + 1)) * rowHeight
-        let clampedFocus = min(pitchHigh, max(pitchLow, focusPitch))
-        let yCenter = yForPitch(clampedFocus, pitchHigh: pitchHigh, rowHeight: rowHeight)
-            + rowHeight / 2
-        let raw = yCenter - viewportHeight / 2
-        let maxOffset = max(0, contentHeight - viewportHeight)
-        return min(max(0, raw), maxOffset)
+    /// Map a y coordinate in the pitch grid to a MIDI pitch. Uses the same window bounds
+    /// as painting so clicks land on the row the user sees.
+    public static func pitchAt(
+        y: CGFloat,
+        pitchLow: Int,
+        pitchHigh: Int,
+        rowHeight: CGFloat
+    ) -> Int {
+        let rh = max(rowHeight, 1)
+        let idx = Int((y / rh).rounded(.down))
+        let pitch = pitchHigh - idx
+        return min(pitchHigh, max(pitchLow, pitch))
+    }
+
+    /// Short label for a MIDI pitch, e.g. "C4".
+    public static func pitchLabel(_ pitch: Int) -> String {
+        let names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+        let clamped = min(127, max(0, pitch))
+        let name = names[clamped % 12]
+        let octave = (clamped / 12) - 1
+        return "\(name)\(octave)"
+    }
+
+    /// Visible-range label for the toolbar, e.g. "C2-C4".
+    public static func rangeLabel(_ range: ClosedRange<Int>) -> String {
+        "\(pitchLabel(range.lowerBound))-\(pitchLabel(range.upperBound))"
     }
 }
 

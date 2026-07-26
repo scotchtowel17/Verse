@@ -1401,34 +1401,41 @@ private func runScaleChecks(_ tk: TestKit) {
         tk.expectEqual(pkgLoaded.structuralFingerprint, fp1,
                        "fingerprint matches after package load")
 
-        // Piano-roll layout on the full 20k-note set (worst case: one giant clip view).
+        // Piano-roll layout on the full 20k-note set (bounded window, pure function).
         let layoutStart = CFAbsoluteTimeGetCurrent()
-        let range = PianoRollLayout.displayPitchRange(notes: allNotesForLayout)
+        let focus = PianoRollLayout.focusPitch(notes: allNotesForLayout)
+        let range = PianoRollLayout.visiblePitchRange(
+            focusPitch: focus,
+            paneHeight: PianoRollLayout.defaultPitchPaneHeight,
+            rowHeight: PianoRollLayout.rowHeight
+        )
         let layoutSec = CFAbsoluteTimeGetCurrent() - layoutStart
 
-        let minPitch = allNotesForLayout.map(\.pitch).min() ?? 60
-        let maxPitch = allNotesForLayout.map(\.pitch).max() ?? 60
-        tk.expect(range.contains(minPitch), "layout covers global min pitch \(minPitch)")
-        tk.expect(range.contains(maxPitch), "layout covers global max pitch \(maxPitch)")
+        tk.expect(range.contains(focus), "layout window contains focus pitch \(focus)")
         tk.expect(range.lowerBound >= 0 && range.upperBound <= 127,
                   "layout range stays in MIDI 0…127")
-        let span = range.upperBound - range.lowerBound
-        tk.expect(span >= PianoRollLayout.minPitchSpan - 1,
-                  "layout span is at least ~3 octaves (got \(span))")
+        tk.expectEqual(
+            range.upperBound - range.lowerBound + 1,
+            PianoRollLayout.defaultViewportPitchRows,
+            "default pane is exactly \(PianoRollLayout.defaultViewportPitchRows) whole rows"
+        )
 
-        // Per-track layout must also cover that track's notes (no degradation on many clips).
+        // Per-track windows must stay in MIDI and include each track's focus pitch.
         var tracksCovered = 0
         for track in project.tracks {
             let notes = track.clips.first?.midiNotes ?? []
-            let r = PianoRollLayout.displayPitchRange(notes: notes)
-            let lo = notes.map(\.pitch).min() ?? 60
-            let hi = notes.map(\.pitch).max() ?? 60
-            if r.contains(lo) && r.contains(hi) && r.lowerBound >= 0 && r.upperBound <= 127 {
+            let f = PianoRollLayout.focusPitch(notes: notes)
+            let r = PianoRollLayout.visiblePitchRange(
+                focusPitch: f,
+                paneHeight: PianoRollLayout.defaultPitchPaneHeight,
+                rowHeight: PianoRollLayout.rowHeight
+            )
+            if r.contains(f) && r.lowerBound >= 0 && r.upperBound <= 127 {
                 tracksCovered += 1
             }
         }
         tk.expectEqual(tracksCovered, trackCount,
-                       "per-track layout covers notes on all \(trackCount) tracks")
+                       "per-track layout covers focus on all \(trackCount) tracks")
 
         // Snap / resize helpers must stay O(1) and correct on extreme widths.
         tk.expectEqual(PianoRollLayout.snap(1.24, to: 0.25), 1.25, "snap still correct at scale")

@@ -163,7 +163,7 @@ struct TimelineWorkspaceView: View {
 
                         if rollExpanded {
                             divider
-                            // Piano roll owns its vertical pitch scroll (and pinned snap bar).
+                            // Piano roll owns a bounded pitch window (no vertical ScrollView).
                             // Time still uses the shared horizontal offset from this parent.
                             PianoRollEmbeddedView(
                                 contentBeats: contentBeats,

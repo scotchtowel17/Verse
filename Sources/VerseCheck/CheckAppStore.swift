@@ -429,120 +429,136 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
                        "engine has no insert for empty inserts")
     }
 
-    // MARK: - Phase P2b / P3: piano roll layout + undo grouping
+    // MARK: - Phase P2b / P3 / T4: piano roll layout + undo grouping
 
-    tk.suite("Piano roll layout: pitch range covers notes (~3 octaves, no scroll needed)") {
-        // Melody at C4–G4 (60–67): the live bug opened parked around C8/C9 with notes off-screen.
-        let notes = (60...67).map { Note(startBeat: Double($0 - 60), lengthBeats: 0.5,
-                                         pitch: $0, velocity: 100) }
-        let range = PianoRollLayout.displayPitchRange(notes: notes)
-        for n in notes {
-            tk.expect(range.contains(n.pitch), "pitch \(n.pitch) is inside display range")
-        }
-        let span = range.upperBound - range.lowerBound
-        tk.expect(span >= PianoRollLayout.minPitchSpan - 1,
-                  "range is at least ~3 octaves (got span \(span))")
-        tk.expect(range.upperBound <= 127 && range.lowerBound >= 0, "range stays in MIDI 0…127")
-        // Mean of 60…67 is ~63; window should sit around mid-keyboard, not C8/C9.
-        tk.expect(range.upperBound < 100, "window is not parked in the top octave")
-        tk.expect(range.lowerBound > 30, "window is not parked in the bottom octave")
+    tk.suite("Piano roll layout: visiblePitchRange is pure, clamped, and fills the pane (T4)") {
+        let rowH = PianoRollLayout.rowHeight
+        let defaultPane = PianoRollLayout.defaultPitchPaneHeight
+        let expectedRows = PianoRollLayout.defaultViewportPitchRows
 
-        let empty = PianoRollLayout.displayPitchRange(notes: [])
-        tk.expect(empty.contains(60), "empty clip centres on middle C")
-        tk.expect(empty.upperBound - empty.lowerBound >= PianoRollLayout.minPitchSpan - 1,
-                  "empty clip still shows ~3 octaves")
-    }
+        // Mid-keyboard focus: full window of whole rows, centred.
+        let mid = PianoRollLayout.visiblePitchRange(
+            focusPitch: 60, paneHeight: defaultPane, rowHeight: rowH)
+        tk.expectEqual(mid.upperBound - mid.lowerBound + 1, expectedRows,
+                       "default pane shows exactly \(expectedRows) whole rows")
+        tk.expect(mid.contains(60), "focus pitch sits inside the visible range")
+        tk.expect(mid.lowerBound >= 0 && mid.upperBound <= 127, "range stays in MIDI 0…127")
+        // Focus should be at or next to the centre row (odd/even row count).
+        let midCenter = mid.lowerBound + (expectedRows - 1) / 2
+        tk.expectEqual(midCenter, 60, "focus is the centre of the window (got centre \(midCenter))")
 
-    tk.suite("Piano roll layout: open centres vertically on the clip's notes (T2 / P2b)") {
-        // Lead-style clip: four notes at 72–76. Opening must focus near that cluster, not C6
-        // (the top of a short viewport when scroll stays at offset 0).
-        let leadNotes = [72, 73, 74, 76].map {
-            Note(startBeat: 0, lengthBeats: 0.5, pitch: $0, velocity: 100)
-        }
-        let focus = PianoRollLayout.focusPitch(notes: leadNotes)
-        tk.expect(focus >= 72 && focus <= 76, "focus pitch sits inside the note cluster (got \(focus))")
+        // Bottom clamp: window shifts up rather than shrinking.
+        let bot = PianoRollLayout.visiblePitchRange(
+            focusPitch: 2, paneHeight: defaultPane, rowHeight: rowH)
+        tk.expectEqual(bot.lowerBound, 0, "bottom clamp pins low end at 0")
+        tk.expectEqual(bot.upperBound - bot.lowerBound + 1, expectedRows,
+                       "bottom clamp still fills the pane (no shrink)")
+        tk.expect(bot.upperBound <= 127, "bottom-clamped range stays in MIDI")
+
+        // Top clamp: window shifts down rather than shrinking.
+        let top = PianoRollLayout.visiblePitchRange(
+            focusPitch: 125, paneHeight: defaultPane, rowHeight: rowH)
+        tk.expectEqual(top.upperBound, 127, "top clamp pins high end at 127")
+        tk.expectEqual(top.upperBound - top.lowerBound + 1, expectedRows,
+                       "top clamp still fills the pane (no shrink)")
+        tk.expect(top.lowerBound >= 0, "top-clamped range stays in MIDI")
+
+        // Huge pane: cannot exceed 0…127.
+        let huge = PianoRollLayout.visiblePitchRange(
+            focusPitch: 60, paneHeight: rowH * 200, rowHeight: rowH)
+        tk.expectEqual(huge.lowerBound, 0, "huge pane starts at MIDI 0")
+        tk.expectEqual(huge.upperBound, 127, "huge pane ends at MIDI 127")
+
+        // Empty / zero height still yields at least one row.
+        let tiny = PianoRollLayout.visiblePitchRange(
+            focusPitch: 60, paneHeight: 0, rowHeight: rowH)
+        tk.expectEqual(tiny.lowerBound, tiny.upperBound, "zero-height pane shows one row")
+        tk.expect(tiny.contains(60), "zero-height pane still centres on focus")
+
         tk.expectEqual(PianoRollLayout.focusPitch(notes: []), 60, "empty clip focuses middle C")
-
-        let range = PianoRollLayout.displayPitchRange(notes: leadNotes)
-        // A short viewport (~7 rows, the live T2 failure mode) must scroll so the focus
-        // pitch is centred, not leave the user staring at empty high rows.
-        let shortViewport = PianoRollLayout.rowHeight * 7
-        let offset = PianoRollLayout.verticalScrollOffset(
-            focusPitch: focus,
-            pitchRange: range,
-            rowHeight: PianoRollLayout.rowHeight,
-            viewportHeight: shortViewport
-        )
-        tk.expect(offset > 0, "short viewport scrolls down from the top of the range")
-        // After applying offset, focus row centre should land near the viewport middle.
-        let focusY = PianoRollLayout.yForPitch(focus, pitchHigh: range.upperBound,
-                                               rowHeight: PianoRollLayout.rowHeight)
-            + PianoRollLayout.rowHeight / 2
-        let visibleCenter = offset + shortViewport / 2
-        tk.expect(abs(focusY - visibleCenter) < 1,
-                  "focus pitch is vertically centred in the short viewport")
-
-        // Tall default band (~2 octaves): still centres, and stays in bounds.
-        let defaultViewport = PianoRollLayout.rowHeight
-            * CGFloat(PianoRollLayout.defaultViewportPitchRows)
-        let tallOffset = PianoRollLayout.verticalScrollOffset(
-            focusPitch: focus,
-            pitchRange: range,
-            rowHeight: PianoRollLayout.rowHeight,
-            viewportHeight: defaultViewport
-        )
-        let contentH = CGFloat(range.upperBound - range.lowerBound + 1) * PianoRollLayout.rowHeight
-        tk.expect(tallOffset >= 0 && tallOffset <= max(0, contentH - defaultViewport),
-                  "default-band scroll stays within content bounds")
+        tk.expectEqual(PianoRollLayout.rangeLabel(60...72), "C4-C5",
+                       "range label uses pitch names")
         tk.expect(PianoRollLayout.defaultBandHeight
                     >= PianoRollLayout.rowHeight * 24 + PianoRollLayout.snapToolbarHeight - 1,
                   "default band is at least ~2 octaves plus the pinned toolbar")
     }
 
-    tk.suite("Piano roll layout: expand from collapsed keeps focus pitch in the visible band (T3)") {
-        // Live T3 case: Bass B notes at 36 and 41. Collapsed / tiny first layout pass leaves
-        // scroll meaningless; after expand (or divider drag) re-centring must put the mean
-        // pitch inside the visible band, not parked with one note clipping the lower edge.
+    tk.suite("Piano roll layout: visible range contains lead-cluster notes (T4)") {
+        // Lead-style clip: four notes at 72–76. Opening centres on the mean, so both the
+        // short pane and the default ~2-octave pane must include the whole cluster.
+        let leadNotes = [72, 73, 74, 76].map {
+            Note(startBeat: 0, lengthBeats: 0.5, pitch: $0, velocity: 100)
+        }
+        let focus = PianoRollLayout.focusPitch(notes: leadNotes)
+        tk.expect(focus >= 72 && focus <= 76, "focus pitch sits inside the note cluster (got \(focus))")
+
+        let shortPane = PianoRollLayout.rowHeight * 7
+        let shortRange = PianoRollLayout.visiblePitchRange(
+            focusPitch: focus, paneHeight: shortPane, rowHeight: PianoRollLayout.rowHeight)
+        for p in [72, 73, 74, 76] {
+            tk.expect(shortRange.contains(p), "short pane contains lead pitch \(p)")
+        }
+        tk.expectEqual(shortRange.upperBound - shortRange.lowerBound + 1, 7,
+                       "short pane is exactly 7 whole rows")
+
+        let defaultPane = PianoRollLayout.defaultPitchPaneHeight
+        let defaultRange = PianoRollLayout.visiblePitchRange(
+            focusPitch: focus, paneHeight: defaultPane, rowHeight: PianoRollLayout.rowHeight)
+        for p in [72, 73, 74, 76] {
+            tk.expect(defaultRange.contains(p), "default pane contains lead pitch \(p)")
+        }
+        // Hit-testing uses the same range: y of focus maps back to focus.
+        let y = PianoRollLayout.yForPitch(focus, pitchHigh: defaultRange.upperBound,
+                                          rowHeight: PianoRollLayout.rowHeight)
+        let hit = PianoRollLayout.pitchAt(
+            y: y + PianoRollLayout.rowHeight / 2,
+            pitchLow: defaultRange.lowerBound,
+            pitchHigh: defaultRange.upperBound,
+            rowHeight: PianoRollLayout.rowHeight
+        )
+        tk.expectEqual(hit, focus, "pitchAt on focus row centre returns focus (hit-test match)")
+    }
+
+    tk.suite("Piano roll layout: bass notes visible after expand (T4, no scroll)") {
+        // Live failure case across T2/T3: Bass B at 36 and 41. With a bounded window there
+        // is no scroll offset to go stale; expand simply recomputes the range from height.
         let bassNotes = [36, 41].map {
             Note(startBeat: 0, lengthBeats: 0.5, pitch: $0, velocity: 100)
         }
         let focus = PianoRollLayout.focusPitch(notes: bassNotes)
         tk.expect(focus >= 36 && focus <= 41, "focus is the mean of the bass cluster (got \(focus))")
-        let range = PianoRollLayout.displayPitchRange(notes: bassNotes)
-        tk.expect(range.contains(36) && range.contains(41), "display range covers both bass notes")
 
-        // Tiny height stands in for the collapsed / pre-layout pass (height ≈ 0 or one row).
-        let collapsedViewport = PianoRollLayout.rowHeight
-        let collapsedOffset = PianoRollLayout.verticalScrollOffset(
+        // Tiny height (collapsed / first layout pass): still contains focus.
+        let collapsed = PianoRollLayout.visiblePitchRange(
             focusPitch: focus,
-            pitchRange: range,
-            rowHeight: PianoRollLayout.rowHeight,
-            viewportHeight: collapsedViewport
+            paneHeight: PianoRollLayout.rowHeight,
+            rowHeight: PianoRollLayout.rowHeight
         )
-        // Expanded default band (~2 octaves of pitch rows): re-centre as T3 does on height change.
-        let expandedViewport = PianoRollLayout.rowHeight
-            * CGFloat(PianoRollLayout.defaultViewportPitchRows)
-        let expandedOffset = PianoRollLayout.verticalScrollOffset(
-            focusPitch: focus,
-            pitchRange: range,
-            rowHeight: PianoRollLayout.rowHeight,
-            viewportHeight: expandedViewport
-        )
-        // Offsets for tiny vs expanded must be allowed to differ; the contract is the expanded
-        // band, not that scroll stays frozen from the collapsed pass.
-        _ = collapsedOffset
+        tk.expect(collapsed.contains(focus), "one-row pane still shows focus pitch")
 
-        let focusY = PianoRollLayout.yForPitch(focus, pitchHigh: range.upperBound,
-                                               rowHeight: PianoRollLayout.rowHeight)
-            + PianoRollLayout.rowHeight / 2
-        let visibleTop = expandedOffset
-        let visibleBottom = expandedOffset + expandedViewport
-        tk.expect(focusY >= visibleTop && focusY <= visibleBottom,
-                  "after expand, focus pitch \(focus) (y=\(focusY)) is inside visible band [\(visibleTop), \(visibleBottom)]")
-        // And still centred, not merely barely inside.
-        let visibleCenter = expandedOffset + expandedViewport / 2
-        tk.expect(abs(focusY - visibleCenter) < 1,
-                  "after expand, focus pitch is vertically centred (not only barely on-screen)")
+        // Expanded default band: both bass notes must be in the drawn range.
+        let expanded = PianoRollLayout.visiblePitchRange(
+            focusPitch: focus,
+            paneHeight: PianoRollLayout.defaultPitchPaneHeight,
+            rowHeight: PianoRollLayout.rowHeight
+        )
+        tk.expect(expanded.contains(36) && expanded.contains(41),
+                  "expanded pane contains both bass notes 36 and 41 (got \(expanded))")
+        tk.expectEqual(
+            expanded.upperBound - expanded.lowerBound + 1,
+            PianoRollLayout.defaultViewportPitchRows,
+            "expanded pane fills with whole rows"
+        )
+        // Resize to a different height recomputes without any scroll state.
+        let resized = PianoRollLayout.visiblePitchRange(
+            focusPitch: focus,
+            paneHeight: PianoRollLayout.rowHeight * 16,
+            rowHeight: PianoRollLayout.rowHeight
+        )
+        tk.expect(resized.contains(36) && resized.contains(41),
+                  "resized pane still contains both bass notes")
+        tk.expectEqual(resized.upperBound - resized.lowerBound + 1, 16,
+                       "resized pane is exactly 16 rows")
     }
 
     tk.suite("AppStore piano roll: add/delete each push one labeled undo entry") {

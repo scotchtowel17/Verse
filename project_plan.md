@@ -1227,7 +1227,7 @@ the visible range directly assertable.
 
 Until then the workaround is to scroll the roll manually, which does work.
 
-## Step T4 (implementation) — Bounded pitch window, no inner scroll — PENDING
+## Step T4 (implementation) — Bounded pitch window, no inner scroll — DONE
 
 Approved re-decomposition. Do NOT attempt another `scrollTo` fix.
 
