@@ -234,6 +234,30 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         tk.expect(!AppStore.isDefaultTrackName("Grand Piano"), "preset-style name is not default")
     }
 
+    tk.suite("AppStore AA2: renameTrack undoes and refuses empty names") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let tid = store.project.tracks[0].id
+        let original = store.project.tracks[0].name
+        store.renameTrack(tid, to: "Lead Hook")
+        tk.expectEqual(store.project.tracks[0].name, "Lead Hook", "rename applied")
+        store.undo()
+        tk.expectEqual(store.project.tracks[0].name, original, "rename undoes")
+        store.redo()
+        tk.expectEqual(store.project.tracks[0].name, "Lead Hook", "rename redoes")
+
+        store.renameTrack(tid, to: "   ")
+        tk.expectEqual(store.project.tracks[0].name, "Lead Hook", "whitespace-only refused")
+        tk.expect(store.statusMessage != nil, "empty rename surfaces a message")
+
+        // Same name again must not push a new undo entry.
+        store.renameTrack(tid, to: "Lead Hook")
+        store.undo()
+        tk.expectEqual(store.project.tracks[0].name, original,
+                       "identical rename did not bury the previous undo")
+    }
+
     tk.suite("AppStore X1: track colour round-robin on add; setTrackColorIndex undoes") {
         tk.expectEqual(TrackIdentityColor.swatches.count, TrackPalette.count,
                        "UI swatches match palette size")

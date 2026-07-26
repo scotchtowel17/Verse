@@ -518,7 +518,7 @@ So this is not only the merge. It is a subtraction pass with the merge at its ce
 today: 16 controls in a track row, snap rendered in two separate places, zoom controls in both
 the action bar and the roll toolbar, and permanent instructional sentences occupying chrome.
 
-## Step AA1 — Merge the track list into the arrangement — PENDING
+## Step AA1 — Merge the track list into the arrangement — DONE
 
 Verse renders each track's identity twice: once in the Tracks section with its controls, and
 again as a lane label in the Arrangement. Soundtrap, and every other DAW, has one row per track
@@ -531,7 +531,7 @@ whose left end is the controls and whose right end is that track's timeline.
    recovered space to the roll and arrangement rather than padding.
 3. Selecting the row selects the track, exactly as selecting a lane does now.
 
-## Step AA2 — Subtract — PENDING
+## Step AA2 — Subtract — DONE
 
 A control earns its place on screen or it moves into a menu. Judgement, not a formula.
 

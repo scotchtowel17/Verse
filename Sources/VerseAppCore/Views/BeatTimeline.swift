@@ -12,8 +12,9 @@ import VerseModel
 public enum BeatTimeline {
     /// Pixels per beat at zoom 1.0. Historical default; all zoom math multiplies this.
     public static let baseBeatWidth: CGFloat = 28
-    /// Left gutter for track names / piano keys. Shared so grid column 0 lines up.
-    public static let gutterWidth: CGFloat = 100
+    /// Left gutter for track controls (arrangement) / piano keys (roll). Shared so grid
+    /// column 0 lines up. Wide enough for the compact always-visible track strip (AA1/AA2).
+    public static let gutterWidth: CGFloat = 248
     /// Height of the single shared beat ruler.
     public static let rulerHeight: CGFloat = 22
 

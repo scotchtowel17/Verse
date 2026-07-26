@@ -68,28 +68,31 @@ struct TimelineWorkspaceView: View {
     // MARK: - Chrome
 
     private var arrangementChrome: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Label("Arrangement", systemImage: "rectangle.split.3x1")
-                    .font(.headline)
-                Spacer()
-                let clipCount = store.project.tracks.flatMap(\.clips).count
-                Text("\(clipCount) clip\(clipCount == 1 ? "" : "s")")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        HStack(spacing: 10) {
+            Label("Arrangement", systemImage: "rectangle.split.3x1")
+                .font(.headline)
+            // Clip snap is independent of note snap in the roll (Z2 / AA2): label makes that
+            // legible rather than looking like the same control twice.
+            SnapGridPicker(
+                snapBeats: $arrangementSnapBeats,
+                label: "Clips",
+                helpText: "Clip snap: grid for clip start and length. Off allows free placement."
+            )
+            Spacer(minLength: 8)
+            let clipCount = store.project.tracks.flatMap(\.clips).count
+            Text("\(clipCount) clip\(clipCount == 1 ? "" : "s")")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button { store.addInstrumentTrack() } label: {
+                Label("Instrument", systemImage: "pianokeys")
             }
-            HStack(spacing: 10) {
-                SnapGridPicker(
-                    snapBeats: $arrangementSnapBeats,
-                    showLabel: true,
-                    helpText: "Grid snap for clip start and length. Off allows free placement."
-                )
-                Spacer(minLength: 8)
-                Text("Select · drag to move · right edge to resize · click MIDI for piano roll")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
+            .controlSize(.small)
+            .help("Add an instrument track")
+            Button { store.addAudioTrack() } label: {
+                Label("Audio", systemImage: "waveform")
             }
+            .controlSize(.small)
+            .help("Add an audio track")
         }
     }
 
@@ -119,10 +122,6 @@ struct TimelineWorkspaceView: View {
                 Text(store.project.track(id: store.rollTrackID)?.name ?? "Track")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Text("Double-click to add a note")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
             Spacer()
@@ -444,37 +443,11 @@ struct TimelineWorkspaceView: View {
         .allowsHitTesting(false)
     }
 
+    /// Per-track controls as the lane left gutter (AA1): one row per track, no separate list.
     private var arrangementGutter: some View {
-        let laneH = ArrangementLanesView.laneHeight
-        return VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
             ForEach(store.project.tracks) { track in
-                let isSelected = track.id == store.rollTrackID
-                let identity = TrackIdentityColor.swatch(for: track.colorIndex)
-                HStack(spacing: 0) {
-                    // Identity strip: thicker when this is the working track (Y2).
-                    Rectangle()
-                        .fill(identity.solid)
-                        .frame(width: isSelected ? 6 : 4)
-                    Text(track.name)
-                        .font(.caption.weight(isSelected ? .semibold : .regular))
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.leading, 4)
-                }
-                .frame(width: BeatTimeline.gutterWidth, height: laneH, alignment: .leading)
-                .background(isSelected ? identity.solid.opacity(0.16) : Color.black.opacity(0.03))
-                .overlay(alignment: .trailing) {
-                    if isSelected {
-                        Rectangle()
-                            .fill(Color.accentColor.opacity(0.85))
-                            .frame(width: 2)
-                    }
-                }
-                .overlay(alignment: .bottom) {
-                    Rectangle().fill(Color.black.opacity(0.08)).frame(height: 0.5)
-                }
-                .contentShape(Rectangle())
-                .onTapGesture { store.selectTrack(track.id) }
+                TrackLaneGutter(track: track)
             }
         }
     }
@@ -503,7 +476,9 @@ struct ArrangementLanesView: View {
     @State private var marqueeCurrent: CGPoint?
     @State private var marqueeLive = false
 
-    static let laneHeight: CGFloat = 44
+    /// Lane height matches the compact track-control gutter (AA1). Marquee and group-move
+    /// track index math depend on this value staying in lockstep with TrackLaneGutter.
+    static let laneHeight: CGFloat = 56
     private static let clickSlop: CGFloat = 4
 
     private var beatsPerBar: Int {

@@ -245,6 +245,23 @@ extension AppStore {
         recovery.autosave(project)
     }
 
+    /// Rename a track (one undo entry). Empty / whitespace-only names are refused.
+    public func renameTrack(_ id: UUID, to name: String) {
+        guard project.trackIndex(id: id) != nil else {
+            statusMessage = "That track isn’t in this project."
+            return
+        }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            statusMessage = "A track needs a name."
+            return
+        }
+        if project.track(id: id)?.name == trimmed { return }
+        history.record(project, name: "Rename Track")
+        mutate(id) { $0.name = trimmed }
+        recovery.autosave(project)
+    }
+
     public func deleteTrack(_ id: UUID) {
         // Refuse emptying the project: the UI always shows a trash control, so this is a
         // real user ask that must not fail silently.
