@@ -150,7 +150,9 @@ extension AppStore {
         recovery.autosave(project)
     }
 
-    func selectTrack(_ id: UUID) {
+    /// Select a track as the working track (track list / lane gutter). Updates roll binding;
+    /// instrument tracks also become the keyboard/MIDI audition target.
+    public func selectTrack(_ id: UUID) {
         // Roll follows any track row (instrument draws notes; audio shows a plain empty state).
         // Keyboard / MIDI audition (`activeTrackID`) stays instrument-only.
         guard project.track(id: id) != nil else { return }

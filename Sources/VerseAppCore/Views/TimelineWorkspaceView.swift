@@ -341,22 +341,33 @@ struct TimelineWorkspaceView: View {
         let laneH = ArrangementLanesView.laneHeight
         return VStack(alignment: .leading, spacing: 0) {
             ForEach(store.project.tracks) { track in
+                let isSelected = track.id == store.rollTrackID
+                let identity = TrackIdentityColor.swatch(for: track.colorIndex)
                 HStack(spacing: 0) {
-                    // Thin identity accent on the lane header.
+                    // Identity strip: thicker when this is the working track (Y2).
                     Rectangle()
-                        .fill(TrackIdentityColor.solid(for: track.colorIndex))
-                        .frame(width: 4)
+                        .fill(identity.solid)
+                        .frame(width: isSelected ? 6 : 4)
                     Text(track.name)
-                        .font(.caption)
+                        .font(.caption.weight(isSelected ? .semibold : .regular))
                         .lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.leading, 4)
                 }
                 .frame(width: BeatTimeline.gutterWidth, height: laneH, alignment: .leading)
-                .background(Color.black.opacity(0.03))
+                .background(isSelected ? identity.solid.opacity(0.16) : Color.black.opacity(0.03))
+                .overlay(alignment: .trailing) {
+                    if isSelected {
+                        Rectangle()
+                            .fill(Color.accentColor.opacity(0.85))
+                            .frame(width: 2)
+                    }
+                }
                 .overlay(alignment: .bottom) {
                     Rectangle().fill(Color.black.opacity(0.08)).frame(height: 0.5)
                 }
+                .contentShape(Rectangle())
+                .onTapGesture { store.selectTrack(track.id) }
             }
         }
     }
@@ -477,7 +488,16 @@ struct ArrangementLanesView: View {
     }
 
     private func lane(track: Track, trackIndex: Int) -> some View {
-        ZStack(alignment: .topLeading) {
+        let isSelected = track.id == store.rollTrackID
+        let identity = TrackIdentityColor.swatch(for: track.colorIndex)
+        return ZStack(alignment: .topLeading) {
+            // Selected lane tint: track colour, light enough that clips stay legible (Y2).
+            if isSelected {
+                Rectangle()
+                    .fill(identity.solid.opacity(0.10))
+                    .frame(width: totalWidth, height: Self.laneHeight)
+                    .allowsHitTesting(false)
+            }
             Canvas { context, size in
                 let beatCount = Int(ceil(contentBeats))
                 let bw = BeatTimeline.beatWidth(zoom: zoom)
@@ -502,6 +522,13 @@ struct ArrangementLanesView: View {
             }
         }
         .frame(width: totalWidth, height: Self.laneHeight, alignment: .topLeading)
+        .overlay {
+            if isSelected {
+                Rectangle()
+                    .strokeBorder(Color.accentColor.opacity(0.55), lineWidth: 1.5)
+                    .allowsHitTesting(false)
+            }
+        }
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.black.opacity(0.08)).frame(height: 0.5)
         }

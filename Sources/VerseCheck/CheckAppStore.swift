@@ -2184,4 +2184,167 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
             tk.expect(notes.isEmpty, "no silent note dump onto remaining tracks")
         }
     }
+
+    // MARK: - Step Y2: track focus, ghost notes, roll zoom
+
+    tk.suite("Y2 selectTrack binds rollTrackID for instrument and audio") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let instrumentID = store.project.tracks[0].id
+        store.addInstrumentTrack()
+        store.addAudioTrack()
+        let secondInst = store.project.tracks[1].id
+        let audioID = store.project.tracks[2].id
+
+        store.selectTrack(secondInst)
+        tk.expectEqual(store.rollTrackID, secondInst, "select instrument sets rollTrackID")
+        tk.expectEqual(store.activeTrackID, secondInst, "select instrument sets activeTrackID")
+
+        store.selectTrack(audioID)
+        tk.expectEqual(store.rollTrackID, audioID, "select audio sets rollTrackID")
+        // Audition stays instrument-only; activeTrackID does not follow audio.
+        tk.expectEqual(store.activeTrackID, secondInst, "audio select leaves instrument active")
+
+        store.selectTrack(instrumentID)
+        tk.expectEqual(store.rollTrackID, instrumentID, "select first instrument restores roll")
+        tk.expectEqual(store.activeTrackID, instrumentID, "select first instrument restores active")
+    }
+
+    tk.suite("Y2 PianoRollGhosts: overlap only, exclude open track, keep colours") {
+        let openTrackID = UUID()
+        let otherTrackID = UUID()
+        let thirdTrackID = UUID()
+        let openNote = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        let ghostIn = Note(startBeat: 0.5, lengthBeats: 0.5, pitch: 64, velocity: 90)
+        let ghostOutOfRangeClip = Note(startBeat: 0, lengthBeats: 1, pitch: 48, velocity: 80)
+        let openClip = Clip(kind: .midi, name: "lead", startBeat: 4, lengthBeats: 4,
+                            midiNotes: [openNote])
+        // Overlaps open clip [4, 8): starts at 6, length 4 → [6, 10).
+        let otherClip = Clip(kind: .midi, name: "pad", startBeat: 6, lengthBeats: 4,
+                             midiNotes: [ghostIn])
+        // No overlap: [0, 2) vs [4, 8).
+        let farClip = Clip(kind: .midi, name: "intro", startBeat: 0, lengthBeats: 2,
+                           midiNotes: [ghostOutOfRangeClip])
+        let tracks = [
+            Track(id: openTrackID, kind: .instrument, name: "Lead", colorIndex: 1,
+                  instrument: .grandPiano, clips: [openClip]),
+            Track(id: otherTrackID, kind: .instrument, name: "Pad", colorIndex: 3,
+                  instrument: .grandPiano, clips: [otherClip]),
+            Track(id: thirdTrackID, kind: .instrument, name: "Intro", colorIndex: 5,
+                  instrument: .grandPiano, clips: [farClip]),
+        ]
+
+        let ghosts = PianoRollGhosts.notes(
+            openClipStart: 4, openClipLength: 4,
+            openTrackID: openTrackID, tracks: tracks
+        )
+        tk.expectEqual(ghosts.count, 1, "only notes from overlapping other-track clips")
+        tk.expectEqual(ghosts[0].id, ghostIn.id, "ghost is the overlapping clip’s note")
+        tk.expectEqual(ghosts[0].sourceTrackID, otherTrackID, "ghost source is the other track")
+        tk.expectEqual(ghosts[0].colorIndex, 3, "ghost keeps the other track’s colour index")
+        tk.expectEqual(ghosts[0].absoluteStartBeat, 6.5, "absolute start = clip start + local")
+        tk.expectEqual(ghosts[0].pitch, 64, "ghost pitch preserved")
+
+        // Open track’s own notes are never ghosts.
+        tk.expect(ghosts.allSatisfy { $0.sourceTrackID != openTrackID },
+                  "open track notes are never listed as ghosts")
+        // Far clip excluded by time.
+        tk.expect(ghosts.allSatisfy { $0.id != ghostOutOfRangeClip.id },
+                  "non-overlapping clips contribute no ghosts")
+
+        // Zero-length open clip → empty.
+        let empty = PianoRollGhosts.notes(
+            openClipStart: 4, openClipLength: 0,
+            openTrackID: openTrackID, tracks: tracks
+        )
+        tk.expect(empty.isEmpty, "zero-length open clip yields no ghosts")
+
+        // Touching at the endpoint only is not an overlap (half-open).
+        tk.expect(
+            !PianoRollGhosts.rangesOverlap(aStart: 0, aEnd: 4, bStart: 4, bEnd: 8),
+            "touching endpoints do not overlap"
+        )
+        tk.expect(
+            PianoRollGhosts.rangesOverlap(aStart: 0, aEnd: 4.1, bStart: 4, bEnd: 8),
+            "slight overlap is true"
+        )
+    }
+
+    tk.suite("Y2 vertical zoom clamps and keeps drawn rows == range label span") {
+        tk.expectEqual(PianoRollLayout.clampedRowHeight(1), PianoRollLayout.minRowHeight,
+                       "row height clamps below min")
+        tk.expectEqual(PianoRollLayout.clampedRowHeight(999), PianoRollLayout.maxRowHeight,
+                       "row height clamps above max")
+        tk.expectEqual(
+            PianoRollLayout.zoomedInRowHeight(from: PianoRollLayout.maxRowHeight),
+            PianoRollLayout.maxRowHeight,
+            "pitch zoom in at max stays max"
+        )
+        tk.expectEqual(
+            PianoRollLayout.zoomedOutRowHeight(from: PianoRollLayout.minRowHeight),
+            PianoRollLayout.minRowHeight,
+            "pitch zoom out at min stays min"
+        )
+
+        let focus = 72
+        // At every clamped row height and several pane sizes, drawn count equals label span.
+        let heights: [CGFloat] = [
+            PianoRollLayout.minRowHeight,
+            12,
+            PianoRollLayout.rowHeight,
+            24,
+            PianoRollLayout.maxRowHeight,
+        ]
+        for rh in heights {
+            for rows in [1, 8, 16, 24, 36] {
+                let paneH = rh * CGFloat(rows)
+                let range = PianoRollLayout.visiblePitchRange(
+                    focusPitch: focus, paneHeight: paneH, rowHeight: rh)
+                let drawn = PianoRollLayout.drawnRowCount(paneHeight: paneH, rowHeight: rh)
+                let labelled = range.upperBound - range.lowerBound + 1
+                tk.expectEqual(drawn, rows,
+                               "rowH \(rh): pane of \(rows) rows draws \(rows) (got \(drawn))")
+                tk.expectEqual(labelled, drawn,
+                               "rowH \(rh): range span \(labelled) equals drawn \(drawn) (\(PianoRollLayout.rangeLabel(range)))")
+            }
+        }
+    }
+
+    tk.suite("Y2 AppStore piano roll vertical zoom and ghosts default") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        tk.expect(store.showPianoRollGhosts, "ghost notes default on")
+        tk.expectEqual(store.pianoRollRowHeight, PianoRollLayout.rowHeight,
+                       "pitch row height starts at default")
+        tk.expectEqual(store.timelineZoom, BeatTimeline.defaultZoom,
+                       "horizontal zoom still defaults with arrangement")
+
+        store.zoomPianoRollPitchIn()
+        tk.expect(store.pianoRollRowHeight > PianoRollLayout.rowHeight,
+                  "pitch zoom in tallens rows")
+        let afterIn = store.pianoRollRowHeight
+        store.zoomPianoRollPitchOut()
+        tk.expect(store.pianoRollRowHeight < afterIn, "pitch zoom out shortens rows")
+
+        store.setPianoRollRowHeight(1)
+        tk.expectEqual(store.pianoRollRowHeight, PianoRollLayout.minRowHeight,
+                       "setPianoRollRowHeight clamps low")
+        store.setPianoRollRowHeight(999)
+        tk.expectEqual(store.pianoRollRowHeight, PianoRollLayout.maxRowHeight,
+                       "setPianoRollRowHeight clamps high")
+
+        // Horizontal zoom from roll path is the same AppStore value as arrangement.
+        store.setTimelineZoom(2.0)
+        tk.expectEqual(store.timelineZoom, 2.0, "roll/arrangement share timelineZoom")
+        tk.expectEqual(
+            BeatTimeline.x(forBeat: 4, zoom: store.timelineZoom),
+            BeatTimeline.x(forBeat: 4, zoom: 2.0),
+            "shared zoom keeps arrangement and roll x aligned"
+        )
+
+        store.showPianoRollGhosts = false
+        tk.expect(!store.showPianoRollGhosts, "ghosts toggle can turn off")
+    }
 }

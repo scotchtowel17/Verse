@@ -116,6 +116,10 @@ public final class AppStore {
     public var pianoRollSnapBeats: Double = 0.25
     /// Shared timeline zoom for arrangement + piano roll (via `BeatTimeline.beatWidth(zoom:)`).
     public var timelineZoom: Double = BeatTimeline.defaultZoom
+    /// When true, other tracks' overlapping MIDI notes draw as dimmed ghosts in the roll (Y2).
+    public var showPianoRollGhosts: Bool = true
+    /// Pitch row height in the piano roll (vertical zoom). Horizontal zoom is `timelineZoom`.
+    public var pianoRollRowHeight: CGFloat = PianoRollLayout.rowHeight
 
     // MIDI input (Phase M): connected CoreMIDI source display names, sorted.
     public var midiSourceNames: [String] = []
@@ -774,6 +778,23 @@ public final class AppStore {
     /// Set zoom directly (clamped). Used by tests and any non-button path.
     public func setTimelineZoom(_ zoom: Double) {
         timelineZoom = BeatTimeline.clampedZoom(zoom)
+    }
+
+    // MARK: Piano-roll vertical zoom (Step Y2)
+
+    /// Taller pitch rows (fewer pitches visible). Clamped.
+    public func zoomPianoRollPitchIn() {
+        pianoRollRowHeight = PianoRollLayout.zoomedInRowHeight(from: pianoRollRowHeight)
+    }
+
+    /// Shorter pitch rows (more pitches visible). Clamped.
+    public func zoomPianoRollPitchOut() {
+        pianoRollRowHeight = PianoRollLayout.zoomedOutRowHeight(from: pianoRollRowHeight)
+    }
+
+    /// Set pitch row height directly (clamped). Used by tests and any non-button path.
+    public func setPianoRollRowHeight(_ height: CGFloat) {
+        pianoRollRowHeight = PianoRollLayout.clampedRowHeight(height)
     }
 
     /// Paste clips into the arrangement. One undo entry labeled "Paste Clips". Each entry

@@ -371,7 +371,7 @@ the upper half of the keyboard makes no sound.
    roll. Add a way to hide and show it, remembered for the session, and give the space back to
    the roll and arrangement when hidden.
 
-## Step Y2 — Track focus, and zoom inside the piano roll — PENDING
+## Step Y2 — Track focus, and zoom inside the piano roll — DONE
 
 1. **Selecting a track must be obvious.** The owner wants to work on one track while still
    seeing the others. Make the selected track unmistakable: a clear selected state on the track
@@ -389,3 +389,28 @@ the upper half of the keyboard makes no sound.
    pitches are visible. Both need sensible clamps.
 4. Vertical zoom must keep the bounded-window invariant from T4: the number of rows drawn always
    equals the span the range label reports, at every zoom level.
+
+## Step Y3 — Roll toolbar is overcrowded, and ghosts are unconfirmed — PENDING
+
+Y2's substance works and was verified live: the selected track is unmistakable (selection ring
+on the row, tinted lane) while the other tracks stay fully legible, the roll carries its own
+time and pitch zoom, and the keyboard hide toggle works. Two problems.
+
+1. **The roll toolbar has outgrown its row.** It now holds Snap with four options, octave
+   up/down, a zoom percentage, four magnifier buttons, a Ghosts checkbox and a note count. The
+   "Ghosts" label is squeezed so hard it renders **one letter per line vertically**, which looks
+   broken. Reorganise the toolbar so it fits at realistic widths: group related controls, use
+   icons with tooltips instead of words where the meaning is obvious, and let low-priority items
+   collapse into an overflow rather than deform. Nothing may render vertically or clip.
+2. **Ghost notes could not be confirmed on screen.** With the Lead clip open (notes 72-79) the
+   ghosts from Chords (60-69) and Bass (36, 43) sit outside the visible pitch window, and
+   zooming out vertically did not bring them into view. Determine whether ghosts render at all,
+   and make the vertical zoom-out actually widen the pitch window as expected. Add an assertion
+   that with ghosts enabled and an overlapping clip on another track, the ghost set is non-empty
+   and excludes the edited clip's own notes.
+3. While reorganising, confirm the two zoom axes are clearly distinguishable. Four adjacent
+   magnifier icons with no labels are ambiguous; time zoom and pitch zoom should be visibly
+   different controls.
+
+Keep every Y2 behaviour: shared horizontal zoom with the arrangement, the T4 invariant that rows
+drawn equals the range label span at every row height, and ghosts non-interactive.
