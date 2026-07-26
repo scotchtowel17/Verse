@@ -77,17 +77,25 @@ struct PianoRollEmbeddedView: View {
     let contentBeats: Double
     let totalWidth: CGFloat
     let showsGutter: Bool
+    /// Shared timeline zoom (must match arrangement).
+    let zoom: Double
 
-    /// Snap grid in beats: 0 (Off), 1 (1/4), 0.5 (1/8), 0.25 (1/16). Default 1/16.
-    @State private var snapBeats: Double = 0.25
     /// Last non-zero grid choice; used as new-note length when snap is Off so clicks
     /// do not produce a 1/32 sliver.
     @State private var lastGridSnapBeats: Double = 0.25
-    /// View-local selection (not persisted).
-    @State private var selectedNoteIDs: Set<UUID> = []
     /// View-local clipboard for Cmd-C / Cmd-X / Cmd-V (relative paste uses startBeat).
     @State private var noteClipboard: [ClipboardNote] = []
     @FocusState private var isFocused: Bool
+
+    /// Snap grid in beats (shared with quantize on the action bar).
+    private var snapBeats: Double { store.pianoRollSnapBeats }
+
+    private var snapBeatsBinding: Binding<Double> {
+        Binding(
+            get: { store.pianoRollSnapBeats },
+            set: { store.pianoRollSnapBeats = $0 }
+        )
+    }
 
     /// Drag-move bookkeeping (gesture-local). Origins for the whole selection.
     @State private var moveOrigin: MoveOrigin?
@@ -218,13 +226,25 @@ struct PianoRollEmbeddedView: View {
                 .padding(-2)
                 .allowsHitTesting(false)
         )
+        .onChange(of: isFocused) { _, focused in
+            if focused { store.editSurface = .pianoRoll }
+        }
         .onChange(of: clipID) { _, _ in
-            selectedNoteIDs = []
+            store.selectedNoteIDs = []
             pitchNavOffset = 0
             gutterDragStartOffset = nil
             // Do not steal keyboard focus here: selecting a clip in the arrangement must
             // leave arrangement focus so Cmd-C/X/V still copy clips. The roll takes focus
             // when the user clicks/drags inside it (or on first appear of the pane).
+        }
+        // Drop selection entries that no longer exist (undo, delete).
+        .onChange(of: store.project.tracks) { _, _ in
+            guard let clipID, let loc = store.project.clipLocation(id: clipID) else {
+                store.selectedNoteIDs = []
+                return
+            }
+            let live = Set(store.project.tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes?.map(\.id) ?? [])
+            store.selectedNoteIDs = store.selectedNoteIDs.intersection(live)
         }
         .onDeleteCommand { deleteSelection() }
         .onKeyPress(.delete) {
@@ -302,7 +322,7 @@ struct PianoRollEmbeddedView: View {
     private var snapBar: some View {
         HStack(spacing: 10) {
             Text("Snap").font(.callout).foregroundStyle(.secondary)
-            Picker("Snap", selection: $snapBeats) {
+            Picker("Snap", selection: snapBeatsBinding) {
                 Text("Off").tag(0.0)
                 Text("1/4").tag(1.0)
                 Text("1/8").tag(0.5)
@@ -312,7 +332,7 @@ struct PianoRollEmbeddedView: View {
             .labelsHidden()
             .frame(width: 260)
             .help("Grid snap for note start and length. Off allows free placement.")
-            .onChange(of: snapBeats) { _, newValue in
+            .onChange(of: store.pianoRollSnapBeats) { _, newValue in
                 if newValue > 0 { lastGridSnapBeats = newValue }
             }
 
@@ -337,10 +357,10 @@ struct PianoRollEmbeddedView: View {
                 .help("Visible pitch range (drag the key gutter to shift)")
 
             Spacer()
-            if !selectedNoteIDs.isEmpty {
-                Text(selectedNoteIDs.count == 1
+            if !store.selectedNoteIDs.isEmpty {
+                Text(store.selectedNoteIDs.count == 1
                      ? "Delete removes selection"
-                     : "\(selectedNoteIDs.count) selected · Delete removes all")
+                     : "\(store.selectedNoteIDs.count) selected · Delete removes all")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
@@ -388,8 +408,8 @@ struct PianoRollEmbeddedView: View {
     @ViewBuilder
     private func clipSpanOverlay(totalHeight: CGFloat) -> some View {
         if let clip {
-            let x = BeatTimeline.x(forBeat: clip.startBeat)
-            let w = max(BeatTimeline.width(forBeats: clip.lengthBeats), 2)
+            let x = BeatTimeline.x(forBeat: clip.startBeat, zoom: zoom)
+            let w = max(BeatTimeline.width(forBeats: clip.lengthBeats, zoom: zoom), 2)
             Rectangle()
                 .fill(trackIdentity.solid.opacity(0.08))
                 .frame(width: w, height: totalHeight)
@@ -480,7 +500,7 @@ struct PianoRollEmbeddedView: View {
 
             let beatCount = Int(ceil(contentBeats))
             for b in 0...beatCount {
-                let x = CGFloat(b) * BeatTimeline.beatWidth
+                let x = CGFloat(b) * BeatTimeline.beatWidth(zoom: zoom)
                 let isBar = b % beatsPerBar == 0
                 var line = Path()
                 line.move(to: CGPoint(x: x, y: 0))
@@ -579,7 +599,7 @@ struct PianoRollEmbeddedView: View {
             return
         }
         // Single click on empty grid: clear selection (does not add a note).
-        selectedNoteIDs = []
+        store.selectedNoteIDs = []
         lastEmptyClickTime = now
         lastEmptyClickPoint = location
     }
@@ -592,9 +612,9 @@ struct PianoRollEmbeddedView: View {
         guard let start = marqueeStart, let current = marqueeCurrent else { return }
         // Grid x is arrangement-absolute; selection helpers use clip-local starts.
         let localA = BeatTimeline.localBeat(
-            absolute: BeatTimeline.beat(atX: start.x), clipStart: clipStart)
+            absolute: BeatTimeline.beat(atX: start.x, zoom: zoom), clipStart: clipStart)
         let localB = BeatTimeline.localBeat(
-            absolute: BeatTimeline.beat(atX: current.x), clipStart: clipStart)
+            absolute: BeatTimeline.beat(atX: current.x, zoom: zoom), clipStart: clipStart)
         let pitchA = pitchAt(y: start.y, pitchLow: pitchLow, pitchHigh: pitchHigh,
                              rowHeight: rowHeight)
         let pitchB = pitchAt(y: current.y, pitchLow: pitchLow, pitchHigh: pitchHigh,
@@ -602,7 +622,7 @@ struct PianoRollEmbeddedView: View {
         let ids = PianoRollSelection.notesTouchingMarquee(
             notes: notes, beatA: localA, beatB: localB, pitchA: pitchA, pitchB: pitchB
         )
-        selectedNoteIDs = Set(ids)
+        store.selectedNoteIDs = Set(ids)
     }
 
     // MARK: - Notes
@@ -625,11 +645,11 @@ struct PianoRollEmbeddedView: View {
         // Arrangement-absolute x so beat N sits under arrangement beat N.
         let absStart = BeatTimeline.absoluteStart(
             clipStart: clipStart, noteLocalStart: note.startBeat)
-        let x = BeatTimeline.x(forBeat: absStart)
+        let x = BeatTimeline.x(forBeat: absStart, zoom: zoom)
         let y = yForPitch(note.pitch, pitchHigh: pitchHigh, rowHeight: rowHeight)
-        let w = max(BeatTimeline.width(forBeats: note.lengthBeats), 6)
+        let w = max(BeatTimeline.width(forBeats: note.lengthBeats, zoom: zoom), 6)
         let h = max(rowHeight - 2, 6)
-        let selected = selectedNoteIDs.contains(note.id)
+        let selected = store.selectedNoteIDs.contains(note.id)
         // Proportional, capped resize zone so short notes (default 1/16) keep a move body.
         let handleW = PianoRollLayout.resizeHandleWidth(noteWidth: w)
 
@@ -679,8 +699,8 @@ struct PianoRollEmbeddedView: View {
                     // If shift-deselect removed the note under the pointer, do not start a
                     // group move (toggle only). Otherwise move every currently selected note.
                     let moving: [Note]
-                    if selectedNoteIDs.contains(note.id) {
-                        moving = notes.filter { selectedNoteIDs.contains($0.id) }
+                    if store.selectedNoteIDs.contains(note.id) {
+                        moving = notes.filter { store.selectedNoteIDs.contains($0.id) }
                     } else {
                         moving = []
                     }
@@ -702,7 +722,7 @@ struct PianoRollEmbeddedView: View {
                 // Same pitch and time delta for every selected note (formation preserved).
                 // Snap the primary note’s start; apply that beat delta to the whole group.
                 let pitchDelta = Int((-value.translation.height / rowHeight).rounded())
-                let beatDeltaRaw = Double(value.translation.width / BeatTimeline.beatWidth)
+                let beatDeltaRaw = Double(value.translation.width / BeatTimeline.beatWidth(zoom: zoom))
                 guard let primary = origin.notes.first(where: { $0.id == origin.primaryID })
                         ?? origin.notes.first else { return }
                 let snappedPrimaryStart = PianoRollLayout.snap(
@@ -749,13 +769,13 @@ struct PianoRollEmbeddedView: View {
     private func applyNoteClickSelection(_ note: Note) {
         let shift = NSEvent.modifierFlags.contains(.shift)
         if shift {
-            if selectedNoteIDs.contains(note.id) {
-                selectedNoteIDs.remove(note.id)
+            if store.selectedNoteIDs.contains(note.id) {
+                store.selectedNoteIDs.remove(note.id)
             } else {
-                selectedNoteIDs.insert(note.id)
+                store.selectedNoteIDs.insert(note.id)
             }
-        } else if !selectedNoteIDs.contains(note.id) {
-            selectedNoteIDs = [note.id]
+        } else if !store.selectedNoteIDs.contains(note.id) {
+            store.selectedNoteIDs = [note.id]
         }
     }
 
@@ -765,8 +785,8 @@ struct PianoRollEmbeddedView: View {
                 isFocused = true
                 if resizeOrigin == nil {
                     resizeOrigin = ResizeOrigin(noteID: note.id, lengthBeats: note.lengthBeats)
-                    if !selectedNoteIDs.contains(note.id) {
-                        selectedNoteIDs = [note.id]
+                    if !store.selectedNoteIDs.contains(note.id) {
+                        store.selectedNoteIDs = [note.id]
                     }
                     store.pianoRollAuditionStart(note.pitch)
                     return
@@ -778,7 +798,7 @@ struct PianoRollEmbeddedView: View {
                     continuousGestureLive = true
                 }
                 guard let origin = resizeOrigin, origin.noteID == note.id else { return }
-                let deltaBeats = Double(value.translation.width / BeatTimeline.beatWidth)
+                let deltaBeats = Double(value.translation.width / BeatTimeline.beatWidth(zoom: zoom))
                 let raw = origin.lengthBeats + deltaBeats
                 let snapped = max(Project.minimumNoteLengthBeats,
                                   PianoRollLayout.snap(raw, to: snapBeats))
@@ -805,7 +825,7 @@ struct PianoRollEmbeddedView: View {
     ) {
         let pitch = pitchAt(y: location.y, pitchLow: pitchLow, pitchHigh: pitchHigh,
                             rowHeight: rowHeight)
-        let absBeat = BeatTimeline.beat(atX: location.x)
+        let absBeat = BeatTimeline.beat(atX: location.x, zoom: zoom)
         let localRaw = BeatTimeline.localBeat(absolute: absBeat, clipStart: clipStart)
         // Notes before the clip start cannot be stored (model uses clip-local ≥ 0).
         guard localRaw >= -0.000_1 else {
@@ -816,7 +836,7 @@ struct PianoRollEmbeddedView: View {
         let length = PianoRollLayout.newNoteLengthBeats(snapBeats: snapBeats,
                                                         lastGridBeats: lastGridSnapBeats)
         if let id = store.pianoRollAddNote(pitch: pitch, startBeat: start, lengthBeats: length) {
-            selectedNoteIDs = [id]
+            store.selectedNoteIDs = [id]
             store.pianoRollAuditionStart(pitch)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
                 store.pianoRollAuditionStop()
@@ -825,15 +845,15 @@ struct PianoRollEmbeddedView: View {
     }
 
     private func deleteSelection() {
-        guard !selectedNoteIDs.isEmpty else { return }
+        guard !store.selectedNoteIDs.isEmpty else { return }
         store.pianoRollAuditionStop()
-        let ids = Array(selectedNoteIDs)
+        let ids = Array(store.selectedNoteIDs)
         store.pianoRollDeleteNotes(ids: ids)
-        selectedNoteIDs = []
+        store.selectedNoteIDs = []
     }
 
     private func copySelection() {
-        let selected = notes.filter { selectedNoteIDs.contains($0.id) }
+        let selected = notes.filter { store.selectedNoteIDs.contains($0.id) }
         guard !selected.isEmpty else { return }
         noteClipboard = selected.map {
             ClipboardNote(pitch: $0.pitch, startBeat: $0.startBeat,
@@ -843,11 +863,11 @@ struct PianoRollEmbeddedView: View {
 
     private func cutSelection() {
         copySelection()
-        guard !selectedNoteIDs.isEmpty else { return }
+        guard !store.selectedNoteIDs.isEmpty else { return }
         store.pianoRollAuditionStop()
-        let ids = Array(selectedNoteIDs)
+        let ids = Array(store.selectedNoteIDs)
         store.pianoRollDeleteNotes(ids: ids, undoName: ids.count == 1 ? "Cut Note" : "Cut Notes")
-        selectedNoteIDs = []
+        store.selectedNoteIDs = []
     }
 
     private func pasteClipboard() {
@@ -870,7 +890,7 @@ struct PianoRollEmbeddedView: View {
         }
         let newIDs = store.pianoRollPasteNotes(specs)
         if !newIDs.isEmpty {
-            selectedNoteIDs = Set(newIDs)
+            store.selectedNoteIDs = Set(newIDs)
         }
     }
 

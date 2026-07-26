@@ -671,6 +671,19 @@ func runModelChecks(_ tk: TestKit) {
         p.tracks[0].clips.append(emptyClip)
         try p.quantizeNotes(in: emptyClip.id, to: 0.25)
         tk.expectEqual(p.tracks[0].clips[1].midiNotes?.count, 0, "empty note list stays empty")
+
+        // Selected-only quantize (Step X2): only listed note ids move.
+        let a = Note(startBeat: 0.13, lengthBeats: 0.25, pitch: 60, velocity: 100)
+        let b = Note(startBeat: 0.63, lengthBeats: 0.25, pitch: 62, velocity: 100)
+        let selClip = Clip(kind: .midi, name: "sel", startBeat: 0, lengthBeats: 4,
+                           midiNotes: [a, b])
+        p.tracks[0].clips = [selClip]
+        try p.quantizeNotes(in: selClip.id, to: 0.25, noteIDs: [a.id])
+        let selAfter = p.tracks[0].clips[0].midiNotes!
+        tk.expectEqual(selAfter.first { $0.id == a.id }?.startBeat, 0.25,
+                       "selected note 0.13 → 0.25")
+        tk.expectEqual(selAfter.first { $0.id == b.id }?.startBeat, 0.63,
+                       "unselected note stays off-grid")
     }
 
     tk.suite("Model: transposeNotes") {

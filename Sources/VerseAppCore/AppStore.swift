@@ -96,6 +96,19 @@ public final class AppStore {
     /// Track the piano roll is bound to (instrument or audio). Track-row selection updates this.
     public var rollTrackID: UUID
 
+    // MARK: Action bar / shared timeline chrome (Step X2)
+
+    /// Which surface owns Cmd-C/V-style actions and the action bar selection target.
+    public var editSurface: EditSurface = .arrangement
+    /// Arrangement clip selection (view-driven; not persisted).
+    public var selectedClipIDs: Set<UUID> = []
+    /// Piano-roll note selection (view-driven; not persisted).
+    public var selectedNoteIDs: Set<UUID> = []
+    /// Piano-roll snap in beats: 0 (Off), 1 (1/4), 0.5 (1/8), 0.25 (1/16). Quantize uses this.
+    public var pianoRollSnapBeats: Double = 0.25
+    /// Shared timeline zoom for arrangement + piano roll (via `BeatTimeline.beatWidth(zoom:)`).
+    public var timelineZoom: Double = BeatTimeline.defaultZoom
+
     // MIDI input (Phase M): connected CoreMIDI source display names, sorted.
     public var midiSourceNames: [String] = []
     /// Plain-language status for the header: device name(s) or an honest “none” message.
@@ -671,6 +684,88 @@ public final class AppStore {
             statusMessage = "Couldn’t split that clip."
             return nil
         }
+    }
+
+    /// Duplicate arrangement clips. One undo entry for the whole selection. Each copy lands
+    /// at `start + length` of its original (model `duplicateClip`). Returns new clip ids.
+    @discardableResult
+    public func arrangementDuplicateClips(ids: [UUID]) -> [UUID] {
+        guard !ids.isEmpty else { return [] }
+        var working = project
+        var newIDs: [UUID] = []
+        newIDs.reserveCapacity(ids.count)
+        do {
+            for id in ids {
+                let copy = try working.duplicateClip(id: id)
+                newIDs.append(copy.id)
+            }
+        } catch let err as MutationError {
+            statusMessage = err.description
+            return []
+        } catch {
+            statusMessage = "Couldn’t duplicate those clips."
+            return []
+        }
+        guard !newIDs.isEmpty else { return [] }
+        history.record(project, name: newIDs.count == 1 ? "Duplicate Clip" : "Duplicate Clips")
+        project = working
+        recovery.autosave(project)
+        return newIDs
+    }
+
+    /// Quantize notes in the effective piano-roll MIDI clip. When `noteIDs` is non-empty,
+    /// only those notes move; otherwise every note in the clip is quantized. Grid comes from
+    /// `pianoRollSnapBeats` (must be 1, 0.5, or 0.25). One undo entry labeled "Quantize Notes".
+    public func pianoRollQuantizeNotes(noteIDs: Set<UUID>? = nil) {
+        let grid = pianoRollSnapBeats
+        guard grid > 0 else {
+            statusMessage = "Turn on snap (1/4, 1/8, or 1/16) to quantize."
+            return
+        }
+        guard let clipID = effectivePianoRollClipID else {
+            if pianoRollIsAudioTrack {
+                statusMessage = "Audio tracks don’t have notes to quantize."
+            } else {
+                statusMessage = "Open a MIDI clip to quantize notes."
+            }
+            return
+        }
+        let ids = noteIDs ?? selectedNoteIDs
+        var working = project
+        do {
+            try working.quantizeNotes(in: clipID, to: grid, noteIDs: ids.isEmpty ? nil : ids)
+        } catch let err as MutationError {
+            statusMessage = err.description
+            return
+        } catch {
+            statusMessage = "Couldn’t quantize those notes."
+            return
+        }
+        history.record(project, name: "Quantize Notes")
+        project = working
+        recovery.autosave(project)
+    }
+
+    // MARK: Timeline zoom (Step X2)
+
+    /// Zoom in one step. Arrangement and piano roll share this scale.
+    public func zoomTimelineIn() {
+        timelineZoom = BeatTimeline.zoomedIn(from: timelineZoom)
+    }
+
+    /// Zoom out one step.
+    public func zoomTimelineOut() {
+        timelineZoom = BeatTimeline.zoomedOut(from: timelineZoom)
+    }
+
+    /// Fit the shared content length into `availableWidth` (viewport minus gutter).
+    public func zoomTimelineToFit(contentBeats: Double, availableWidth: CGFloat) {
+        timelineZoom = BeatTimeline.fitZoom(contentBeats: contentBeats, availableWidth: availableWidth)
+    }
+
+    /// Set zoom directly (clamped). Used by tests and any non-button path.
+    public func setTimelineZoom(_ zoom: Double) {
+        timelineZoom = BeatTimeline.clampedZoom(zoom)
     }
 
     /// Paste clips into the arrangement. One undo entry labeled "Paste Clips". Each entry

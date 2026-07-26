@@ -39,8 +39,13 @@ struct TimelineWorkspaceView: View {
         )
     }
 
+    /// Shared zoom: arrangement and roll must use the same scale (Step X2).
+    private var zoom: Double { store.timelineZoom }
+
+    private var beatW: CGFloat { BeatTimeline.beatWidth(zoom: zoom) }
+
     private var totalWidth: CGFloat {
-        BeatTimeline.width(forBeats: contentBeats)
+        BeatTimeline.width(forBeats: contentBeats, zoom: zoom)
     }
 
     private var rollExpanded: Bool { store.showPianoRoll }
@@ -146,7 +151,8 @@ struct TimelineWorkspaceView: View {
     // MARK: - Shared timeline (one H scroll, one ruler, one playhead)
 
     private var sharedTimeline: some View {
-        let beatW = BeatTimeline.beatWidth
+        let beatW = self.beatW
+        let zoom = self.zoom
         let gutter = BeatTimeline.gutterWidth
         let rulerH = BeatTimeline.rulerHeight
         let totalW = totalWidth
@@ -172,7 +178,8 @@ struct TimelineWorkspaceView: View {
                                 ArrangementLanesView(
                                     contentBeats: contentBeats,
                                     totalWidth: totalW,
-                                    snapBeats: arrangementSnapBeats
+                                    snapBeats: arrangementSnapBeats,
+                                    zoom: zoom
                                 )
                             }
                         }
@@ -185,7 +192,8 @@ struct TimelineWorkspaceView: View {
                             PianoRollEmbeddedView(
                                 contentBeats: contentBeats,
                                 totalWidth: totalW,
-                                showsGutter: true
+                                showsGutter: true,
+                                zoom: zoom
                             )
                             .frame(width: gutter + totalW, height: rollH, alignment: .topLeading)
                         }
@@ -297,7 +305,7 @@ struct TimelineWorkspaceView: View {
     }
 
     private func scrub(atX x: CGFloat) {
-        let beat = max(0, min(contentBeats, BeatTimeline.beat(atX: x)))
+        let beat = max(0, min(contentBeats, BeatTimeline.beat(atX: x, zoom: zoom)))
         store.scrubPlayhead(to: beat)
     }
 
@@ -344,17 +352,17 @@ struct TimelineWorkspaceView: View {
 // MARK: - Arrangement lanes (no own scroll or ruler; uses BeatTimeline)
 
 /// Clip lanes only. Horizontal time comes from the parent’s shared scroll + `BeatTimeline`.
-/// Owns view-local clip selection, marquee, clipboard, and Cmd-C/X/V when keyboard-focused
-/// (the piano roll owns those shortcuts when *it* is focused).
+/// Selection lives on `AppStore` so the action bar can target it. Clipboard stays view-local.
+/// Cmd-C/X/V when keyboard-focused (the piano roll owns those shortcuts when *it* is focused).
 struct ArrangementLanesView: View {
     @Environment(AppStore.self) private var store
 
     let contentBeats: Double
     let totalWidth: CGFloat
     let snapBeats: Double
+    /// Shared timeline zoom (must match piano roll).
+    let zoom: Double
 
-    /// View-local selection (not persisted).
-    @State private var selectedClipIDs: Set<UUID> = []
     /// View-local clipboard for Cmd-C / Cmd-X / Cmd-V.
     @State private var clipClipboard: [ClipboardClip] = []
     @FocusState private var isFocused: Bool
@@ -409,6 +417,9 @@ struct ArrangementLanesView: View {
                 .padding(-2)
                 .allowsHitTesting(false)
         )
+        .onChange(of: isFocused) { _, focused in
+            if focused { store.editSurface = .arrangement }
+        }
         .onDeleteCommand { deleteSelection() }
         .onKeyPress(.delete) {
             deleteSelection()
@@ -448,7 +459,7 @@ struct ArrangementLanesView: View {
         // Drop selection entries that no longer exist (undo, delete, track remove).
         .onChange(of: store.project.tracks) { _, _ in
             let live = Set(store.project.tracks.flatMap(\.clips).map(\.id))
-            selectedClipIDs = selectedClipIDs.intersection(live)
+            store.selectedClipIDs = store.selectedClipIDs.intersection(live)
         }
     }
 
@@ -456,8 +467,9 @@ struct ArrangementLanesView: View {
         ZStack(alignment: .topLeading) {
             Canvas { context, size in
                 let beatCount = Int(ceil(contentBeats))
+                let bw = BeatTimeline.beatWidth(zoom: zoom)
                 for b in 0...beatCount {
-                    let x = CGFloat(b) * BeatTimeline.beatWidth
+                    let x = CGFloat(b) * bw
                     let isBar = b % beatsPerBar == 0
                     var line = Path()
                     line.move(to: CGPoint(x: x, y: 0))
@@ -484,8 +496,8 @@ struct ArrangementLanesView: View {
 
     @ViewBuilder
     private func clipBlock(_ clip: Clip, trackIndex: Int) -> some View {
-        let x = BeatTimeline.x(forBeat: clip.startBeat)
-        let w = max(BeatTimeline.width(forBeats: clip.lengthBeats), 6)
+        let x = BeatTimeline.x(forBeat: clip.startBeat, zoom: zoom)
+        let w = max(BeatTimeline.width(forBeats: clip.lengthBeats, zoom: zoom), 6)
         let h = Self.laneHeight - 8
         let handleW = ArrangementLayout.resizeHandleWidth(clipWidth: w)
         let colorIndex = store.project.tracks.indices.contains(trackIndex)
@@ -496,7 +508,7 @@ struct ArrangementLanesView: View {
         let label = clip.name.isEmpty
             ? (clip.kind == .midi ? "MIDI" : "Audio")
             : clip.name
-        let selected = selectedClipIDs.contains(clip.id)
+        let selected = store.selectedClipIDs.contains(clip.id)
         let openInRoll = store.effectivePianoRollClipID == clip.id && clip.kind == .midi
 
         ZStack(alignment: .trailing) {
@@ -550,7 +562,7 @@ struct ArrangementLanesView: View {
         .contextMenu {
             if clip.kind == .midi {
                 Button("Split at Playhead") {
-                    selectedClipIDs = [clip.id]
+                    store.selectedClipIDs = [clip.id]
                     splitSelectionAtPlayhead()
                 }
             } else {
@@ -587,7 +599,7 @@ struct ArrangementLanesView: View {
                     // Pure click on empty: clear selection (does not deselect the roll clip
                     // pointer unless the open clip was only selected here).
                     if !NSEvent.modifierFlags.contains(.shift) {
-                        selectedClipIDs = []
+                        store.selectedClipIDs = []
                     }
                 }
                 marqueeStart = nil
@@ -616,8 +628,8 @@ struct ArrangementLanesView: View {
 
     private func applyMarqueeSelection(additive: Bool) {
         guard let start = marqueeStart, let current = marqueeCurrent else { return }
-        let beatA = BeatTimeline.beat(atX: start.x)
-        let beatB = BeatTimeline.beat(atX: current.x)
+        let beatA = BeatTimeline.beat(atX: start.x, zoom: zoom)
+        let beatB = BeatTimeline.beat(atX: current.x, zoom: zoom)
         let trackA = trackIndex(atY: start.y)
         let trackB = trackIndex(atY: current.y)
         let hits = ArrangementSelection.clipsTouchingMarquee(
@@ -628,9 +640,9 @@ struct ArrangementLanesView: View {
             beatA: beatA, beatB: beatB, trackA: trackA, trackB: trackB
         )
         if additive {
-            selectedClipIDs.formUnion(hits)
+            store.selectedClipIDs.formUnion(hits)
         } else {
-            selectedClipIDs = Set(hits)
+            store.selectedClipIDs = Set(hits)
         }
         // Load a single MIDI hit into the roll so the pane stays useful.
         if hits.count == 1, let only = hits.first,
@@ -658,9 +670,9 @@ struct ArrangementLanesView: View {
                     // If shift-deselect removed the clip under the pointer, do not start a
                     // group move. Otherwise move every currently selected clip.
                     let moving: [(id: UUID, startBeat: Double, trackIndex: Int)]
-                    if selectedClipIDs.contains(clip.id) {
+                    if store.selectedClipIDs.contains(clip.id) {
                         moving = allClips
-                            .filter { selectedClipIDs.contains($0.id) }
+                            .filter { store.selectedClipIDs.contains($0.id) }
                             .map { (id: $0.id, startBeat: $0.startBeat, trackIndex: $0.trackIndex) }
                     } else {
                         moving = []
@@ -678,7 +690,7 @@ struct ArrangementLanesView: View {
                 }
                 guard let primary = origin.clips.first(where: { $0.id == origin.primaryID })
                         ?? origin.clips.first else { return }
-                let beatDeltaRaw = Double(value.translation.width / BeatTimeline.beatWidth)
+                let beatDeltaRaw = Double(value.translation.width / BeatTimeline.beatWidth(zoom: zoom))
                 let snappedPrimaryStart = ArrangementLayout.snap(
                     primary.startBeat + beatDeltaRaw, to: snapBeats)
                 let beatDelta = snappedPrimaryStart - primary.startBeat
@@ -730,7 +742,7 @@ struct ArrangementLanesView: View {
                     session.continuousGestureLive = false
                 } else if moved < Self.clickSlop {
                     // Pure click: selection already applied; open MIDI in the roll.
-                    if clip.kind == .midi, selectedClipIDs.contains(clip.id) {
+                    if clip.kind == .midi, store.selectedClipIDs.contains(clip.id) {
                         store.openPianoRoll(clipID: clip.id)
                     }
                 }
@@ -743,13 +755,13 @@ struct ArrangementLanesView: View {
     private func applyClipClickSelection(_ clip: Clip) {
         let shift = NSEvent.modifierFlags.contains(.shift)
         if shift {
-            if selectedClipIDs.contains(clip.id) {
-                selectedClipIDs.remove(clip.id)
+            if store.selectedClipIDs.contains(clip.id) {
+                store.selectedClipIDs.remove(clip.id)
             } else {
-                selectedClipIDs.insert(clip.id)
+                store.selectedClipIDs.insert(clip.id)
             }
-        } else if !selectedClipIDs.contains(clip.id) {
-            selectedClipIDs = [clip.id]
+        } else if !store.selectedClipIDs.contains(clip.id) {
+            store.selectedClipIDs = [clip.id]
         }
     }
 
@@ -759,8 +771,8 @@ struct ArrangementLanesView: View {
                 isFocused = true
                 if session.resizeOrigin == nil {
                     session.resizeOrigin = ResizeOrigin(clipID: clip.id, lengthBeats: clip.lengthBeats)
-                    if !selectedClipIDs.contains(clip.id) {
-                        selectedClipIDs = [clip.id]
+                    if !store.selectedClipIDs.contains(clip.id) {
+                        store.selectedClipIDs = [clip.id]
                     }
                     return
                 }
@@ -771,7 +783,7 @@ struct ArrangementLanesView: View {
                     session.continuousGestureLive = true
                 }
                 guard let origin = session.resizeOrigin, origin.clipID == clip.id else { return }
-                let deltaBeats = Double(value.translation.width / BeatTimeline.beatWidth)
+                let deltaBeats = Double(value.translation.width / BeatTimeline.beatWidth(zoom: zoom))
                 let raw = origin.lengthBeats + deltaBeats
                 let snapped = max(Project.minimumClipLengthBeats,
                                   ArrangementLayout.snap(raw, to: snapBeats))
@@ -794,26 +806,26 @@ struct ArrangementLanesView: View {
     /// Split the single selected clip at the playhead. Multiple selection is refused with a
     /// clear message; audio and out-of-bounds playheads surface via the store (never silent).
     private func splitSelectionAtPlayhead() {
-        guard !selectedClipIDs.isEmpty else { return }
-        guard selectedClipIDs.count == 1, let id = selectedClipIDs.first else {
+        guard !store.selectedClipIDs.isEmpty else { return }
+        guard store.selectedClipIDs.count == 1, let id = store.selectedClipIDs.first else {
             store.statusMessage = "Select one clip to split."
             return
         }
         let playhead = store.playbackBeat ?? 0
         if let pair = store.arrangementSplitClip(id: id, atArrangementBeat: playhead) {
-            selectedClipIDs = [pair.left, pair.right]
+            store.selectedClipIDs = [pair.left, pair.right]
         }
     }
 
     private func deleteSelection() {
-        guard !selectedClipIDs.isEmpty else { return }
-        let ids = Array(selectedClipIDs)
+        guard !store.selectedClipIDs.isEmpty else { return }
+        let ids = Array(store.selectedClipIDs)
         store.arrangementDeleteClips(ids: ids)
-        selectedClipIDs = []
+        store.selectedClipIDs = []
     }
 
     private func copySelection() {
-        let selected = allClips.filter { selectedClipIDs.contains($0.id) }
+        let selected = allClips.filter { store.selectedClipIDs.contains($0.id) }
         guard !selected.isEmpty else { return }
         clipClipboard = selected.map {
             ClipboardClip(
@@ -827,10 +839,10 @@ struct ArrangementLanesView: View {
 
     private func cutSelection() {
         copySelection()
-        guard !selectedClipIDs.isEmpty else { return }
-        let ids = Array(selectedClipIDs)
+        guard !store.selectedClipIDs.isEmpty else { return }
+        let ids = Array(store.selectedClipIDs)
         store.arrangementDeleteClips(ids: ids, undoName: "Cut Clips")
-        selectedClipIDs = []
+        store.selectedClipIDs = []
     }
 
     private func pasteClipboard() {
@@ -879,7 +891,7 @@ struct ArrangementLanesView: View {
         }
         let newIDs = store.arrangementPasteClips(specs)
         if !newIDs.isEmpty {
-            selectedClipIDs = Set(newIDs)
+            store.selectedClipIDs = Set(newIDs)
             // Open the first MIDI paste in the roll when present.
             if let firstMIDI = newIDs.first(where: { id in
                 guard let loc = store.project.clipLocation(id: id) else { return false }

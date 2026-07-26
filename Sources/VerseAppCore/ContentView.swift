@@ -12,6 +12,11 @@ public struct ContentView: View {
         VStack(alignment: .leading, spacing: 10) {
             header
             TransportBar()
+            // Frequent actions + shared timeline zoom (Step X2).
+            GeometryReader { geo in
+                ActionBar(fitAvailableWidth: max(1, geo.size.width - BeatTimeline.gutterWidth))
+            }
+            .frame(height: 32)
             TrackListView()
             // Shared arrangement + inline piano roll (one time axis, one H scroll).
             TimelineWorkspaceView()

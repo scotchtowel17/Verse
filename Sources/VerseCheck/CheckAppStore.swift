@@ -1646,7 +1646,9 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
     // MARK: - Step T1: shared BeatTimeline (arrangement + piano roll)
 
     tk.suite("BeatTimeline: single beats-to-x mapping for arrangement and roll") {
-        tk.expectEqual(BeatTimeline.beatWidth, 28, "shared pixels-per-beat is 28")
+        tk.expectEqual(BeatTimeline.baseBeatWidth, 28, "base pixels-per-beat is 28")
+        tk.expectEqual(BeatTimeline.beatWidth, 28, "default zoom yields 28 px/beat")
+        tk.expectEqual(BeatTimeline.beatWidth(zoom: 1.0), 28, "zoom 1.0 is base width")
         tk.expectEqual(BeatTimeline.x(forBeat: 0), 0, "beat 0 is at x 0")
         tk.expectEqual(BeatTimeline.x(forBeat: 8), 8 * BeatTimeline.beatWidth,
                        "beat 8 maps to 8 × beatWidth")
@@ -1664,6 +1666,166 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
                        "note and arrangement event at beat 8 share the same x")
         tk.expectEqual(BeatTimeline.localBeat(absolute: 10, clipStart: 8), 2,
                        "absolute 10 in clip at 8 is local beat 2")
+    }
+
+    // MARK: - Step X2: zoom, quantize UI, action bar enablement
+
+    tk.suite("X2 BeatTimeline zoom scales shared beat↔x mapping") {
+        let z2 = 2.0
+        tk.expectEqual(BeatTimeline.beatWidth(zoom: z2), BeatTimeline.baseBeatWidth * 2,
+                       "zoom 2 doubles pixels per beat")
+        tk.expectEqual(BeatTimeline.x(forBeat: 4, zoom: z2),
+                       BeatTimeline.x(forBeat: 4, zoom: 1) * 2,
+                       "x at zoom 2 is twice x at zoom 1 for the same beat")
+        tk.expectEqual(BeatTimeline.beat(atX: BeatTimeline.x(forBeat: 7.5, zoom: z2), zoom: z2),
+                       7.5, "round-trip at zoom 2")
+        // Arrangement and roll must share the same zoomed x for the same beat.
+        let arrX = BeatTimeline.x(forBeat: 8, zoom: 1.25)
+        let rollX = BeatTimeline.x(forBeat: 8, zoom: 1.25)
+        tk.expectEqual(arrX, rollX, "same zoom → same x in both panes")
+        tk.expectEqual(BeatTimeline.clampedZoom(0.01), BeatTimeline.minZoom, "clamps below min")
+        tk.expectEqual(BeatTimeline.clampedZoom(100), BeatTimeline.maxZoom, "clamps above max")
+        tk.expectEqual(BeatTimeline.zoomedIn(from: BeatTimeline.maxZoom), BeatTimeline.maxZoom,
+                       "zoom in at max stays max")
+        tk.expectEqual(BeatTimeline.zoomedOut(from: BeatTimeline.minZoom), BeatTimeline.minZoom,
+                       "zoom out at min stays min")
+        let fit = BeatTimeline.fitZoom(contentBeats: 10, availableWidth: 280)
+        // 280 / (10 * 28) = 1.0
+        tk.expectEqual(fit, 1.0, "fit of 10 beats into 280 px is zoom 1")
+        let fitWide = BeatTimeline.fitZoom(contentBeats: 10, availableWidth: 560)
+        tk.expectEqual(fitWide, 2.0, "fit of 10 beats into 560 px is zoom 2")
+    }
+
+    tk.suite("X2 AppStore timeline zoom") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        tk.expectEqual(store.timelineZoom, BeatTimeline.defaultZoom, "starts at default zoom")
+        store.zoomTimelineIn()
+        tk.expect(store.timelineZoom > BeatTimeline.defaultZoom, "zoom in increases zoom")
+        let afterIn = store.timelineZoom
+        store.zoomTimelineOut()
+        tk.expect(store.timelineZoom < afterIn, "zoom out decreases zoom")
+        store.setTimelineZoom(0.01)
+        tk.expectEqual(store.timelineZoom, BeatTimeline.minZoom, "setTimelineZoom clamps low")
+        store.setTimelineZoom(99)
+        tk.expectEqual(store.timelineZoom, BeatTimeline.maxZoom, "setTimelineZoom clamps high")
+        store.zoomTimelineToFit(contentBeats: 10, availableWidth: 280)
+        tk.expectEqual(store.timelineZoom, 1.0, "fit sets zoom from content width")
+    }
+
+    tk.suite("X2 AppStore quantize notes (UI path)") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let n1 = Note(startBeat: 0.1, lengthBeats: 0.25, pitch: 60, velocity: 100)
+        let n2 = Note(startBeat: 0.6, lengthBeats: 0.25, pitch: 64, velocity: 100)
+        let clip = Clip(kind: .midi, name: "q", startBeat: 0, lengthBeats: 4,
+                        midiNotes: [n1, n2])
+        store.project.tracks[0].clips = [clip]
+        store.openPianoRoll(clipID: clip.id)
+        store.pianoRollSnapBeats = 0.25
+        store.selectedNoteIDs = []
+
+        store.pianoRollQuantizeNotes()
+        tk.expectEqual(store.undoName, "Quantize Notes", "one undo entry named Quantize Notes")
+        let notes = store.project.tracks[0].clips[0].midiNotes ?? []
+        tk.expectEqual(notes.count, 2, "still two notes")
+        // 0.1 → 0.0, 0.6 → 0.5 on 1/16 grid
+        tk.expectEqual(notes[0].startBeat, 0.0, "first note quantized to 0")
+        tk.expectEqual(notes[1].startBeat, 0.5, "second note quantized to 0.5")
+
+        // Selected-only quantize: leave one unaligned, quantize the other.
+        store.project.tracks[0].clips[0].midiNotes = [
+            Note(id: n1.id, startBeat: 0.13, lengthBeats: 0.25, pitch: 60, velocity: 100),
+            Note(id: n2.id, startBeat: 0.63, lengthBeats: 0.25, pitch: 64, velocity: 100)
+        ]
+        store.selectedNoteIDs = [n1.id]
+        store.pianoRollQuantizeNotes()
+        let after = store.project.tracks[0].clips[0].midiNotes ?? []
+        let q1 = after.first { $0.id == n1.id }?.startBeat
+        let q2 = after.first { $0.id == n2.id }?.startBeat
+        tk.expectEqual(q1, 0.25, "selected note 0.13 → 0.25 on 1/16")
+        tk.expectEqual(q2, 0.63, "unselected note left unaligned")
+
+        // Snap Off refuses with a clear message (no silent no-op success).
+        let depthBefore = undoDepth(of: store)
+        store.pianoRollSnapBeats = 0
+        store.statusMessage = nil
+        store.pianoRollQuantizeNotes()
+        tk.expect(store.statusMessage?.localizedCaseInsensitiveContains("snap") == true,
+                  "snap Off explains why quantize cannot run")
+        tk.expectEqual(undoDepth(of: store), depthBefore, "refused quantize records no undo")
+    }
+
+    tk.suite("X2 AppStore duplicate clips") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let clip = Clip(kind: .midi, name: "src", startBeat: 0, lengthBeats: 2,
+                        midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
+        store.project.tracks[0].clips = [clip]
+        let newIDs = store.arrangementDuplicateClips(ids: [clip.id])
+        tk.expectEqual(newIDs.count, 1, "one new clip")
+        tk.expectEqual(store.project.tracks[0].clips.count, 2, "two clips after duplicate")
+        tk.expectEqual(store.undoName, "Duplicate Clip", "undo name for single duplicate")
+        let copy = store.project.tracks[0].clips.first { $0.id == newIDs[0] }
+        tk.expectEqual(copy?.startBeat, 2.0, "copy starts at original end")
+        tk.expect(copy?.id != clip.id, "copy has a fresh id")
+    }
+
+    tk.suite("X2 ActionBarLogic enablement and tooltips") {
+        var p = Project.newUntitled()
+        let midi = Clip(kind: .midi, name: "m", startBeat: 0, lengthBeats: 4,
+                        midiNotes: [Note(startBeat: 0.1, lengthBeats: 0.5, pitch: 60, velocity: 100)])
+        p.tracks[0].clips = [midi]
+
+        let undoOff = ActionBarLogic.undoHelp(canUndo: false, name: nil)
+        tk.expect(!undoOff.enabled, "undo disabled when empty")
+        tk.expect(undoOff.help.localizedCaseInsensitiveContains("nothing"), "undo tooltip explains")
+        let undoOn = ActionBarLogic.undoHelp(canUndo: true, name: "Add Note")
+        tk.expect(undoOn.enabled, "undo enabled when stack has entry")
+        tk.expect(undoOn.help.contains("Add Note"), "undo tooltip names the action")
+
+        let splitEmpty = ActionBarLogic.splitHelp(selectedClipIDs: [], project: p, playheadBeat: 2)
+        tk.expect(!splitEmpty.enabled, "split disabled with no selection")
+        let splitOK = ActionBarLogic.splitHelp(
+            selectedClipIDs: [midi.id], project: p, playheadBeat: 2)
+        tk.expect(splitOK.enabled, "split enabled for MIDI with playhead inside")
+        let splitEdge = ActionBarLogic.splitHelp(
+            selectedClipIDs: [midi.id], project: p, playheadBeat: 0)
+        tk.expect(!splitEdge.enabled, "split disabled at clip start")
+        tk.expect(splitEdge.help.localizedCaseInsensitiveContains("playhead"),
+                  "split edge tooltip mentions playhead")
+
+        let dup = ActionBarLogic.duplicateHelp(selectedClipIDs: [midi.id])
+        tk.expect(dup.enabled, "duplicate enabled with selection")
+        let dupEmpty = ActionBarLogic.duplicateHelp(selectedClipIDs: [])
+        tk.expect(!dupEmpty.enabled, "duplicate disabled without selection")
+
+        let delNotes = ActionBarLogic.deleteHelp(
+            surface: .pianoRoll, selectedClipIDs: [], selectedNoteIDs: [UUID()])
+        tk.expect(delNotes.enabled, "delete notes when roll focused")
+        let delClips = ActionBarLogic.deleteHelp(
+            surface: .arrangement, selectedClipIDs: [midi.id], selectedNoteIDs: [])
+        tk.expect(delClips.enabled, "delete clips when arrangement focused")
+        let delNone = ActionBarLogic.deleteHelp(
+            surface: .arrangement, selectedClipIDs: [], selectedNoteIDs: [UUID()])
+        tk.expect(!delNone.enabled, "delete disabled when arrangement has no clip selection")
+
+        let qAll = ActionBarLogic.quantizeHelp(
+            snapBeats: 0.25, openClip: midi, isAudioTrack: false, selectedNoteIDs: [])
+        tk.expect(qAll.enabled, "quantize whole clip when snap on")
+        let qOff = ActionBarLogic.quantizeHelp(
+            snapBeats: 0, openClip: midi, isAudioTrack: false, selectedNoteIDs: [])
+        tk.expect(!qOff.enabled, "quantize disabled when snap off")
+        tk.expect(qOff.help.localizedCaseInsensitiveContains("snap"), "quantize off explains snap")
+        let qAudio = ActionBarLogic.quantizeHelp(
+            snapBeats: 0.25, openClip: nil, isAudioTrack: true, selectedNoteIDs: [])
+        tk.expect(!qAudio.enabled, "quantize disabled on audio track")
+
+        let zIn = ActionBarLogic.zoomInHelp(zoom: BeatTimeline.maxZoom)
+        tk.expect(!zIn.enabled, "zoom in disabled at max")
+        let zOut = ActionBarLogic.zoomOutHelp(zoom: BeatTimeline.minZoom)
+        tk.expect(!zOut.enabled, "zoom out disabled at min")
     }
 
     tk.suite("BeatTimeline: contentBeats covers arrangement and open clip notes") {

@@ -574,7 +574,9 @@ public extension Project {
     /// - Only start times move; lengths are untouched.
     /// - Starts are never moved past the clip end (`lengthBeats`); they clamp to that bound.
     /// - Starts are never moved before beat 0 within the clip.
-    mutating func quantizeNotes(in clipID: UUID, to gridBeats: Double) throws {
+    /// - When `noteIDs` is non-nil and non-empty, only those notes are quantized; otherwise
+    ///   every note in the clip is quantized.
+    mutating func quantizeNotes(in clipID: UUID, to gridBeats: Double, noteIDs: Set<UUID>? = nil) throws {
         let allowed: Set<Double> = [1.0, 0.5, 0.25]
         guard allowed.contains(gridBeats) else { throw MutationError.invalidQuantizeGrid(gridBeats) }
         guard let loc = clipLocation(id: clipID) else { throw MutationError.clipNotFound }
@@ -582,7 +584,12 @@ public extension Project {
         guard var notes = tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes, !notes.isEmpty else {
             return
         }
+        let filter: Set<UUID>? = {
+            guard let noteIDs, !noteIDs.isEmpty else { return nil }
+            return noteIDs
+        }()
         for i in notes.indices {
+            if let filter, !filter.contains(notes[i].id) { continue }
             let raw = (notes[i].startBeat / gridBeats).rounded() * gridBeats
             notes[i].startBeat = min(max(0, raw), clipEnd)
         }

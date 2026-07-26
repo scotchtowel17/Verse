@@ -246,7 +246,7 @@ single biggest "know what I'm looking at" win and it is what the owner is asking
 6. Keep it minimalist: colour is a thin accent strip and a clip fill, not large blocks of
    saturated colour. Text stays high-contrast on every palette entry in both appearances.
 
-## Step X2 — Action bar, zoom, and exposing hidden actions — PENDING
+## Step X2 — Action bar, zoom, and exposing hidden actions — DONE
 
 1. A compact action bar for things done constantly, grouped and icon-led with tooltips:
    **undo, redo, split at playhead, duplicate, delete, quantize**. Minimalist: one row, no
@@ -263,3 +263,30 @@ single biggest "know what I'm looking at" win and it is what the owner is asking
    saying why, consistent with the V4 rule that a user never asks for something and gets silence.
 
 Keep every existing behaviour and shortcut working. No regressions in the shared time axis.
+
+## Step X3 — Visual regressions found by running X1/X2 — PENDING
+
+The colour identity works and reads well: blue, amber and green carry from the track rows
+through the lane headers, the clips and the notes in the roll. Three problems, found by looking.
+
+1. **The roll draws fewer pitch rows than its own range label claims, hiding notes again.**
+   With the Lead clip selected, the header reads "D#4-D6" (24 semitones) and "3 notes", but only
+   about 12 rows are drawn and only 1 note is visible. The drawn rows are almost exactly HALF
+   the stated range, which points at a mismatch between the row height used to compute
+   `visiblePitchRange` and the row height used to draw, or a pane height that is halved before
+   it reaches the range function. The likely trigger is X2's action bar taking vertical space
+   without the roll's height being recomputed.
+   This is the same class of failure as T4 (what is claimed versus what is shown), so fix the
+   cause and add an assertion tying the two together: **the number of rows drawn must equal the
+   number of pitches in the range that the label reports.**
+2. **Dark-mode contrast is inverted.** The note grid is nearly black with rows barely
+   distinguishable, while the piano-key gutter is pure white and visually dominates the pane.
+   The gutter should be the quiet element and the grid the readable one. Raise grid row contrast
+   and soften the gutter so the keyboard reads as a reference strip, not the main event. Check
+   both appearances; do not fix dark by breaking light.
+3. **Every action-bar icon reads as disabled.** The icons are uniformly dim, so an enabled
+   action looks the same as an unavailable one. Enabled actions need normal-weight foreground
+   contrast, with disabled ones clearly lighter. The point of X2 item 5 was that state is
+   honest; right now nothing looks available.
+
+Keep the palette, the semantic-colour separation, and every behaviour from X1 and X2.
