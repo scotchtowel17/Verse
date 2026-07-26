@@ -578,3 +578,53 @@ arrangement shows about two and a half rows and the third is clipped, so a song 
 couple of parts cannot be seen at a glance. Choose a default split that shows roughly four track
 rows before the roll begins, keep the divider draggable, and let the arrangement scroll beyond
 that. Do not go back to starving the roll; both need a fair share.
+
+---
+
+# Phase AB — Principled audit
+
+Applied `docs/engineering-principles.md` to the whole codebase. Measured before acting rather
+than assuming. Findings, and equally important, what was deliberately NOT changed.
+
+**Measured state:** 23,046 lines, zero build warnings, zero TODO/FIXME/HACK markers, no dead
+public API. Two initial leads were false positives on closer inspection: `yForPitch` is not
+duplicated (the second is a thin forwarder to one implementation), and `pianoRollTrackID` and
+`pruneArmedTracks` are used, just within their defining file. Recording those because a
+correction is as much a result as a finding.
+
+## Step AB1 — Correct three real findings — PENDING
+
+1. **`formatLoopBeat` is triplicated**, byte-identical, in `AppStore+Transport.swift`,
+   `TransportBar.swift` and `TimelineWorkspaceView.swift`. Principle 4: no duplicate utilities.
+   One implementation, used by all three. Put it where it belongs rather than inventing a new
+   utility module for a four-line function.
+2. **A corrupt recovery journal is indistinguishable from no journal.**
+   `RecoveryManager.detectRecovery` and `discardRecovery` both do
+   `try? Data(contentsOf:)` then `try? JSONDecoder().decode(...)`. A missing journal is normal
+   and a correct silent no-op: there was no recording in progress. A journal that exists but
+   fails to decode is a different thing entirely, and today it is silently treated as "nothing
+   to recover" in the one subsystem whose entire purpose is not losing the user's work.
+   Principle 10: a fallback is only appropriate when degraded behavior is intentional, safe and
+   **observable**. Distinguish the two cases and surface the corrupt one. Do not start throwing
+   for the normal missing-journal case.
+3. **`pianoRollTrackID` and `pruneArmedTracks` are `public` but used only within their own
+   file.** Narrow them. Principle 12 and the standard on narrow interfaces.
+
+## Step AB2 — Deliberately NOT done, and why — DONE
+
+Recorded so the reasoning is not re-litigated:
+
+- **`AppStore.swift` is 1,560 lines, past the ~1,200 threshold I recorded earlier for revisiting
+  coordinator extraction.** Not splitting it. That threshold was a proxy heuristic I invented,
+  not an objective or a real constraint, and principle 3 says to challenge my own prior
+  decisions too. The file is sectioned with `MARK`s, already split across four extension files
+  by concern, fully covered by tests, and produces no warnings. Splitting a working, tested file
+  because a number was crossed is precisely the broad refactor principles 5 and 6 warn against.
+  Revisit only when a real change is made harder by the structure.
+- **`PianoRollView.swift` is 1,715 lines**, the largest production file, holding both the view
+  and the pure `PianoRollLayout` maths. Extracting the pure layout would be defensible on
+  readability grounds, but it is a readability argument with no correctness or maintenance
+  failure behind it today, and the pure functions are already directly tested. Not necessary.
+- **`RecoveryManager` has 22 `try?` calls.** All but the journal decode above are best-effort
+  cleanup where fire-and-forget is the intended behavior (removing a lock file that may not
+  exist, creating a directory that may already exist). Count is not a defect.
