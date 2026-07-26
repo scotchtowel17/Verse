@@ -610,6 +610,7 @@ func runPatchChecks(_ tk: TestKit) {
         tk.expect(req.contains("moveClipToTrack"), "lists moveClipToTrack")
         tk.expect(req.contains("deleteNote"), "lists deleteNote")
         tk.expect(req.contains("moveNote"), "lists moveNote")
+        tk.expect(req.contains("setNoteVelocity"), "lists setNoteVelocity")
         tk.expect(!req.contains("setClipGain"), "does not list setClipGain")
         tk.expect(!req.contains("addHarmony"), "does not list addHarmony")
     }
@@ -1137,6 +1138,95 @@ func runPatchChecks(_ tk: TestKit) {
         tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.pitch, 60, "note unchanged")
     }
 
+    // —— setNoteVelocity (Z1) ——
+    tk.suite("Z1 setNoteVelocity — happy path") {
+        var project = Project.newUntitled()
+        let n1 = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [n1])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"setNoteVelocity\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N1\"," +
+            "\"velocity\":42}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "setNoteVelocity applies")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.id, n1.id, "same note UUID")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.velocity, 42, "velocity 42")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.pitch, 60, "pitch untouched")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.startBeat, 0, "start untouched")
+    }
+
+    tk.suite("Z1 setNoteVelocity — bad reference") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [
+                Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+            ])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"setNoteVelocity\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N3\"," +
+            "\"velocity\":64}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "unknown note rejected at validation")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.velocity, 100, "velocity unchanged")
+    }
+
+    tk.suite("Z1 setNoteVelocity — out-of-range rejected") {
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [
+                Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+            ])
+        ]
+        let zero = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"setNoteVelocity\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N1\"," +
+            "\"velocity\":0}]")
+        tk.expectEqual(Copilot.apply(reply: zero, to: &project).status, .rejected, "velocity 0 rejected")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.velocity, 100, "unchanged after 0")
+
+        let high = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"setNoteVelocity\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N1\"," +
+            "\"velocity\":128}]")
+        tk.expectEqual(Copilot.apply(reply: high, to: &project).status, .rejected, "velocity 128 rejected")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.velocity, 100, "unchanged after 128")
+    }
+
+    tk.suite("Z1 setNoteVelocity — undo restores exactly") {
+        var project = Project.newUntitled()
+        let n1 = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [n1])
+        ]
+        let stack = UndoStack<Project>()
+        stack.record(project, name: "Apply Claude patch")
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"setNoteVelocity\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N1\"," +
+            "\"velocity\":55}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .applied, "set applies")
+        if let restored = stack.undo(current: project) { project = restored }
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.velocity, 100, "undo velocity")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.id, n1.id, "same UUID")
+    }
+
+    tk.suite("Z1 setNoteVelocity — multi-op with invalid applies nothing") {
+        var project = Project.newUntitled()
+        project.tempoBPM = 100
+        project.tracks[0].clips = [
+            Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 4, midiNotes: [
+                Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+            ])
+        ]
+        let reply = patchWithFingerprint(project, opsJSON:
+            "[{\"op\":\"setTempo\",\"bpm\":150}," +
+            "{\"op\":\"setNoteVelocity\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N1\"," +
+            "\"velocity\":200}]")
+        let outcome = Copilot.apply(reply: reply, to: &project)
+        tk.expectEqual(outcome.status, .rejected, "whole patch rejected")
+        tk.expectEqual(project.tempoBPM, 100, "tempo unchanged")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes?.first?.velocity, 100, "note unchanged")
+    }
+
     tk.suite("V3 preview renderer — describes parity ops") {
         var project = Project.newUntitled()
         project.tracks[0].name = "Piano"
@@ -1154,6 +1244,8 @@ func runPatchChecks(_ tk: TestKit) {
             "{\"op\":\"duplicateClip\",\"track\":\"T1\",\"clip\":\"T1C1\"}," +
             "{\"op\":\"moveNote\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N1\"," +
             "\"pitch\":72,\"startBeat\":1}," +
+            "{\"op\":\"setNoteVelocity\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N1\"," +
+            "\"velocity\":88}," +
             "{\"op\":\"deleteNote\",\"track\":\"T1\",\"clip\":\"T1C1\",\"note\":\"T1C1N2\"}" +
             "]"
         let reply = patchWithFingerprint(project, opsJSON: opsJSON, summary: "POISON_V3_SUMMARY")
@@ -1168,6 +1260,8 @@ func runPatchChecks(_ tk: TestKit) {
             tk.expect(text.localizedCaseInsensitiveContains("duplicate"), "mentions duplicate")
             tk.expect(text.localizedCaseInsensitiveContains("move"), "mentions move note")
             tk.expect(text.contains("72"), "names pitch")
+            tk.expect(text.localizedCaseInsensitiveContains("velocity"), "mentions velocity")
+            tk.expect(text.contains("88"), "names velocity value")
             tk.expect(text.localizedCaseInsensitiveContains("delete"), "mentions delete note")
             tk.expect(text.contains("Hook"), "names the clip")
             tk.expectEqual(project.tracks[0].clips[0].lengthBeats, 8, "preview leaves length")

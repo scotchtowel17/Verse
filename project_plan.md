@@ -414,3 +414,51 @@ time and pitch zoom, and the keyboard hide toggle works. Two problems.
 
 Keep every Y2 behaviour: shared horizontal zoom with the arrangement, the T4 invariant that rows
 drawn equals the range label span at every row height, and ghosts non-interactive.
+
+---
+
+# Phase Z — Gaps found by comparing against Soundtrap's piano roll
+
+Reference points taken from Soundtrap's MIDI editor: per-note velocity editing (a V mode or
+Alt/Cmd modifier, velocity drawn as lines inside the note, drag up or down to change it, plus a
+fader for a whole selection), quantize, chord detection that labels the harmonic content, a
+pattern loop, and grid resolution down to 1/32.
+
+Measured against Verse today:
+
+- **Velocity: we have none.** Every hand-drawn note is fixed at velocity 100 forever. Captured
+  MIDI preserves the played velocity, but nothing in the app can show or change it. This is the
+  largest gap and the most musical one: it is the difference between a part that sounds played
+  and one that sounds typed.
+- **Grid stops at 1/16.** Soundtrap goes to 1/32, and there are no triplet divisions at all.
+  The owner's own MPK mini has 1/4T, 1/8T and 1/16T arpeggiator divisions, so triplets are a
+  natural thing to reach for.
+- **No chord detection or labelling.** Verse already has `KeySignature` and an analysis path,
+  but nothing names the harmony in a clip.
+- **No per-clip loop.** The transport loops the whole arrangement; Soundtrap loops a pattern.
+
+## Step Z1 — Per-note velocity editing — DONE
+
+1. **Velocity must be visible on the note itself.** Draw it as fill intensity or an inner bar so
+   a glance shows the dynamic shape of a phrase. It must stay legible against every track colour
+   and in both appearances.
+2. **Editing.** A velocity mode toggle in the roll, plus a modifier-drag so it is reachable
+   without changing modes. Dragging up or down over a note changes its velocity, clamped 1-127.
+   With a multi-note selection the change applies to the whole selection, preserving the
+   relative differences between notes rather than flattening them to one value.
+3. **One undo entry per completed gesture**, labelled "Set Velocity", never per update. The
+   standing rule.
+4. New notes take a default velocity that the user can set, so drawing a soft part does not mean
+   editing every note afterwards.
+5. Expose it to Claude too: a `setNoteVelocity` op, validated and rejected out of range like
+   every other op, so the AI stays at parity with the UI.
+6. Tests: velocity round-trips through save and load; a group change preserves relative
+   differences and clamps at the ends without collapsing; one undo entry restores every note's
+   prior velocity exactly.
+
+## Step Z2 — Finer and triplet grid divisions — PENDING
+
+Add 1/32, and triplet divisions 1/4T, 1/8T, 1/16T, to the snap control used by both the roll and
+the arrangement. Triplet values are a third of the corresponding straight division. Keep the
+control compact; it is already dense, so consider grouping straight and triplet values rather
+than adding six more buttons in a row.

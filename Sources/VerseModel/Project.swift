@@ -264,6 +264,8 @@ public enum MutationError: Error, Equatable, CustomStringConvertible {
     case pitchOutOfRange(pitch: Int, semitones: Int)
     /// Pitch for a single-note add/move is outside MIDI 0–127.
     case invalidPitch(Int)
+    /// Velocity for a single-note set is outside MIDI 1–127.
+    case invalidVelocity(Int)
     /// Note length is not positive (or otherwise unusable).
     case invalidNoteLength(Double)
     /// Clip length is not positive (or otherwise unusable).
@@ -295,6 +297,8 @@ public enum MutationError: Error, Equatable, CustomStringConvertible {
             return "Transposing pitch \(pitch) by \(semitones) semitones would leave the MIDI range 0–127."
         case .invalidPitch(let pitch):
             return "Pitch must be between 0 and 127 (got \(pitch))."
+        case .invalidVelocity(let velocity):
+            return "Velocity must be between 1 and 127 (got \(velocity))."
         case .invalidNoteLength(let length):
             return "A note’s length must be greater than 0 beats (got \(length))."
         case .invalidClipLength(let length):
@@ -683,6 +687,21 @@ public extension Project {
             throw MutationError.noteNotFound
         }
         notes[idx].lengthBeats = max(lengthBeats, Self.minimumNoteLengthBeats)
+        tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes = notes
+    }
+
+    /// Set a note’s velocity. Rejects values outside MIDI 1–127. Pitch, start, and length
+    /// are unchanged. Other notes in the clip are untouched.
+    mutating func setNoteVelocity(id noteID: UUID, inClip clipID: UUID, velocity: Int) throws {
+        guard (1...127).contains(velocity) else { throw MutationError.invalidVelocity(velocity) }
+        guard let loc = clipLocation(id: clipID) else { throw MutationError.clipNotFound }
+        guard var notes = tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes else {
+            throw MutationError.noteNotFound
+        }
+        guard let idx = notes.firstIndex(where: { $0.id == noteID }) else {
+            throw MutationError.noteNotFound
+        }
+        notes[idx].velocity = velocity
         tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes = notes
     }
 }

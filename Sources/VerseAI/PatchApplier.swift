@@ -156,6 +156,15 @@ public enum PatchApplier {
                 } catch let err as MutationError {
                     throw PatchError(opIndex: opIndex, err.description)
                 }
+            case .setNoteVelocity(_, let clipRef, let noteRef, let velocity):
+                let (_, clipUUID) = try resolveClipLocation(
+                    clipRef, tempClip: tempClip, opIndex: opIndex)
+                let noteUUID = try resolveNoteUUID(noteRef, opIndex: opIndex)
+                do {
+                    try project.setNoteVelocity(id: noteUUID, inClip: clipUUID, velocity: velocity)
+                } catch let err as MutationError {
+                    throw PatchError(opIndex: opIndex, err.description)
+                }
             }
         }
         project.modifiedAt = Date()

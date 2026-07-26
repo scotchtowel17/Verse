@@ -813,6 +813,134 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         tk.expectEqual(store.undoName, "Move Note", "label from first begin")
     }
 
+    // MARK: - Step Z1: per-note velocity editing
+
+    tk.suite("AppStore piano roll: velocity group edit preserves relatives, clamps ends, one undo") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let soft = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 20)
+        let mid = Note(startBeat: 1, lengthBeats: 1, pitch: 64, velocity: 80)
+        let hard = Note(startBeat: 2, lengthBeats: 1, pitch: 67, velocity: 110)
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 8,
+                        midiNotes: [soft, mid, hard])
+        store.project.tracks[0].clips = [clip]
+        store.openPianoRoll(clipID: clip.id)
+
+        // Without begin, continuous updates must not mutate.
+        store.pianoRollSetNoteVelocities([
+            (id: soft.id, velocity: 50),
+            (id: mid.id, velocity: 90),
+            (id: hard.id, velocity: 120),
+        ])
+        tk.expectEqual(store.project.tracks[0].clips[0].midiNotes![0].velocity, 20,
+                       "velocity without begin is no-op")
+        tk.expectEqual(undoDepth(of: store), 0, "no-op velocity pushes nothing")
+
+        // Relative delta of +30: 50, 110, 127 (hard clamps; others keep their offset).
+        store.beginPianoRollGesture(name: "Set Velocity")
+        for step in 1...30 {
+            let proposed = PianoRollSelection.applyGroupVelocityDelta(
+                origins: [20, 80, 110], delta: step)
+            store.pianoRollSetNoteVelocities([
+                (id: soft.id, velocity: proposed[0]),
+                (id: mid.id, velocity: proposed[1]),
+                (id: hard.id, velocity: proposed[2]),
+            ])
+        }
+        store.endPianoRollGesture()
+
+        let after = store.project.tracks[0].clips[0].midiNotes!
+        tk.expectEqual(after[0].velocity, 50, "soft +30")
+        tk.expectEqual(after[1].velocity, 110, "mid +30")
+        tk.expectEqual(after[2].velocity, 127, "hard clamps at 127")
+        tk.expectEqual(after[1].velocity - after[0].velocity, 60,
+                       "relative gap soft–mid preserved (80−20)")
+        tk.expect(after[2].velocity - after[1].velocity < 30,
+                  "hard gap compresses only at the ceiling, does not flatten all three")
+        tk.expectEqual(undoDepth(of: store), 1, "many velocity updates are one undo entry")
+        tk.expectEqual(store.undoName, "Set Velocity", "velocity undo label")
+
+        store.undo()
+        let restored = store.project.tracks[0].clips[0].midiNotes!
+        tk.expectEqual(restored[0].velocity, 20, "undo restores soft")
+        tk.expectEqual(restored[1].velocity, 80, "undo restores mid")
+        tk.expectEqual(restored[2].velocity, 110, "undo restores hard")
+        tk.expectEqual(restored[0].id, soft.id, "soft UUID stable after undo")
+        tk.expectEqual(restored[1].id, mid.id, "mid UUID stable after undo")
+        tk.expectEqual(restored[2].id, hard.id, "hard UUID stable after undo")
+    }
+
+    tk.suite("AppStore piano roll: group velocity clamp at floor preserves other relatives") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let a = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 10)
+        let b = Note(startBeat: 1, lengthBeats: 1, pitch: 64, velocity: 40)
+        let c = Note(startBeat: 2, lengthBeats: 1, pitch: 67, velocity: 70)
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 8,
+                        midiNotes: [a, b, c])
+        store.project.tracks[0].clips = [clip]
+        store.openPianoRoll(clipID: clip.id)
+
+        store.beginPianoRollGesture(name: "Set Velocity")
+        let proposed = PianoRollSelection.applyGroupVelocityDelta(origins: [10, 40, 70], delta: -20)
+        store.pianoRollSetNoteVelocities([
+            (id: a.id, velocity: proposed[0]),
+            (id: b.id, velocity: proposed[1]),
+            (id: c.id, velocity: proposed[2]),
+        ])
+        store.endPianoRollGesture()
+
+        let notes = store.project.tracks[0].clips[0].midiNotes!
+        tk.expectEqual(notes[0].velocity, 1, "soft clamps at 1")
+        tk.expectEqual(notes[1].velocity, 20, "mid −20")
+        tk.expectEqual(notes[2].velocity, 50, "hard −20")
+        tk.expectEqual(notes[2].velocity - notes[1].velocity, 30,
+                       "mid–hard relative preserved after floor clamp on soft")
+    }
+
+    tk.suite("AppStore piano roll: defaultNoteVelocity used for new notes; clamped") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.defaultNoteVelocity = 64
+        let id = store.pianoRollAddNote(pitch: 60, startBeat: 0, lengthBeats: 0.25)
+        tk.expect(id != nil, "note created")
+        tk.expectEqual(store.project.tracks[0].clips[0].midiNotes?.first?.velocity, 64,
+                       "new note uses default velocity 64")
+
+        store.defaultNoteVelocity = 200
+        tk.expectEqual(store.defaultNoteVelocity, 127, "default velocity clamps high to 127")
+        store.defaultNoteVelocity = 0
+        tk.expectEqual(store.defaultNoteVelocity, 1, "default velocity clamps low to 1")
+
+        let id2 = store.pianoRollAddNote(pitch: 62, startBeat: 1, lengthBeats: 0.25, velocity: 90)
+        tk.expectEqual(
+            store.project.tracks[0].clips[0].midiNotes?.first(where: { $0.id == id2 })?.velocity,
+            90, "explicit velocity overrides default")
+    }
+
+    tk.suite("PianoRollSelection: applyGroupVelocityDelta and velocityDelta helpers") {
+        let mid = PianoRollSelection.applyGroupVelocityDelta(origins: [40, 80, 100], delta: 10)
+        tk.expectEqual(mid, [50, 90, 110], "uniform +10 keeps relative gaps")
+
+        let hi = PianoRollSelection.applyGroupVelocityDelta(origins: [100, 120, 125], delta: 20)
+        tk.expectEqual(hi, [120, 127, 127], "ceiling clamp without flattening all to one value")
+        tk.expect(hi[0] != hi[1] || hi[1] == 127, "softest still differs until it also hits ceiling")
+
+        let lo = PianoRollSelection.applyGroupVelocityDelta(origins: [5, 30, 60], delta: -20)
+        tk.expectEqual(lo, [1, 10, 40], "floor clamp; others keep relative spacing")
+
+        tk.expectEqual(PianoRollSelection.velocityDelta(fromTranslationHeight: -20), 10,
+                       "drag up raises velocity")
+        tk.expectEqual(PianoRollSelection.velocityDelta(fromTranslationHeight: 20), -10,
+                       "drag down lowers velocity")
+        tk.expectEqual(PianoRollSelection.clampedVelocity(0), 1, "clamp low")
+        tk.expectEqual(PianoRollSelection.clampedVelocity(200), 127, "clamp high")
+        tk.expectEqual(PianoRollSelection.clampedVelocity(64), 64, "in-range unchanged")
+    }
+
     // MARK: - Phase P6: snap Off
 
     tk.suite("Piano roll layout: snap Off leaves values unrounded; grid snaps; new-note length") {

@@ -545,6 +545,19 @@ public enum PatchValidator {
                 }
                 typed.append(.moveNote(track: ref, clip: clip, note: note, pitch: pitch, startBeat: start))
 
+            case "setNoteVelocity":
+                guard let ref = resolveTrack(op["track"], op: i) else { continue }
+                let trackHandle = JSONCoerce.string(op["track"]) ?? ""
+                let clipHandle = JSONCoerce.string(op["clip"]) ?? ""
+                guard let clip = resolveClip(op["clip"], track: ref, trackHandle: trackHandle, op: i) else { continue }
+                guard requireMidiClip(clip, handle: clipHandle, opName: "setNoteVelocity", op: i) else { continue }
+                guard let note = resolveNote(op["note"], track: ref, trackHandle: trackHandle,
+                                             clip: clip, clipHandle: clipHandle, op: i) else { continue }
+                guard let velocity = JSONCoerce.int(op["velocity"]), (1...127).contains(velocity) else {
+                    errors.append(PatchError(opIndex: i, "setNoteVelocity “velocity” must be 1–127.")); continue
+                }
+                typed.append(.setNoteVelocity(track: ref, clip: clip, note: note, velocity: velocity))
+
             default:
                 errors.append(PatchError(opIndex: i, "Unhandled operation “\(name)”."))
             }
