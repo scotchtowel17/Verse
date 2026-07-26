@@ -197,33 +197,69 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
                        "currentPresetName uses custom label")
     }
 
-    // MARK: - Step M4: record arm has visible state
+    // MARK: - Step M4 / AA3: record arm has visible state
 
-    tk.suite("AppStore M4: recordArmStatus armed vs capturing vs off") {
+    tk.suite("AppStore M4/AA3: recordArmStatus take running vs off; nothing armed refuses") {
         let (store, dir) = makeTestStore()
         defer { try? FileManager.default.removeItem(at: dir) }
 
         store.startEngineIfNeeded()
-        tk.expect(store.recordArmStatus == nil, "no status when unarmed")
+        tk.expect(store.recordArmStatus == nil, "no status when no take")
         tk.expect(!store.isRecording, "not recording at start")
+        tk.expect(store.armedTrackIDs.isEmpty, "no tracks armed at start")
+
+        // Transport record with nothing armed: refuse and say so (AA3).
+        store.statusMessage = nil
+        store.startRecording()
+        tk.expect(!store.isRecording, "take does not start with nothing armed")
+        tk.expect(store.statusMessage != nil, "status when nothing armed")
+        tk.expect(
+            store.statusMessage!.localizedCaseInsensitiveContains("arm"),
+            "status tells the user to arm a track"
+        )
+
+        let trackID = store.project.tracks[0].id
+        store.setTrackArmed(trackID, true)
+        tk.expect(store.isTrackArmed(trackID), "row arm sticks without starting a take")
+        tk.expect(!store.isRecording, "arming a row does not start the take")
 
         store.startRecording()
-        tk.expect(store.isRecording, "armed after startRecording")
-        tk.expectEqual(store.recordArmStatus,
-                       "Armed. Press play to record what you play.",
-                       "armed status before play")
+        tk.expect(store.isRecording, "take starts after a track is armed")
+        let armedStatus = store.recordArmStatus
+        tk.expect(armedStatus != nil, "status while take is running")
+        tk.expect(armedStatus!.localizedCaseInsensitiveContains("play"),
+                  "status before play mentions play (\(armedStatus ?? "nil"))")
         tk.expect(!store.isPlaying, "not playing yet")
 
         store.startPlayback()
         tk.expect(store.isPlaying, "playing after startPlayback")
-        tk.expectEqual(store.recordArmStatus,
-                       "Recording what you play…",
-                       "capturing status while armed and playing")
+        let capturing = store.recordArmStatus
+        tk.expect(capturing != nil, "status while capturing")
+        tk.expect(capturing!.localizedCaseInsensitiveContains("recording"),
+                  "capturing status names recording (\(capturing ?? "nil"))")
 
         store.stopRecording()
-        tk.expect(!store.isRecording, "disarmed after stopRecording")
-        tk.expect(store.recordArmStatus == nil, "no status after disarm")
+        tk.expect(!store.isRecording, "take stopped after stopRecording")
+        tk.expect(store.recordArmStatus == nil, "no take status after stop")
+        // Per-track arm survives the take so another pass does not need re-arming.
+        tk.expect(store.isTrackArmed(trackID), "track stays armed after take stops")
         store.stopPlayback()
+    }
+
+    tk.suite("AppStore AA3: toggleTrackArm and multi-track arm") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.addInstrumentTrack()
+        let a = store.project.tracks[0].id
+        let b = store.project.tracks[1].id
+        store.toggleTrackArm(a)
+        store.toggleTrackArm(b)
+        tk.expect(store.isTrackArmed(a) && store.isTrackArmed(b), "both tracks armed")
+        store.toggleTrackArm(a)
+        tk.expect(!store.isTrackArmed(a) && store.isTrackArmed(b), "toggle disarms one")
+        store.deleteTrack(b)
+        tk.expect(!store.isTrackArmed(b), "deleted track is not armed")
     }
 
     tk.suite("AppStore F2: default names auto-update; Instrument N is default") {
@@ -601,6 +637,25 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         )
         tk.expectEqual(roomy.arrangement, prefArr, "roomy viewport keeps preferred arrangement")
         tk.expectEqual(roomy.roll, prefRoll, "roomy viewport keeps preferred roll")
+
+        // AA4 default arrangement prefers ~4 lanes; fit still keeps stack inside viewport.
+        let prefArrAA4 = ArrangementLayout.defaultBandHeight
+        tk.expectEqual(prefArrAA4, ArrangementLayout.laneHeight * 4,
+                       "default arrangement band is four lane heights")
+        let roomyAA4 = PianoRollLayout.fitBandHeights(
+            availableHeight: 900,
+            rulerHeight: ruler,
+            dividerHeight: divider,
+            rollExpanded: true,
+            preferredArrangement: prefArrAA4,
+            preferredRoll: prefRoll,
+            minArrangement: ArrangementLayout.laneHeight * 2,
+            minRoll: minRoll
+        )
+        tk.expectEqual(roomyAA4.arrangement, prefArrAA4,
+                       "roomy viewport keeps four-row arrangement preference")
+        tk.expectEqual(roomyAA4.roll, prefRoll,
+                       "roomy viewport still gives the roll its preferred height")
 
         // Tight viewport (action bar + chrome steal height): stack must fit, no clip.
         let tightBudget: CGFloat = 280
@@ -2490,6 +2545,10 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
                   "play status names the preview")
 
         store.statusMessage = nil
+        // Arm so the refuse path is the preview block, not the AA3 nothing-armed path.
+        if let first = store.project.tracks.first?.id {
+            store.setTrackArmed(first, true)
+        }
         store.startRecording()
         tk.expect(!store.isRecording, "record refused while preview open")
         let recMsg = store.statusMessage
@@ -2510,9 +2569,10 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         store.addInstrumentTrack()
         let captureID = store.project.tracks[0].id
         store.activeTrackID = captureID
+        store.setTrackArmed(captureID, true)
 
         store.startRecording()
-        tk.expect(store.isRecording, "armed for capture")
+        tk.expect(store.isRecording, "take running for capture")
         store.startPlayback()
         tk.expect(store.isPlaying, "playing during capture")
         _ = waitUntilAppStore(timeout: 1.0) { (store.playbackBeat ?? 0) > 0.05 }

@@ -16,6 +16,13 @@ public enum ArrangementLayout {
     public static let resizeHandleFraction: CGFloat = 0.3
     /// Minimum timeline length in bars when the project is empty or short.
     public static let minimumBars: Int = 4
+    /// Pixel height of one track row (controls gutter + clip lane). Must stay in lockstep
+    /// with TrackLaneGutter and ArrangementLanesView.
+    public static let laneHeight: CGFloat = 56
+    /// How many full track rows the default arrangement band should show (AA4).
+    public static let defaultVisibleRowCount: CGFloat = 4
+    /// Preferred arrangement viewport: roughly four lanes before the piano roll starts.
+    public static var defaultBandHeight: CGFloat { laneHeight * defaultVisibleRowCount }
 
     /// Resize hit zone for a clip of the given pixel width.
     ///

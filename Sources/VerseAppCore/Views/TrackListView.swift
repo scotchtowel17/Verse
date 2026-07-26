@@ -19,17 +19,9 @@ struct TrackLaneGutter: View {
     private var isSelected: Bool { track.id == store.rollTrackID }
     private var identity: TrackIdentityColor.Swatch { TrackIdentityColor.swatch(for: track.colorIndex) }
 
-    /// Record destination for the current global arm (AA3 will make arm multi-track).
-    private var isRecordDestination: Bool {
-        if track.kind == .instrument {
-            return track.id == store.activeTrackID
-        }
-        // Audio takes land on the Recordings track; highlight that row while armed.
-        return track.kind == .audio && track.name == "Recordings" && store.isRecording
-    }
-
+    /// Per-track record arm (AA3). Independent of whether a take is currently running.
     private var isArmedVisual: Bool {
-        store.isRecording && isRecordDestination
+        store.isTrackArmed(track.id)
     }
 
     var body: some View {
@@ -276,21 +268,11 @@ struct TrackLaneGutter: View {
         }
     }
 
-    // MARK: - Arm semantics (pre-AA3: one global arm, destination = active instrument)
+    // MARK: - Arm semantics (AA3: per-track arm; transport record starts/stops the take)
 
     private func armTapped() {
-        // Read destination before selectTrack so re-targeting does not look like "already
-        // armed on this row" and accidentally disarm.
-        let wasThisDestination = isRecordDestination
         store.selectTrack(track.id)
-        if store.isRecording {
-            if wasThisDestination {
-                store.toggleRecording()
-            }
-            // Else: re-targeted. MIDI capture rebinds on the next note (ensureMIDICapture).
-        } else {
-            store.startRecording()
-        }
+        store.toggleTrackArm(track.id)
     }
 
     private func armHelp(blocked: Bool) -> String {
@@ -298,15 +280,18 @@ struct TrackLaneGutter: View {
             return "Unavailable while reviewing Claude changes"
         }
         if isArmedVisual {
-            if store.isPlaying {
-                return "Recording this track. Click to stop, or ⌘R."
+            if store.isRecording && store.isPlaying {
+                return "Armed and recording. Click R to disarm this track, or ⌘R to stop the take."
             }
-            return "Armed for this track. Press play to capture, or click to disarm."
+            if store.isRecording {
+                return "Armed for this take. Press play to capture, or click R to disarm."
+            }
+            return "Armed. Press the transport record button to start a take, or click R to disarm."
         }
         if track.kind == .audio {
-            return "Arm recording (audio takes land on the Recordings track)"
+            return "Arm this track for audio recording"
         }
-        return "Arm recording for this track (⌘R also arms the selected track)"
+        return "Arm this track for MIDI recording"
     }
 
     private func panLabel(_ pan: Double) -> String {

@@ -10,12 +10,14 @@ struct TimelineWorkspaceView: View {
     /// Arrangement snap (clips). Independent of the roll’s note snap.
     @State private var arrangementSnapBeats: Double = SnapGrid.sixteenth
     /// Drag-resizable band heights (viewport, not content).
-    @State private var arrangementBandHeight: CGFloat = 150
+    /// Default shows ~four track rows before the roll (AA4); lane height is the unit.
+    @State private var arrangementBandHeight: CGFloat = ArrangementLayout.defaultBandHeight
     /// Default is ~2 octaves of pitch rows plus the pinned snap toolbar (T2).
     @State private var rollBandHeight: CGFloat = PianoRollLayout.defaultBandHeight
     @State private var dividerDragStart: CGFloat?
 
-    private static let arrangementMinHeight: CGFloat = 100
+    /// Keep at least ~two rows so the arrangement never collapses to a single clipped lane.
+    private static let arrangementMinHeight: CGFloat = ArrangementLayout.laneHeight * 2
     private static let rollMinHeight: CGFloat = 140
     private static let rollCollapsedBarHeight: CGFloat = 30
     private static let workspaceMinHeight: CGFloat = 180
@@ -282,62 +284,77 @@ struct TimelineWorkspaceView: View {
     private static let loopEdgeHitPx: CGFloat = 6
 
     private func sharedRuler(beatWidth: CGFloat, totalWidth: CGFloat) -> some View {
-        Canvas { context, size in
-            // Loop region band behind tick marks (Z3). Brighter when the loop toggle is on.
-            if let region = store.loopRegion {
-                let x0 = BeatTimeline.x(forBeat: region.lowerBound, zoom: zoom)
-                let x1 = BeatTimeline.x(forBeat: region.upperBound, zoom: zoom)
+        // Read loop state in the view body (not only inside Canvas). SwiftUI Canvas
+        // drawing closures are not reliably dependency-tracked for @Observable, so a
+        // region set by the action bar never forced a redraw: the band stayed invisible
+        // even though store.loopRegion was correct (Z4 root cause).
+        let region = store.loopRegion
+        let loopOn = store.loopOn
+        let z = zoom
+        let rulerH = BeatTimeline.rulerHeight
+
+        return ZStack(alignment: .topLeading) {
+            // Loop band as a real view so Observation invalidation always repaints (Z4).
+            if let region {
+                let x0 = BeatTimeline.x(forBeat: region.lowerBound, zoom: z)
+                let x1 = BeatTimeline.x(forBeat: region.upperBound, zoom: z)
                 let w = max(2, x1 - x0)
-                let fillOpacity = store.loopOn ? 0.28 : 0.14
-                let strokeOpacity = store.loopOn ? 0.75 : 0.45
-                let rect = CGRect(x: x0, y: 1, width: w, height: size.height - 2)
-                context.fill(
-                    Path(roundedRect: rect, cornerRadius: 2),
-                    with: .color(Color.accentColor.opacity(fillOpacity))
-                )
-                context.stroke(
-                    Path(roundedRect: rect, cornerRadius: 2),
-                    with: .color(Color.accentColor.opacity(strokeOpacity)),
-                    lineWidth: 1
-                )
-                // Edge grips so the region is obviously adjustable.
-                let gripW: CGFloat = 3
-                context.fill(
-                    Path(CGRect(x: x0, y: 2, width: gripW, height: size.height - 4)),
-                    with: .color(Color.accentColor.opacity(strokeOpacity))
-                )
-                context.fill(
-                    Path(CGRect(x: x1 - gripW, y: 2, width: gripW, height: size.height - 4)),
-                    with: .color(Color.accentColor.opacity(strokeOpacity))
-                )
+                let fillOpacity = loopOn ? 0.40 : 0.22
+                let strokeOpacity = loopOn ? 0.95 : 0.65
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                    .fill(Color.orange.opacity(fillOpacity))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 2, style: .continuous)
+                            .strokeBorder(Color.orange.opacity(strokeOpacity), lineWidth: 1.5)
+                    }
+                    .overlay(alignment: .leading) {
+                        Rectangle()
+                            .fill(Color.orange.opacity(strokeOpacity))
+                            .frame(width: 3)
+                    }
+                    .overlay(alignment: .trailing) {
+                        Rectangle()
+                            .fill(Color.orange.opacity(strokeOpacity))
+                            .frame(width: 3)
+                    }
+                    .frame(width: w, height: rulerH - 2)
+                    .offset(x: x0, y: 1)
+                    .allowsHitTesting(false)
+                    .accessibilityLabel("Loop region")
+                    .accessibilityValue(
+                        "beats \(formatLoopBeat(region.lowerBound)) to \(formatLoopBeat(region.upperBound))"
+                    )
             }
 
-            let beatCount = Int(ceil(contentBeats))
-            for b in 0...beatCount {
-                let x = CGFloat(b) * beatWidth
-                let isBar = b % beatsPerBar == 0
-                if isBar {
-                    var line = Path()
-                    line.move(to: CGPoint(x: x, y: size.height * 0.25))
-                    line.addLine(to: CGPoint(x: x, y: size.height))
-                    context.stroke(line, with: .color(Color.black.opacity(0.35)), lineWidth: 1)
-                    let barNumber = (b / beatsPerBar) + 1
-                    context.draw(
-                        Text("\(barNumber)")
-                            .font(.system(size: 9, weight: .medium, design: .monospaced))
-                            .foregroundColor(Color.secondary),
-                        at: CGPoint(x: x + 3, y: 2),
-                        anchor: .topLeading
-                    )
-                } else {
-                    var line = Path()
-                    line.move(to: CGPoint(x: x, y: size.height * 0.55))
-                    line.addLine(to: CGPoint(x: x, y: size.height))
-                    context.stroke(line, with: .color(Color.black.opacity(0.12)), lineWidth: 0.5)
+            Canvas { context, size in
+                let beatCount = Int(ceil(contentBeats))
+                for b in 0...beatCount {
+                    let x = CGFloat(b) * beatWidth
+                    let isBar = b % beatsPerBar == 0
+                    if isBar {
+                        var line = Path()
+                        line.move(to: CGPoint(x: x, y: size.height * 0.25))
+                        line.addLine(to: CGPoint(x: x, y: size.height))
+                        context.stroke(line, with: .color(Color.black.opacity(0.35)), lineWidth: 1)
+                        let barNumber = (b / beatsPerBar) + 1
+                        context.draw(
+                            Text("\(barNumber)")
+                                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                .foregroundColor(Color.secondary),
+                            at: CGPoint(x: x + 3, y: 2),
+                            anchor: .topLeading
+                        )
+                    } else {
+                        var line = Path()
+                        line.move(to: CGPoint(x: x, y: size.height * 0.55))
+                        line.addLine(to: CGPoint(x: x, y: size.height))
+                        context.stroke(line, with: .color(Color.black.opacity(0.12)), lineWidth: 0.5)
+                    }
                 }
             }
+            .allowsHitTesting(false)
         }
-        .frame(width: totalWidth, height: BeatTimeline.rulerHeight)
+        .frame(width: totalWidth, height: rulerH)
         .background(Color.black.opacity(0.04))
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.black.opacity(0.15)).frame(height: 0.5)
@@ -356,6 +373,11 @@ struct TimelineWorkspaceView: View {
             .disabled(store.selectedClipIDs.count != 1)
         }
         .help(rulerHelp)
+    }
+
+    private func formatLoopBeat(_ v: Double) -> String {
+        if v == floor(v) { return String(Int(v)) }
+        return String(format: "%.2f", v)
     }
 
     private var rulerHelp: String {
@@ -478,7 +500,9 @@ struct ArrangementLanesView: View {
 
     /// Lane height matches the compact track-control gutter (AA1). Marquee and group-move
     /// track index math depend on this value staying in lockstep with TrackLaneGutter.
-    static let laneHeight: CGFloat = 56
+    static let laneHeight: CGFloat = ArrangementLayout.laneHeight
+    /// Preferred arrangement viewport height: roughly four lanes before the roll starts (AA4).
+    static var defaultBandHeight: CGFloat { ArrangementLayout.defaultBandHeight }
     private static let clickSlop: CGFloat = 4
 
     private var beatsPerBar: Int {

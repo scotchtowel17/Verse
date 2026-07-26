@@ -152,6 +152,15 @@ extension AppStore {
             return
         }
         loopRegion = range
+        // Confirm the set in the header so a successful click is never a silent no-op (Z4).
+        let lo = formatLoopBeat(range.lowerBound)
+        let hi = formatLoopBeat(range.upperBound)
+        statusMessage = "Loop region set to beats \(lo)-\(hi)."
+    }
+
+    private func formatLoopBeat(_ v: Double) -> String {
+        if v == floor(v) { return String(Int(v)) }
+        return String(format: "%.2f", v)
     }
 
     /// Pause: stop audio but hold the current playhead so the next play resumes from there.
@@ -278,6 +287,7 @@ extension AppStore {
         engine.removeTrack(id: id)
         project.tracks.removeAll { $0.id == id }
         trackEffects.removeValue(forKey: id)
+        armedTrackIDs.remove(id)
         if activeTrackID == id {
             activeTrackID = project.tracks.first(where: { $0.kind == .instrument })?.id ?? project.tracks.first!.id
         }

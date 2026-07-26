@@ -112,7 +112,23 @@ struct TransportBar: View {
             return "Unavailable while reviewing Claude changes"
         }
         if capturing { return "Stop recording (⌘R)" }
-        if armed { return "Armed. Press play to capture, or ⌘R to disarm." }
-        return "Record (⌘R)"
+        if armed {
+            let names = store.armedTrackNames()
+            if names.isEmpty {
+                return "Take running. Press play to capture, or ⌘R to stop."
+            }
+            if names.count == 1 {
+                return "Take running onto \(names[0]). Press play to capture, or ⌘R to stop."
+            }
+            return "Take running onto \(names.joined(separator: ", ")). Press play to capture, or ⌘R to stop."
+        }
+        if store.armedTrackIDs.isEmpty {
+            return "Record (⌘R) — arm a track first (click R on a track row)"
+        }
+        let names = store.armedTrackNames()
+        if names.count == 1 {
+            return "Start recording onto \(names[0]) (⌘R)"
+        }
+        return "Start recording onto \(names.joined(separator: ", ")) (⌘R)"
     }
 }

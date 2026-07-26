@@ -496,7 +496,7 @@ four more buttons: group straight and triplet values so the control stays compac
 deforms or clips at realistic widths. The same divisions must be available to the arrangement
 and the roll, and quantize must use whichever is selected.
 
-## Step Z4 — Loop region not confirmed on screen — OPEN
+## Step Z4 — Loop region not confirmed on screen — DONE
 
 Z3's loop region is implemented and unit-tested (a region set from a clip matches that clip's
 bounds, playback with a region repeats rather than running to the arrangement end, clearing
@@ -504,9 +504,13 @@ restores the whole-arrangement fallback). It could NOT be confirmed by hand: aft
 attempts using both the roll's loop control and the action bar's loop button, no loop band ever
 appeared in the shared ruler.
 
-Either the region is not being set by those controls, or it is set but not drawn. Determine
-which. The ruler band is the whole point of the feature, since a loop you cannot see is a loop
-you cannot trust or adjust. Confirm by running the app, not by adding another assertion.
+**Root cause (fixed in AA3):** the region *was* being set correctly by the controls
+(`setLoopRegionFromSelectedClip` and ruler Option-drag), but the band failed to *draw*. The
+loop band was painted only inside a SwiftUI `Canvas` drawing closure that read
+`store.loopRegion`. Canvas renderer closures are not reliably dependency-tracked for
+`@Observable`, so setting the region never forced a ruler repaint. Fix: read loop state in the
+view body and draw the band as a real `RoundedRectangle` overlay (orange, visible when loop is
+on or off), with a status message when set from a clip.
 
 ---
 
@@ -552,7 +556,7 @@ A control earns its place on screen or it moves into a menu. Judgement, not a fo
 6. Every surviving control must be hyper functional: correct disabled states with a tooltip
    saying why, keyboard equivalents where they exist, and no dead affordances.
 
-## Step AA3 — Per-track record arm, and fix the loop region — PENDING
+## Step AA3 — Per-track record arm, and fix the loop region — DONE
 
 1. **Per-track record arm.** Today there is one global record button and the destination is
    implied by whichever track is active, which is ambiguous once MIDI capture is involved. Arm
@@ -567,7 +571,7 @@ A control earns its place on screen or it moves into a menu. Judgement, not a fo
 Preserve every behaviour: shared time axis, ghosts, velocity editing, zoom on both axes, the T4
 row-count invariant, one undo entry per gesture, and the Cmd-C/V focus routing.
 
-## Step AA4 — Default split now starves the arrangement — PENDING
+## Step AA4 — Default split now starves the arrangement — DONE
 
 AA1 recovered vertical space and gave essentially all of it to the roll. With three tracks the
 arrangement shows about two and a half rows and the third is clipped, so a song with more than a
