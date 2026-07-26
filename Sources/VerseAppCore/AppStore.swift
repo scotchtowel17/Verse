@@ -87,9 +87,14 @@ public final class AppStore {
     @ObservationIgnored lazy var installedEffects: [DiscoveredAU] = AudioUnitDiscovery.effects()
     var musicUnderstandingAvailable: Bool { Analysis.isMusicUnderstandingAvailable }
 
-    // Piano roll (Phase P): open clip + editing gestures.
-    public var showPianoRoll = false
+    // Piano roll (Phase P / W1): edits the bound track; clip is created on demand when drawing.
+    /// Pane expanded by default so a fresh launch shows the roll without discovering it.
+    public var showPianoRoll = true
+    /// Explicit MIDI clip selection (clicking a clip in the arrangement). Wins over auto-resolve.
+    /// Nil means resolve from `rollTrackID` + playhead. Creating a note on an empty track sets this.
     public var pianoRollClipID: UUID?
+    /// Track the piano roll is bound to (instrument or audio). Track-row selection updates this.
+    public var rollTrackID: UUID
 
     // MIDI input (Phase M): connected CoreMIDI source display names, sorted.
     public var midiSourceNames: [String] = []
@@ -149,7 +154,9 @@ public final class AppStore {
         self.recovery = RecoveryManager(baseDir: recoveryBaseDir)
         let p = Project.newUntitled()
         self.project = p
-        self.activeTrackID = p.tracks.first?.id ?? UUID()
+        let firstID = p.tracks.first?.id ?? UUID()
+        self.activeTrackID = firstID
+        self.rollTrackID = firstID
         // Detect recovery BEFORE marking a new session live.
         self.pendingRecovery = recovery.detectRecovery()
         recovery.beginSession()
@@ -221,59 +228,86 @@ public final class AppStore {
 
     // MARK: - Piano roll
 
-    /// Open the piano roll for a MIDI clip. No-op (with status) if the clip is missing or audio.
+    /// Open the piano roll for a MIDI clip. Explicit clip selection wins over auto-resolve.
+    /// No-op (with status) if the clip is missing or audio.
     public func openPianoRoll(clipID: UUID) {
         guard let loc = project.clipLocation(id: clipID) else {
             statusMessage = "That clip isn’t in this project."
             return
         }
-        let clip = project.tracks[loc.trackIndex].clips[loc.clipIndex]
+        let track = project.tracks[loc.trackIndex]
+        let clip = track.clips[loc.clipIndex]
         guard clip.kind == .midi else {
             statusMessage = "The piano roll is for MIDI clips, not audio takes."
             return
         }
+        rollTrackID = track.id
         // Prefer this clip’s track for audition so note sound matches the roll.
-        if project.tracks[loc.trackIndex].kind == .instrument {
-            activeTrackID = project.tracks[loc.trackIndex].id
+        if track.kind == .instrument {
+            activeTrackID = track.id
         }
         pianoRollClipID = clipID
         showPianoRoll = true
     }
 
-    /// Open the piano roll for an instrument track.
-    ///
-    /// Uses the first MIDI clip when one exists. On a brand-new project (or any instrument
-    /// track with no MIDI clip yet) creates an empty 4-bar clip, records one undo entry,
-    /// autosaves, then opens the roll so drawing notes has a path in.
+    /// Bind the piano roll to a track. Does not create a clip: drawing creates one on demand.
+    /// Clears any explicit clip selection so auto-resolve (playhead / earlier / first) runs.
+    /// Audio tracks expand the roll and show a plain-language empty state (no dead grid).
     public func openPianoRoll(forTrack trackID: UUID) {
-        guard let idx = project.trackIndex(id: trackID) else {
+        guard project.trackIndex(id: trackID) != nil else {
             statusMessage = "That track isn’t in this project."
             return
         }
-        let track = project.tracks[idx]
-        guard track.kind == .instrument else {
-            statusMessage = "The piano roll is for instrument tracks."
-            return
-        }
-        if let existing = track.clips.first(where: { $0.kind == .midi }) {
-            openPianoRoll(clipID: existing.id)
-            return
-        }
-        let bars = 4
-        let beatsPerBar = max(1, project.timeSignature.num)
-        let length = Double(beatsPerBar * bars)
-        let clip = Clip(kind: .midi, name: "MIDI", startBeat: 0, lengthBeats: length, midiNotes: [])
-        history.record(project, name: "Add MIDI Clip")
-        project.tracks[idx].clips.append(clip)
-        recovery.autosave(project)
-        openPianoRoll(clipID: clip.id)
+        bindPianoRoll(toTrack: trackID)
+        pianoRollClipID = nil
+        showPianoRoll = true
     }
 
-    /// Track that owns the open piano-roll clip (for audition routing).
+    /// Point the roll at a track (selection follow). Clears an explicit clip that belongs to
+    /// another track so auto-resolve runs on the new track.
+    public func bindPianoRoll(toTrack trackID: UUID) {
+        guard let track = project.track(id: trackID) else { return }
+        rollTrackID = trackID
+        if track.kind == .instrument {
+            activeTrackID = trackID
+        }
+        if let clipID = pianoRollClipID, let loc = project.clipLocation(id: clipID) {
+            if project.tracks[loc.trackIndex].id != trackID {
+                pianoRollClipID = nil
+            }
+        } else {
+            pianoRollClipID = nil
+        }
+    }
+
+    /// MIDI clip the roll is editing right now: explicit selection when it still lives on
+    /// `rollTrackID`, otherwise auto-resolve (playhead / nearest earlier / first).
+    public var effectivePianoRollClipID: UUID? {
+        if let clipID = pianoRollClipID, let loc = project.clipLocation(id: clipID) {
+            let track = project.tracks[loc.trackIndex]
+            let clip = track.clips[loc.clipIndex]
+            if clip.kind == .midi, track.id == rollTrackID {
+                return clipID
+            }
+        }
+        guard let track = project.track(id: rollTrackID) else { return nil }
+        return PianoRollSelection.resolvedMIDIClip(
+            clips: track.clips,
+            playheadBeat: playbackBeat ?? 0
+        )?.id
+    }
+
+    /// Instrument track used for roll audition. Audio roll targets fall back to `activeTrackID`.
     public var pianoRollTrackID: UUID? {
-        guard let clipID = pianoRollClipID,
-              let loc = project.clipLocation(id: clipID) else { return nil }
-        return project.tracks[loc.trackIndex].id
+        if let t = project.track(id: rollTrackID), t.kind == .instrument {
+            return rollTrackID
+        }
+        return nil
+    }
+
+    /// True when the roll is bound to an audio track (notes cannot be drawn).
+    public var pianoRollIsAudioTrack: Bool {
+        project.track(id: rollTrackID)?.kind == .audio
     }
 
     /// Arrangement beat under the playhead for drawing and resume.
@@ -306,16 +340,49 @@ public final class AppStore {
     }
 
     /// Discrete add: one undo entry labeled "Add Note", then autosave.
+    ///
+    /// When the bound instrument track has no MIDI clip yet, creates a clip positioned to
+    /// contain the note and adds the note in the **same** undo entry. `startBeat` is
+    /// clip-local when a clip already exists; when creating on demand it is arrangement-absolute
+    /// (the empty roll treats clip start as 0).
     @discardableResult
     public func pianoRollAddNote(pitch: Int, startBeat: Double, lengthBeats: Double,
                                  velocity: Int = 100) -> UUID? {
-        // Should be impossible while the roll is open: the view only draws when a clip is set.
-        guard let clipID = pianoRollClipID else { return nil }
+        if pianoRollIsAudioTrack {
+            statusMessage = "Audio tracks don’t have notes. Select an instrument track."
+            return nil
+        }
         var working = project
         let noteID: UUID
+        let targetClipID: UUID
         do {
-            noteID = try working.addNote(toClip: clipID, pitch: pitch, startBeat: startBeat,
-                                         lengthBeats: lengthBeats, velocity: velocity)
+            if let clipID = effectivePianoRollClipID {
+                targetClipID = clipID
+                noteID = try working.addNote(toClip: clipID, pitch: pitch, startBeat: startBeat,
+                                             lengthBeats: lengthBeats, velocity: velocity)
+            } else {
+                // On-demand clip + note: one undo for both.
+                guard let idx = working.trackIndex(id: rollTrackID),
+                      working.tracks[idx].kind == .instrument else {
+                    statusMessage = "Select an instrument track to add notes."
+                    return nil
+                }
+                let beatsPerBar = max(1, working.timeSignature.num)
+                let place = PianoRollSelection.onDemandClipPlacement(
+                    absoluteNoteStart: startBeat,
+                    noteLengthBeats: lengthBeats,
+                    beatsPerBar: beatsPerBar
+                )
+                let clip = Clip(kind: .midi, name: "MIDI",
+                                startBeat: place.clipStart,
+                                lengthBeats: place.clipLength,
+                                midiNotes: [])
+                working.tracks[idx].clips.append(clip)
+                targetClipID = clip.id
+                noteID = try working.addNote(toClip: clip.id, pitch: pitch,
+                                             startBeat: place.localNoteStart,
+                                             lengthBeats: lengthBeats, velocity: velocity)
+            }
         } catch let err as MutationError {
             statusMessage = err.description
             return nil
@@ -325,6 +392,7 @@ public final class AppStore {
         }
         history.record(project, name: "Add Note")
         project = working
+        pianoRollClipID = targetClipID
         recovery.autosave(project)
         return noteID
     }
@@ -337,8 +405,8 @@ public final class AppStore {
     /// Discrete multi-delete: one undo entry for the whole selection (never per note).
     /// Default label is "Delete Note" for one id and "Delete Notes" for several.
     public func pianoRollDeleteNotes(ids: [UUID], undoName: String? = nil) {
-        // Empty selection or no open clip: nothing was asked for (or roll already closed).
-        guard let clipID = pianoRollClipID, !ids.isEmpty else { return }
+        // Empty selection or no resolved clip: nothing was asked for.
+        guard let clipID = effectivePianoRollClipID, !ids.isEmpty else { return }
         var working = project
         var deleted = 0
         for id in ids {
@@ -358,15 +426,15 @@ public final class AppStore {
         recovery.autosave(project)
     }
 
-    /// Paste notes into the open clip. One undo entry labeled "Paste Notes". Returns new
+    /// Paste notes into the effective clip. One undo entry labeled "Paste Notes". Returns new
     /// note ids in the same order as `specs` so the view can leave them selected. Rejects
     /// the whole paste (no partial apply) if any note is out of range.
     @discardableResult
     public func pianoRollPasteNotes(
         _ specs: [(pitch: Int, startBeat: Double, lengthBeats: Double, velocity: Int)]
     ) -> [UUID] {
-        // Empty clipboard paste or roll closed: nothing to apply.
-        guard let clipID = pianoRollClipID, !specs.isEmpty else { return [] }
+        // Empty clipboard paste or no clip yet: nothing to apply (paste needs an existing clip).
+        guard let clipID = effectivePianoRollClipID, !specs.isEmpty else { return [] }
         var working = project
         var ids: [UUID] = []
         ids.reserveCapacity(specs.count)
@@ -401,7 +469,7 @@ public final class AppStore {
     /// must begin a piano-roll gesture first. One undo entry covers the whole gesture.
     public func pianoRollMoveNotes(_ moves: [(id: UUID, toPitch: Int, toStartBeat: Double)]) {
         // No active gesture or empty move list: refuse silent undo-less mutation.
-        guard pianoRollGestureActive, let clipID = pianoRollClipID, !moves.isEmpty else { return }
+        guard pianoRollGestureActive, let clipID = effectivePianoRollClipID, !moves.isEmpty else { return }
         var working = project
         do {
             for m in moves {
@@ -419,7 +487,7 @@ public final class AppStore {
     /// No-ops if no gesture is active so a missed begin cannot mutate without undo.
     public func pianoRollResizeNote(id noteID: UUID, toLengthBeats lengthBeats: Double) {
         // No active gesture: refuse silent undo-less mutation.
-        guard pianoRollGestureActive, let clipID = pianoRollClipID else { return }
+        guard pianoRollGestureActive, let clipID = effectivePianoRollClipID else { return }
         do {
             try project.resizeNote(id: noteID, inClip: clipID, toLengthBeats: lengthBeats)
         } catch {
@@ -572,8 +640,8 @@ public final class AppStore {
         history.record(project, name: name)
         project = working
         if let openID = pianoRollClipID, working.clipLocation(id: openID) == nil {
+            // Keep the roll expanded on the track; auto-resolve will pick another clip or empty.
             pianoRollClipID = nil
-            showPianoRoll = false
         }
         recovery.autosave(project)
     }
@@ -1123,6 +1191,8 @@ public final class AppStore {
         engine.addInstrumentTrack(id: track.id, instrument: track.instrument)
         engine.applyMix(track)
         activeTrackID = track.id
+        bindPianoRoll(toTrack: track.id)
+        openPianoRoll(clipID: clip.id)
         recovery.autosave(project)
         statusMessage = result.message + (result.mode == .basicPitch ? " (Basic Pitch)" : "")
     }
@@ -1150,6 +1220,13 @@ public final class AppStore {
         if project.track(id: activeTrackID) == nil {
             activeTrackID = project.tracks.first(where: { $0.kind == .instrument })?.id
                 ?? project.tracks.first?.id ?? activeTrackID
+        }
+        // Only rebind the roll track when the track itself vanished (e.g. undo of add-track).
+        // Do not clear pianoRollClipID here: undo/redo of split must leave the left-half id
+        // so a following redo still points at a live clip. Stale ids resolve to empty via
+        // effectivePianoRollClipID until the next explicit open or draw.
+        if project.track(id: rollTrackID) == nil {
+            rollTrackID = activeTrackID
         }
         if rekeyed > 0 {
             let n = rekeyed == 1 ? "1 duplicate track id" : "\(rekeyed) duplicate track ids"

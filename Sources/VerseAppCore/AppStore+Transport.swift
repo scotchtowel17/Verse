@@ -95,6 +95,7 @@ extension AppStore {
         engine.addInstrumentTrack(id: t.id, instrument: t.instrument)
         engine.applyMix(t)
         activeTrackID = t.id
+        bindPianoRoll(toTrack: t.id)
         recovery.autosave(project)
     }
 
@@ -127,13 +128,19 @@ extension AppStore {
         if activeTrackID == id {
             activeTrackID = project.tracks.first(where: { $0.kind == .instrument })?.id ?? project.tracks.first!.id
         }
+        if rollTrackID == id {
+            let fallback = project.tracks.first(where: { $0.kind == .instrument })?.id
+                ?? project.tracks.first!.id
+            bindPianoRoll(toTrack: fallback)
+        }
         recovery.autosave(project)
     }
 
     func selectTrack(_ id: UUID) {
-        // Active track is instrument-only (keyboard / MIDI audition). Selecting an audio
-        // track is a deliberate no-op, not a failure.
-        if project.track(id: id)?.kind == .instrument { activeTrackID = id }
+        // Roll follows any track row (instrument draws notes; audio shows a plain empty state).
+        // Keyboard / MIDI audition (`activeTrackID`) stays instrument-only.
+        guard project.track(id: id) != nil else { return }
+        bindPianoRoll(toTrack: id)
     }
 
     // MARK: Mix with solo logic (M4)

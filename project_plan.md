@@ -172,7 +172,7 @@ working plan.
 3. Keep durable engineering lessons prominent here rather than only in the archive.
 )
 
-## Step W1 — The piano roll should be obvious, and drawing should not require a clip first — PENDING
+## Step W1 — The piano roll should be obvious, and drawing should not require a clip first — DONE
 
 Owner: "It isn't intuitive for me to get to or access the piano roll. I should be able to add
 notes manually without having to record."

@@ -746,37 +746,49 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
 
     // MARK: - Phase P4: integration
 
-    tk.suite("AppStore piano roll: brand-new track opens by creating an empty MIDI clip") {
+    tk.suite("AppStore W1: brand-new track opens roll without creating a clip") {
         let (store, dir) = makeTestStore()
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        // Default project: one instrument track, no clips. This is the live usability gap.
+        // Default project: one instrument track, no clips. Roll is track-bound, clip on demand.
         let track = store.project.tracks[0]
         tk.expectEqual(track.kind, TrackKind.instrument, "default track is instrument")
         tk.expectEqual(track.clips.count, 0, "brand-new project has no clips")
+        tk.expect(store.showPianoRoll, "roll starts expanded on a fresh launch")
 
         store.openPianoRoll(forTrack: track.id)
-        tk.expect(store.showPianoRoll, "piano roll opens from empty track")
-        tk.expect(store.pianoRollClipID != nil, "clip id assigned")
-        tk.expectEqual(store.project.tracks[0].clips.count, 1, "empty MIDI clip created")
+        tk.expect(store.showPianoRoll, "piano roll stays open for empty track")
+        tk.expectEqual(store.rollTrackID, track.id, "roll binds to the track")
+        tk.expect(store.pianoRollClipID == nil, "no explicit clip until the user draws")
+        tk.expect(store.effectivePianoRollClipID == nil, "nothing to auto-resolve yet")
+        tk.expectEqual(store.project.tracks[0].clips.count, 0, "opening does not create a clip")
+        tk.expectEqual(undoDepth(of: store), 0, "open-without-draw records no undo")
+    }
+
+    tk.suite("AppStore W1: first note creates clip + note as one Add Note undo") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let track = store.project.tracks[0]
+        store.openPianoRoll(forTrack: track.id)
+        tk.expectEqual(track.clips.count, 0, "still empty before draw")
+
+        // Arrangement-absolute start (empty roll treats clip start as 0).
+        let noteID = store.pianoRollAddNote(pitch: 60, startBeat: 2.0, lengthBeats: 0.25)
+        tk.expect(noteID != nil, "draw succeeds with no prior clip")
+        tk.expectEqual(store.project.tracks[0].clips.count, 1, "one MIDI clip created on demand")
         let clip = store.project.tracks[0].clips[0]
         tk.expectEqual(clip.kind, ClipKind.midi, "created clip is MIDI")
-        tk.expectEqual(clip.midiNotes?.count ?? 0, 0, "created clip starts empty")
-        tk.expectEqual(store.pianoRollClipID, clip.id, "roll points at the new clip")
-        let expectedLen = Double(max(1, store.project.timeSignature.num) * 4)
-        tk.expectEqual(clip.lengthBeats, expectedLen, "empty clip is 4 bars")
-        tk.expectEqual(undoDepth(of: store), 1, "creating the clip is one undo entry")
-        tk.expectEqual(store.undoName, "Add MIDI Clip", "create-clip undo label")
+        tk.expectEqual(clip.midiNotes?.count, 1, "note lands in the new clip")
+        tk.expectEqual(clip.midiNotes?[0].id, noteID, "returned id matches")
+        tk.expectEqual(store.pianoRollClipID, clip.id, "explicit clip set after create")
+        tk.expectEqual(store.effectivePianoRollClipID, clip.id, "effective points at new clip")
+        tk.expectEqual(undoDepth(of: store), 1, "clip+note is exactly one undo entry")
+        tk.expectEqual(store.undoName, "Add Note", "combined gesture labeled Add Note")
 
-        // Drawing a note on the new clip works end-to-end.
-        let noteID = store.pianoRollAddNote(pitch: 60, startBeat: 0, lengthBeats: 0.25)
-        tk.expect(noteID != nil, "can draw on the newly created clip")
-        tk.expectEqual(store.project.tracks[0].clips[0].midiNotes?.count, 1, "note lands in clip")
-
-        store.undo() // undo add note
-        store.undo() // undo add clip
-        tk.expectEqual(store.project.tracks[0].clips.count, 0, "undo remove empty clip")
-        // Roll may still reference the old id; that is fine (clip gone → empty UI).
+        store.undo()
+        tk.expectEqual(store.project.tracks[0].clips.count, 0, "one undo removes clip and note")
+        tk.expectEqual(undoDepth(of: store), 0, "stack empty after undo")
     }
 
     tk.suite("AppStore piano roll: forTrack reuses existing MIDI clip, no duplicate") {
@@ -788,11 +800,11 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         store.project.tracks[0].clips = [existing]
         store.openPianoRoll(forTrack: store.project.tracks[0].id)
         tk.expectEqual(store.project.tracks[0].clips.count, 1, "no second clip created")
-        tk.expectEqual(store.pianoRollClipID, existing.id, "opens the existing clip")
+        tk.expectEqual(store.effectivePianoRollClipID, existing.id, "auto-resolves the existing clip")
         tk.expectEqual(undoDepth(of: store), 0, "reuse path does not push undo")
     }
 
-    tk.suite("AppStore piano roll: forTrack rejects audio tracks") {
+    tk.suite("AppStore W1: audio track shows roll without MIDI clip") {
         let (store, dir) = makeTestStore()
         defer { try? FileManager.default.removeItem(at: dir) }
 
@@ -800,10 +812,16 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         let audioID = store.project.tracks.last!.id
         let clipsBefore = store.project.tracks.last!.clips.count
         store.openPianoRoll(forTrack: audioID)
-        tk.expect(!store.showPianoRoll, "audio track does not open the roll")
-        tk.expect(store.pianoRollClipID == nil, "no clip id for audio track")
+        tk.expect(store.showPianoRoll, "audio track still expands the roll pane")
+        tk.expectEqual(store.rollTrackID, audioID, "roll binds to the audio track")
+        tk.expect(store.pianoRollIsAudioTrack, "audio empty-state flag is set")
+        tk.expect(store.effectivePianoRollClipID == nil, "no MIDI clip on audio track")
         tk.expectEqual(store.project.tracks.last!.clips.count, clipsBefore,
                        "audio track is not given a MIDI clip")
+        let noteID = store.pianoRollAddNote(pitch: 60, startBeat: 0, lengthBeats: 0.25)
+        tk.expect(noteID == nil, "drawing on audio refuses")
+        tk.expectEqual(store.project.tracks.last!.clips.count, clipsBefore,
+                       "refused draw creates no clip")
     }
 
     tk.suite("AppStore piano roll: open roll reflects later project note changes (patch path)") {
@@ -1426,6 +1444,7 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         tk.expectEqual(store.undoName, "Split Clip", "split undo label")
         tk.expectEqual(undoDepth(of: store), 1, "split is exactly one undo entry")
         tk.expectEqual(store.pianoRollClipID, pair!.left, "open roll retargets to left half")
+        print("DEBUG after retarget assert: pianoRollClipID=\(String(describing: store.pianoRollClipID))")
         let left = store.project.tracks[0].clips[0]
         let right = store.project.tracks[0].clips[1]
         tk.expectEqual(left.lengthBeats, 2, "left half length")
@@ -1641,24 +1660,84 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         tk.expect(longContent >= 40, "note end past clip length extends shared contentBeats")
     }
 
-    tk.suite("AppStore T1: open roll expands inline pane; collapse keeps clip") {
+    tk.suite("AppStore T1/W1: roll starts expanded; collapse keeps clip") {
         let (store, dir) = makeTestStore()
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let clip = Clip(kind: .midi, name: "phrase", startBeat: 8, lengthBeats: 4,
                         midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
         store.project.tracks[0].clips = [clip]
-        tk.expect(!store.showPianoRoll, "roll starts collapsed (no sheet)")
+        tk.expect(store.showPianoRoll, "roll starts expanded on a fresh launch")
 
         store.openPianoRoll(clipID: clip.id)
-        tk.expect(store.showPianoRoll, "opening a MIDI clip expands the inline roll")
+        tk.expect(store.showPianoRoll, "opening a MIDI clip keeps the inline roll expanded")
         tk.expectEqual(store.pianoRollClipID, clip.id, "open clip id is stored")
+        tk.expectEqual(store.effectivePianoRollClipID, clip.id, "effective matches explicit")
 
         store.showPianoRoll = false
         tk.expectEqual(store.pianoRollClipID, clip.id,
                        "collapse hides the pane but keeps the selected clip")
         store.showPianoRoll = true
         tk.expectEqual(store.pianoRollClipID, clip.id, "re-expand shows the same clip")
+    }
+
+    tk.suite("AppStore W1: multi-clip resolve prefers playhead, then earlier, then first") {
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let c1 = Clip(kind: .midi, name: "a", startBeat: 0, lengthBeats: 4, midiNotes: [])
+        let c2 = Clip(kind: .midi, name: "b", startBeat: 8, lengthBeats: 4, midiNotes: [])
+        let c3 = Clip(kind: .midi, name: "c", startBeat: 16, lengthBeats: 4, midiNotes: [])
+        store.project.tracks[0].clips = [c1, c2, c3]
+        store.rollTrackID = store.project.tracks[0].id
+        store.pianoRollClipID = nil
+
+        store.playheadBeat = 9
+        tk.expectEqual(store.effectivePianoRollClipID, c2.id, "clip under playhead wins")
+
+        store.playheadBeat = 6
+        tk.expectEqual(store.effectivePianoRollClipID, c1.id, "nearest earlier when between clips")
+
+        store.playheadBeat = 0
+        tk.expectEqual(store.effectivePianoRollClipID, c1.id, "first clip when playhead is at start")
+
+        // Explicit arrangement selection wins over auto-resolve.
+        store.openPianoRoll(clipID: c3.id)
+        store.playheadBeat = 9
+        tk.expectEqual(store.effectivePianoRollClipID, c3.id, "explicit clip beats playhead")
+
+        // forTrack clears explicit and re-resolves from playhead.
+        store.openPianoRoll(forTrack: store.project.tracks[0].id)
+        tk.expect(store.pianoRollClipID == nil, "forTrack clears explicit override")
+        store.playheadBeat = 9
+        tk.expectEqual(store.effectivePianoRollClipID, c2.id, "auto-resolve after forTrack")
+    }
+
+    tk.suite("AppStore W1: pure helpers for resolve and on-demand placement") {
+        let early = Clip(kind: .midi, name: "e", startBeat: 0, lengthBeats: 4, midiNotes: [])
+        let mid = Clip(kind: .midi, name: "m", startBeat: 8, lengthBeats: 4, midiNotes: [])
+        let late = Clip(kind: .midi, name: "l", startBeat: 16, lengthBeats: 4, midiNotes: [])
+        let clips = [early, mid, late]
+
+        tk.expectEqual(
+            PianoRollSelection.resolvedMIDIClip(clips: clips, playheadBeat: 10)?.id,
+            mid.id, "resolve under playhead")
+        tk.expectEqual(
+            PianoRollSelection.resolvedMIDIClip(clips: clips, playheadBeat: 5)?.id,
+            early.id, "resolve nearest earlier")
+        tk.expectEqual(
+            PianoRollSelection.resolvedMIDIClip(clips: clips, playheadBeat: 100)?.id,
+            late.id, "resolve latest earlier when past all")
+        tk.expect(
+            PianoRollSelection.resolvedMIDIClip(clips: [], playheadBeat: 0) == nil,
+            "empty list resolves to nil")
+
+        let place = PianoRollSelection.onDemandClipPlacement(
+            absoluteNoteStart: 8.5, noteLengthBeats: 0.25, beatsPerBar: 4)
+        tk.expectEqual(place.clipStart, 8.0, "clip starts on bar containing the note")
+        tk.expectEqual(place.localNoteStart, 0.5, "note is clip-local")
+        tk.expect(place.clipLength >= 16.0, "at least 4 bars long")
+        tk.expect(place.clipLength >= place.localNoteStart + 0.25, "length covers the note")
     }
 
     // MARK: - Step V4: silent no-op audit (swallows must surface status)

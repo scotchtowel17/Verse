@@ -82,18 +82,14 @@ private struct TrackRow: View {
             }.labelsHidden().frame(width: 90).help("Insert effect")
 
             if track.kind == .instrument {
-                let hasMidi = track.clips.contains(where: { $0.kind == .midi })
                 Button {
-                    store.selectTrack(track.id)
                     store.openPianoRoll(forTrack: track.id)
                 } label: {
                     Image(systemName: "rectangle.split.2x1")
                 }
                 .buttonStyle(.borderless)
                 .controlSize(.small)
-                .help(hasMidi
-                      ? "Open piano roll"
-                      : "Create an empty MIDI clip and open the piano roll")
+                .help("Show piano roll for this track")
             }
 
             Button(role: .destructive) { store.deleteTrack(track.id) } label: { Image(systemName: "trash") }

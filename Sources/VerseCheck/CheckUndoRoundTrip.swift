@@ -333,6 +333,7 @@ private func seedProjectForUndoRoundTrip(_ store: AppStore, rng: inout SeededRNG
     project.tracks = [inst0, inst1, audio]
     store.project = project
     store.activeTrackID = inst0.id
+    store.rollTrackID = inst0.id
     store.pianoRollClipID = inst0.clips[0].id
     store.showPianoRoll = true
 }
@@ -487,7 +488,7 @@ private func applyRandomUndoOp(_ store: AppStore, rng: inout SeededRNG) {
 
 @MainActor
 private func ensurePianoRollOpen(_ store: AppStore) {
-    if let id = store.pianoRollClipID, store.project.clipLocation(id: id) != nil {
+    if let id = store.effectivePianoRollClipID, store.project.clipLocation(id: id) != nil {
         return
     }
     if let clip = anyMIDIClip(store) {
@@ -497,7 +498,7 @@ private func ensurePianoRollOpen(_ store: AppStore) {
 
 @MainActor
 private func firstNote(inOpenClip store: AppStore) -> Note? {
-    guard let clipID = store.pianoRollClipID,
+    guard let clipID = store.effectivePianoRollClipID,
           let loc = store.project.clipLocation(id: clipID),
           let notes = store.project.tracks[loc.trackIndex].clips[loc.clipIndex].midiNotes,
           let note = notes.first else { return nil }

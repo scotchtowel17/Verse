@@ -15,6 +15,8 @@ extension AppStore {
             project = recovered
             let rekeyed = project.ensureUniqueTrackIDs()
             activeTrackID = project.tracks.first(where: { $0.kind == .instrument })?.id ?? activeTrackID
+            rollTrackID = activeTrackID
+            pianoRollClipID = nil
             engine.reconfigure(with: project)
             restoreEffectsFromProject()
             if let takeURL = info.inProgressTakeURL {
@@ -56,7 +58,11 @@ extension AppStore {
         engine.allNotesOff()
         let p = Project.newUntitled()
         project = p
-        activeTrackID = p.tracks.first?.id ?? UUID()
+        let firstID = p.tracks.first?.id ?? UUID()
+        activeTrackID = firstID
+        rollTrackID = firstID
+        pianoRollClipID = nil
+        showPianoRoll = true
         currentPackageURL = nil
         takes.removeAll()
         trackEffects.removeAll()
@@ -85,6 +91,8 @@ extension AppStore {
             currentPackageURL = url
             activeTrackID = project.tracks.first(where: { $0.kind == .instrument })?.id
                 ?? project.tracks.first?.id ?? UUID()
+            rollTrackID = activeTrackID
+            pianoRollClipID = nil
             engine.reconfigure(with: project)
             restoreEffectsFromProject()
             rebuildTakesFromModel()
