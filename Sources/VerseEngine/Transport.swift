@@ -100,22 +100,25 @@ public final class Transport {
         return planned
     }
 
-    /// Plan the audio segment for one clip, honouring `lengthBeats` as a hard end.
+    /// Plan the audio segment for one clip, honouring `lengthBeats` as a hard end and
+    /// `mediaStartSeconds` as the offset into the media file.
     ///
     /// Uses `scheduleSegment` semantics: only the frames that fall inside the clip are played.
-    /// If the file is shorter than the clip, playback ends early (no loop). Clips entirely
-    /// before the playhead produce `nil`.
+    /// If the file is shorter than the clip (from the media offset), playback ends early (no
+    /// loop). Clips entirely before the playhead produce `nil`.
     public static func planAudioSegment(
         clipStartBeat: Double,
         clipLengthBeats: Double,
         playFromBeat: Double,
         secondsPerBeat: Double,
         fileLengthFrames: AVAudioFramePosition,
-        sampleRate: Double
+        sampleRate: Double,
+        mediaStartSeconds: Double = 0
     ) -> PlannedAudioSegment? {
         guard clipLengthBeats > 0, secondsPerBeat > 0, sampleRate > 0, fileLengthFrames > 0 else {
             return nil
         }
+        guard mediaStartSeconds >= 0 else { return nil }
         let relativeStart = clipStartBeat - playFromBeat
         let relativeEnd = relativeStart + clipLengthBeats
         // Entirely before the playhead: nothing to schedule.
@@ -130,7 +133,9 @@ public final class Transport {
         let skipSeconds = skipBeats * secondsPerBeat
         let remainingSeconds = remainingBeats * secondsPerBeat
 
-        let startFrame = AVAudioFramePosition((skipSeconds * sampleRate).rounded(.down))
+        // File offset = clip media start + any mid-clip playhead skip into the clip.
+        let fileOffsetSeconds = mediaStartSeconds + skipSeconds
+        let startFrame = AVAudioFramePosition((fileOffsetSeconds * sampleRate).rounded(.down))
         guard startFrame < fileLengthFrames else { return nil }
         let wantedFrames = AVAudioFrameCount(max(0, (remainingSeconds * sampleRate).rounded(.down)))
         let available = AVAudioFrameCount(fileLengthFrames - startFrame)
@@ -177,7 +182,8 @@ public final class Transport {
                         playFromBeat: startBeat,
                         secondsPerBeat: spb,
                         fileLengthFrames: file.length,
-                        sampleRate: rate
+                        sampleRate: rate,
+                        mediaStartSeconds: clip.mediaStartSeconds
                     ) else { continue }
                     let when = AVAudioTime(
                         hostTime: anchorHost + AVAudioTime.hostTime(forSeconds: plan.whenSeconds)
