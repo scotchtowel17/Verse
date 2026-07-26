@@ -27,7 +27,15 @@ public final class AppStore {
     /// Pitches currently held from keyboard, click, or MIDI input (drives on-screen keyboard).
     public var heldNotes: Set<Int> = []
     var engineError: String?
+    /// Preferred leftmost C for the on-screen / typing keyboard. Rendered base is clamped
+    /// with `PianoKeyboardLayout.clampedBaseC` so the full span stays in MIDI 0...127.
     var baseOctaveC: Int = 60
+    /// Live octave count from the on-screen keyboard layout (width-adaptive). Defaults to
+    /// `maxOctaves` so Z/X and typing stay MIDI-safe before the first layout pass.
+    var keyboardOctaveCount: Int = PianoKeyboardLayout.maxOctaves
+    /// Session-only hide/show for the on-screen piano. When false, the roll and arrangement
+    /// reclaim the vertical space. Computer-keyboard typing still works.
+    public var showOnscreenKeyboard: Bool = true
 
     // Recording / metering UI state
     public var isRecording = false
@@ -806,6 +814,23 @@ public final class AppStore {
     }
 
     // MARK: - Playing notes
+
+    /// Leftmost C actually used for rendering and musical typing (preferred base clamped
+    /// for the current octave span so every key is in MIDI 0...127).
+    var effectiveKeyboardBaseC: Int {
+        PianoKeyboardLayout.clampedBaseC(baseOctaveC, octaves: keyboardOctaveCount)
+    }
+
+    /// Z/X octave shift. Moves from the effective base and clamps so the rendered range
+    /// never leaves 0...127 (shift stops at the ends; no dead keys).
+    func shiftKeyboardOctave(_ deltaOctaves: Int) {
+        panic()
+        baseOctaveC = PianoKeyboardLayout.shiftedBaseC(
+            effectiveKeyboardBaseC,
+            deltaOctaves: deltaOctaves,
+            octaves: keyboardOctaveCount
+        )
+    }
 
     /// Play a note on the active instrument track. Velocity defaults match the on-screen
     /// keyboard; MIDI input passes the controller velocity through.

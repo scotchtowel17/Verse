@@ -351,7 +351,7 @@ Fix the layout, not the function:
 
 Four items from real use.
 
-## Step Y1 — Upper keys are silent, and the keyboard needs a hide toggle — PENDING
+## Step Y1 — Upper keys are silent, and the keyboard needs a hide toggle — DONE
 
 **The bug.** `baseC` is `baseOctaveC`, which defaults to 60 (middle C). X4 made the keyboard
 adaptive and it now renders about 7 octaves, so the top white key maps to roughly pitch 144,

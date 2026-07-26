@@ -22,20 +22,21 @@ public struct ContentView: View {
             TimelineWorkspaceView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             if !store.takes.isEmpty { takesList }
-            keyboardHint
-            PianoKeyboardView(
-                baseC: store.baseOctaveC,
-                held: store.heldNotes,
-                noteOn: { store.noteOn($0) },
-                noteOff: { store.noteOff($0) }
-            )
+            keyboardChrome
+            if store.showOnscreenKeyboard {
+                PianoKeyboardView(
+                    preferredBaseC: store.baseOctaveC,
+                    held: store.heldNotes,
+                    noteOn: { store.noteOn($0) },
+                    noteOff: { store.noteOff($0) },
+                    onOctavesChanged: { store.keyboardOctaveCount = $0 }
+                )
+            }
+            // Musical typing stays live even when the on-screen keyboard is hidden.
             KeyboardInput(
-                noteOn: { semi in store.noteOn(store.baseOctaveC + semi) },
-                noteOff: { semi in store.noteOff(store.baseOctaveC + semi) },
-                shiftOctave: { delta in
-                    store.panic()
-                    store.baseOctaveC = max(24, min(96, store.baseOctaveC + delta * 12))
-                }
+                noteOn: { semi in store.noteOn(store.effectiveKeyboardBaseC + semi) },
+                noteOff: { semi in store.noteOff(store.effectiveKeyboardBaseC + semi) },
+                shiftOctave: { delta in store.shiftKeyboardOctave(delta) }
             )
             .frame(height: 0)
         }
@@ -122,13 +123,36 @@ public struct ContentView: View {
         .background(.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
     }
 
-    private var keyboardHint: some View {
+    /// Hint row plus hide/show control. When the keyboard is hidden this stays compact so
+    /// the owner can bring it back without a menu hunt; the piano itself is not drawn.
+    private var keyboardChrome: some View {
         HStack {
-            Text("Playing **\(store.currentPresetName)** — keys **A–K** / **W E T Y U**, **Z/X** octave, or click below.")
-                .font(.footnote).foregroundStyle(.secondary)
+            if store.showOnscreenKeyboard {
+                Text("Playing **\(store.currentPresetName)** — keys **A–K** / **W E T Y U**, **Z/X** octave, or click below.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            } else {
+                Text("Keyboard hidden — keys **A–K** / **W E T Y U** and **Z/X** still work.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
             Spacer()
-            Button { store.panic() } label: { Label("Stop sound", systemImage: "stop.circle") }
-                .controlSize(.small).help("Silence all notes (⌘.)")
+            Button {
+                store.showOnscreenKeyboard.toggle()
+            } label: {
+                Label(
+                    store.showOnscreenKeyboard ? "Hide keyboard" : "Show keyboard",
+                    systemImage: store.showOnscreenKeyboard
+                        ? "keyboard.chevron.compact.down"
+                        : "keyboard"
+                )
+            }
+            .controlSize(.small)
+            .help(store.showOnscreenKeyboard
+                  ? "Hide the on-screen keyboard and give space to the roll"
+                  : "Show the on-screen keyboard")
+            if store.showOnscreenKeyboard {
+                Button { store.panic() } label: { Label("Stop sound", systemImage: "stop.circle") }
+                    .controlSize(.small).help("Silence all notes (⌘.)")
+            }
         }
     }
 }
