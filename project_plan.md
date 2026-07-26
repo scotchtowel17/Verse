@@ -204,3 +204,62 @@ actually draws something.
    group move, copy/paste, bounded pitch window, one undo entry per gesture.
 
 The target is that on a fresh launch, adding a note takes exactly one action: double-click.
+
+---
+
+# Phase X — Visual polish, colour identity, and frequent-action buttons
+
+Owner: more polished and professional but still minimalist; use colour to differentiate and
+identify functions and tracks; add buttons for actions done often; look to other software.
+
+Audit first. Several things read as "aesthetics" but are missing functionality:
+
+- **`quantizeNotes` has no UI at all.** It exists as a model helper and an AI op only, so a
+  user cannot make their own notes line up by hand. For a songwriting app that is a core action,
+  not a nicety.
+- **`duplicateClip` has no UI**, also AI-only.
+- **`splitClip` is Cmd-E only**, no button or visible affordance.
+- **Redo has no button**, menu only.
+- **No timeline zoom.** `beatWidth` is a fixed constant, so a long song cannot be seen whole and
+  fine edits cannot be made close up.
+- **No per-track colour.** `Track` has no colour field.
+
+## Step X1 — Track colour identity — PENDING
+
+Every serious DAW gives each track a colour and carries it through the whole UI. That is the
+single biggest "know what I'm looking at" win and it is what the owner is asking for.
+
+1. Add `colorIndex: Int` to `Track` (index into a fixed palette, not a raw hex string, so
+   themes stay coherent). **Bump `Schema.current` to 3** with an additive migration; existing
+   tracks get assigned by position. The v1-to-v2 migration proved the chain works, so this is
+   now routine.
+2. A palette of **8 colours**, chosen to stay legible and distinct in both light and dark mode
+   and to remain distinguishable for common colour-vision deficiencies. Assign round-robin on
+   track creation.
+3. Carry the colour through: the track row's accent strip, the arrangement lane header, the
+   clips in that lane, the notes in the piano roll when editing that track, and the track meter.
+   A clip and its notes must read as belonging to the same track at a glance.
+4. Let the user change a track's colour from the track row.
+5. **Semantic colour stays separate from identity colour.** Record armed and recording are red,
+   playing is the accent, selection is the system accent, refusal or error is the standard
+   warning colour. Never overload a track's identity colour to mean a state.
+6. Keep it minimalist: colour is a thin accent strip and a clip fill, not large blocks of
+   saturated colour. Text stays high-contrast on every palette entry in both appearances.
+
+## Step X2 — Action bar, zoom, and exposing hidden actions — PENDING
+
+1. A compact action bar for things done constantly, grouped and icon-led with tooltips:
+   **undo, redo, split at playhead, duplicate, delete, quantize**. Minimalist: one row, no
+   labels beyond tooltips, disabled rather than hidden when not applicable.
+2. **Quantize needs a real UI**, since it currently has none. Quantize the selected notes (or
+   the whole clip when nothing is selected) to the current snap value, as one undo entry
+   ("Quantize Notes"). This closes a genuine functional gap.
+3. **Duplicate and split** get buttons, working on the current selection in whichever surface
+   has focus, consistent with the existing Cmd-C/V focus routing.
+4. **Timeline zoom.** Replace the fixed `beatWidth` with a zoom level shared by the arrangement
+   and the roll, since they must stay aligned. Zoom in/out buttons plus fit-to-content. The
+   shared beat-to-x mapping already exists, so zoom belongs there and nowhere else.
+5. Buttons must reflect state honestly: disabled when the action cannot apply, with a tooltip
+   saying why, consistent with the V4 rule that a user never asks for something and gets silence.
+
+Keep every existing behaviour and shortcut working. No regressions in the shared time axis.
