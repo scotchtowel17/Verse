@@ -171,3 +171,36 @@ working plan.
    deletion or rewrite of history; defect write-ups preserved).
 3. Keep durable engineering lessons prominent here rather than only in the archive.
 )
+
+## Step W1 — The piano roll should be obvious, and drawing should not require a clip first — PENDING
+
+Owner: "It isn't intuitive for me to get to or access the piano roll. I should be able to add
+notes manually without having to record."
+
+The capability already exists: `openPianoRoll(forTrack:)` creates an empty clip when a track has
+none. The problem is the mental model and the discoverability. The roll is bound to a **clip**,
+`showPianoRoll` defaults to false so the pane starts collapsed, and on a brand-new project the
+only way in is a small unlabelled icon in the track row. The user has to know that a clip must
+exist before notes can exist, which is an implementation detail they should never meet.
+
+Invert it: **the roll edits the active track.** A clip is created on demand when the user
+actually draws something.
+
+1. **The roll pane is expanded by default**, not collapsed, and shows the active instrument
+   track's grid immediately on a brand-new project. It should be visible without the user
+   discovering anything.
+2. **The roll follows the active track.** Selecting a track row makes the roll edit that track.
+   The roll header names the track and, when relevant, the clip within it.
+3. **Drawing works with no clip present.** Double-clicking an empty grid on a track with no MIDI
+   clip creates a clip positioned to contain that beat and adds the note, as ONE undo entry
+   ("Add Note"), not two. The user should never have to create a clip as a separate act.
+4. When the active track has several MIDI clips, the roll edits the one under the playhead if
+   there is one, otherwise the nearest earlier one, otherwise the first. Clicking a clip in the
+   arrangement still selects it explicitly and wins over that default.
+5. **The empty state must say what to do**, in plain language, for example "Double-click to add
+   a note." Not a bare grid.
+6. An audio track cannot be edited in the roll: say so plainly rather than showing a dead grid.
+7. Keep every Phase S and T behaviour: the shared time axis, double-click to add, marquee,
+   group move, copy/paste, bounded pitch window, one undo entry per gesture.
+
+The target is that on a fresh launch, adding a note takes exactly one action: double-click.
