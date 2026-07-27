@@ -25,6 +25,21 @@ struct KeyboardInput: NSViewRepresentable {
     }
 }
 
+/// Rules for musical typing that do not depend on AppKit view state, so they are testable.
+public enum MusicalTyping {
+    /// Whether a key event is a menu/app shortcut rather than musical typing.
+    ///
+    /// This is load-bearing, not tidiness. macOS does not deliver `keyUp` while Command is
+    /// held, so a Command chord reaching the note-on path left a note sounding forever with
+    /// no matching note-off: an audible drone plus a stuck key on the on-screen keyboard,
+    /// clearable only by "Stop sound". Reproduced with Cmd-G. Control and Option are shortcut
+    /// modifiers too and have no musical meaning here, so they are excluded with it. Shift is
+    /// not: it does not suppress key-up.
+    public static func isShortcutChord(_ modifiers: NSEvent.ModifierFlags) -> Bool {
+        !modifiers.intersection([.command, .control, .option]).isEmpty
+    }
+}
+
 final class KeyCaptureView: NSView {
     var noteOn: ((Int) -> Void)?
     var noteOff: ((Int) -> Void)?
@@ -46,6 +61,8 @@ final class KeyCaptureView: NSView {
 
     override func keyDown(with event: NSEvent) {
         if event.isARepeat { return } // hold = sustained note, not retrigger
+        // Never claim a shortcut chord: Cmd-Z must reach Undo, not shift the octave.
+        guard !MusicalTyping.isShortcutChord(event.modifierFlags) else { return super.keyDown(with: event) }
         guard let ch = event.charactersIgnoringModifiers?.lowercased().first else { return super.keyDown(with: event) }
         if ch == "z" { shiftOctave?(-1); return }
         if ch == "x" { shiftOctave?(1); return }
@@ -53,6 +70,7 @@ final class KeyCaptureView: NSView {
     }
 
     override func keyUp(with event: NSEvent) {
+        guard !MusicalTyping.isShortcutChord(event.modifierFlags) else { return super.keyUp(with: event) }
         guard let ch = event.charactersIgnoringModifiers?.lowercased().first else { return super.keyUp(with: event) }
         if let semi = Self.semitone[ch] { noteOff?(semi) } else { super.keyUp(with: event) }
     }
