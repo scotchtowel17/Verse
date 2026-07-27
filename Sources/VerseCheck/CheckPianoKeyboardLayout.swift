@@ -277,4 +277,86 @@ func runPianoKeyboardLayoutChecks(_ tk: TestKit) {
             )
         }
     }
+
+    // MARK: - Musical ceiling (C8): base always a C, rendered keys never above 108
+
+    tk.suite("musical ceiling: clampedBaseC is always a C and highest ≤ C8") {
+        let prefs = [0, 24, 48, 60, 72, 127, -50, 500]
+        let musicalMax = PianoKeyboardLayout.musicalMaxPitch
+        for octaves in minOct...maxOct {
+            for preferred in prefs {
+                let base = PianoKeyboardLayout.clampedBaseC(preferred, octaves: octaves)
+                tk.expect(base % 12 == 0,
+                          "clampedBaseC(\(preferred), octaves:\(octaves)) is a C (got \(base))")
+                tk.expect(base >= 0,
+                          "clampedBaseC(\(preferred), octaves:\(octaves)) ≥ 0 (got \(base))")
+                let high = PianoKeyboardLayout.highestPitch(baseC: base, octaves: octaves)
+                tk.expect(high <= musicalMax,
+                          "highestPitch for base \(base) octaves \(octaves) is \(high) ≤ \(musicalMax)")
+            }
+        }
+    }
+
+    tk.suite("musical ceiling: 7-octave span is C1...C8 (24...108)") {
+        let n = 7
+        tk.expectEqual(n, maxOct, "maxOctaves is 7 so this is the hard-cap case")
+        // Preferred middle C (60) must not be discarded into a non-C; it clamps to the
+        // highest C that still ends at C8.
+        let base = PianoKeyboardLayout.clampedBaseC(60, octaves: n)
+        let high = PianoKeyboardLayout.highestPitch(baseC: base, octaves: n)
+        tk.expectEqual(base, 24,
+                       "7-octave rendered span starts at C1 (24), not G (43) or raw 60 (got \(base))")
+        tk.expectEqual(high, 108,
+                       "7-octave rendered span ends at C8 (108), not G9 (127) (got \(high))")
+        tk.expectEqual(PianoKeyboardLayout.maxBaseC(octaves: n), 24,
+                       "maxBaseC(7) is C1 so the full span is C1...C8")
+        tk.expect(
+            base == 24 && high == 108,
+            "7-octave rendered span is C1...C8 (24...108); got \(base)...\(high)"
+        )
+    }
+
+    tk.suite("musical ceiling: shiftedBaseC never exceeds C8 or goes below 0") {
+        let musicalMax = PianoKeyboardLayout.musicalMaxPitch
+        for octaves in minOct...maxOct {
+            for start in [0, 24, 48, 60, 72, 96, 108, 120, 127, -12, 500] {
+                let origin = PianoKeyboardLayout.clampedBaseC(start, octaves: octaves)
+                for delta in -10...10 {
+                    let next = PianoKeyboardLayout.shiftedBaseC(origin, deltaOctaves: delta, octaves: octaves)
+                    tk.expect(next >= 0,
+                              "shiftedBaseC base \(next) ≥ 0 (start \(start), delta \(delta), oct \(octaves))")
+                    let high = PianoKeyboardLayout.highestPitch(baseC: next, octaves: octaves)
+                    tk.expect(high <= musicalMax,
+                              "shifted highest \(high) ≤ \(musicalMax) (start \(start), delta \(delta), oct \(octaves))")
+                    tk.expect(next % 12 == 0,
+                              "shifted base \(next) is a C (start \(start), delta \(delta), oct \(octaves))")
+                }
+            }
+        }
+    }
+
+    tk.suite("musical ceiling: white/black pitches are musical and white keys are real whites") {
+        let musicalMax = PianoKeyboardLayout.musicalMaxPitch
+        let whitePC: Set<Int> = [0, 2, 4, 5, 7, 9, 11]
+        let prefs = [0, 24, 48, 60, 72, 127, -50, 500]
+        for octaves in minOct...maxOct {
+            let bases = Set(prefs.map { PianoKeyboardLayout.clampedBaseC($0, octaves: octaves) })
+                .union([PianoKeyboardLayout.minBaseC(octaves: octaves),
+                        PianoKeyboardLayout.maxBaseC(octaves: octaves)])
+            for base in bases {
+                let whites = PianoKeyboardLayout.whitePitches(baseC: base, octaves: octaves)
+                let blacks = PianoKeyboardLayout.blackPitches(baseC: base, octaves: octaves)
+                for p in whites {
+                    tk.expect(p >= 0 && p <= musicalMax,
+                              "white pitch \(p) in 0...\(musicalMax) (base \(base), oct \(octaves))")
+                    tk.expect(whitePC.contains(p % 12),
+                              "white pitch \(p) is a real white key (pc \(p % 12); base \(base), oct \(octaves))")
+                }
+                for p in blacks {
+                    tk.expect(p >= 0 && p <= musicalMax,
+                              "black pitch \(p) in 0...\(musicalMax) (base \(base), oct \(octaves))")
+                }
+            }
+        }
+    }
 }

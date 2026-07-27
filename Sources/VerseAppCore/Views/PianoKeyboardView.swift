@@ -9,16 +9,24 @@ import SwiftUI
 /// lands near `targetWhiteKeyWidth` instead of stretching two hard-coded octaves across
 /// the whole window.
 ///
-/// Pitch range (Y1): every rendered key must land in MIDI 0...127. The leftmost C is derived
-/// from the preferred base and the octave count so the trailing C never exceeds 127; Z/X
-/// shift is clamped the same way so it stops at the ends instead of producing dead keys.
+/// Pitch range (Y1): every rendered key must land in MIDI 0...127. The on-screen keyboard
+/// further caps at C8 (`musicalMaxPitch` = 108), the top of an 88-key piano. The leftmost C
+/// is derived from the preferred base and the octave count so the trailing C never exceeds
+/// that musical ceiling and is always a real C. Z/X shift is clamped the same way so it
+/// stops at the ends instead of producing dead or shrill keys.
 public enum PianoKeyboardLayout {
     /// White-key width that reads correctly on screen (~real white keys are ~23mm).
     public static let targetWhiteKeyWidth: CGFloat = 26
 
-    /// MIDI pitch floor / ceiling for note numbers.
+    /// MIDI pitch floor / ceiling for note numbers (MIDI-validity clamp).
     public static let midiMinPitch = 0
     public static let midiMaxPitch = 127
+
+    /// Musical ceiling for the rendered keyboard: C8, the top of an 88-key piano.
+    /// MIDI allows up to 127, but anything above C8 is not musically useful (shrill or
+    /// inaudible). Governs the rendered keyboard only; `midiMinPitch`/`midiMaxPitch`
+    /// remain the MIDI-validity clamp.
+    public static let musicalMaxPitch = 108
 
     /// Most octaves that fit when the left edge is C0 (pitch 0): floor(127/12).
     public static let maxOctavesFittingMIDI = midiMaxPitch / 12
@@ -58,22 +66,32 @@ public enum PianoKeyboardLayout {
         baseC + pitchSpan(octaves: octaves)
     }
 
-    /// Lowest allowed leftmost C (MIDI floor).
+    /// Lowest allowed leftmost C (C0 / MIDI floor). Always a C (multiple of 12).
     public static func minBaseC(octaves: Int = 0) -> Int {
         _ = octaves
         return midiMinPitch
     }
 
-    /// Highest allowed leftmost C so `baseC + octaves*12` stays ≤ 127.
+    /// Highest allowed leftmost C so `baseC + octaves*12` stays ≤ `musicalMaxPitch` (C8),
+    /// snapped down to a C (multiple of 12). Never negative. White/black layout assumes
+    /// `baseC` is a C; returning a non-C (as the old MIDI-only formula did at 7 octaves)
+    /// mislabels every key.
     public static func maxBaseC(octaves: Int) -> Int {
-        max(midiMinPitch, midiMaxPitch - pitchSpan(octaves: octaves))
+        let raw = musicalMaxPitch - pitchSpan(octaves: octaves)
+        // Snap down to a C (multiple of 12). Integer division truncates toward zero;
+        // for non-negative raw that is floor. Never return below the MIDI floor.
+        let asC = (raw / 12) * 12
+        return max(midiMinPitch, asC)
     }
 
-    /// Clamp a preferred leftmost C so every key of an `octaves` keyboard is in 0...127.
+    /// Clamp a preferred leftmost pitch so every key of an `octaves` keyboard stays within
+    /// the musical render range, and so the result is always a C (multiple of 12).
     public static func clampedBaseC(_ preferred: Int, octaves: Int) -> Int {
         let lo = minBaseC(octaves: octaves)
         let hi = maxBaseC(octaves: octaves)
-        return min(hi, max(lo, preferred))
+        // Floor preferred to a C before clamping (layout treats baseC as C).
+        let preferredC = (preferred / 12) * 12
+        return min(hi, max(lo, preferredC))
     }
 
     /// Z/X octave shift: move by `deltaOctaves` twelfths, then clamp for the rendered span.
@@ -184,7 +202,8 @@ public enum PianoKeyboardLayout {
 /// so it never depends on measured width and cannot form a layout cycle.
 ///
 /// `preferredBaseC` is the user's Z/X preference. The left edge actually drawn is
-/// `clampedBaseC(preferredBaseC, octaves:)` so the whole span stays inside MIDI 0...127.
+/// `clampedBaseC(preferredBaseC, octaves:)` so the whole span stays inside the musical
+/// render range (C0...C8) and every key stays inside MIDI 0...127.
 struct PianoKeyboardView: View {
     /// Preferred MIDI pitch of the leftmost C (before range clamp).
     let preferredBaseC: Int
