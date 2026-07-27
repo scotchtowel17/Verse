@@ -611,6 +611,26 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
                   "a zero-length clip holds no notes")
     }
 
+    tk.suite("Musical typing ignores shortcut chords (stuck-note guard)") {
+        // Live defect: with the roll collapsed, Cmd-G played G and left it sounding forever.
+        // macOS does not deliver keyUp while Command is held, so the note-off never arrived:
+        // an audible drone plus a stuck key, clearable only by "Stop sound". Reproduced by
+        // pressing Cmd-G and watching a fourth key latch on the on-screen keyboard.
+        tk.expect(MusicalTyping.isShortcutChord([.command]), "Command is a shortcut chord")
+        tk.expect(MusicalTyping.isShortcutChord([.control]), "Control is a shortcut chord")
+        tk.expect(MusicalTyping.isShortcutChord([.option]), "Option is a shortcut chord")
+        tk.expect(MusicalTyping.isShortcutChord([.command, .shift]),
+                  "Command with Shift is still a shortcut chord")
+        tk.expect(MusicalTyping.isShortcutChord([.command, .option]),
+                  "combined shortcut modifiers are a shortcut chord")
+
+        // Shift does not suppress key-up, so it must not disable musical typing.
+        tk.expect(!MusicalTyping.isShortcutChord([]), "an unmodified key plays")
+        tk.expect(!MusicalTyping.isShortcutChord([.shift]), "Shift alone still plays")
+        tk.expect(!MusicalTyping.isShortcutChord([.capsLock]), "Caps Lock still plays")
+        tk.expect(!MusicalTyping.isShortcutChord([.function]), "Function alone still plays")
+    }
+
     tk.suite("Piano roll: fit pitch frames every note in the clip") {
         // Zoom alone is anchored on the window centre, so music sitting off-centre walks out
         // of view as you zoom in. Observed live: notes at pitch 66 vanished when the window
