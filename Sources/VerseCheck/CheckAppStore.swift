@@ -577,6 +577,93 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
                   "default band is at least ~2 octaves plus the pinned toolbar")
     }
 
+    tk.suite("Piano roll: the editor accepts exactly the notes the transport will play") {
+        // Live defect: double-clicking past the clip's right edge added a note anyway. The
+        // clip-start guard existed, the clip-end guard did not, so the note was drawn on the
+        // grid and then dropped by Transport.planMIDINotes at playback: visible, silent, and
+        // nothing on screen to explain it. The two boundaries must agree, so this asserts
+        // them against each other rather than restating one of them.
+        let clipLength = 16.0
+        let candidates: [Double] = [-1, -0.001, 0, 0.5, 8, 15.5, 15.999, 16, 16.001, 20, 100]
+
+        for start in candidates {
+            let editorAccepts = PianoRollLayout.noteFitsInClip(
+                startBeat: start, clipLengthBeats: clipLength)
+            let note = Note(startBeat: max(0, start), lengthBeats: 1, pitch: 60, velocity: 96)
+            let planned = Transport.planMIDINotes(
+                notes: [note],
+                clipStartBeat: 0,
+                clipLengthBeats: clipLength,
+                playFromBeat: 0,
+                secondsPerBeat: 0.5
+            )
+            // Negative starts are rejected by the editor before they can reach the model, so
+            // only compare on the range the model can actually hold.
+            if start >= 0 {
+                tk.expectEqual(editorAccepts, !planned.isEmpty,
+                               "start \(start): editor and transport agree on the clip end")
+            } else {
+                tk.expect(!editorAccepts, "start \(start): a negative start is rejected")
+            }
+        }
+
+        tk.expect(!PianoRollLayout.noteFitsInClip(startBeat: 0, clipLengthBeats: 0),
+                  "a zero-length clip holds no notes")
+    }
+
+    tk.suite("Piano roll: fit pitch frames every note in the clip") {
+        // Zoom alone is anchored on the window centre, so music sitting off-centre walks out
+        // of view as you zoom in. Observed live: notes at pitch 66 vanished when the window
+        // narrowed to G#3-F4 around a centre of 60. The assertion that matters is the
+        // observable one: after a fit, every note is inside the range that gets drawn.
+        func note(_ pitch: Int) -> Note {
+            Note(startBeat: 0, lengthBeats: 1, pitch: pitch, velocity: 96)
+        }
+
+        let cases: [(name: String, pitches: [Int], pane: CGFloat)] = [
+            ("single note", [64], 300),
+            ("narrow cluster", [64, 66], 300),
+            ("one octave", [60, 72], 300),
+            ("wide spread", [24, 100], 300),
+            ("full range", [0, 127], 300),
+            ("short pane", [60, 67], 90),
+            ("tall pane", [55, 59], 900),
+            ("unsorted input", [80, 40, 61], 300),
+        ]
+
+        for c in cases {
+            let notes = c.pitches.map(note)
+            guard let fit = PianoRollLayout.fitPitch(notes: notes, paneHeight: c.pane) else {
+                tk.expect(false, "\(c.name): fit returned nil for a non-empty clip")
+                continue
+            }
+            let range = PianoRollLayout.visiblePitchRange(
+                focusPitch: fit.focusPitch, paneHeight: c.pane, rowHeight: fit.rowHeight)
+            // A span wider than paneHeight / minRowHeight physically cannot be shown at a
+            // readable row height. The contract is: frame everything when that is possible,
+            // and otherwise bottom out at the minimum row height still centred on the music.
+            let atMinimum = fit.rowHeight <= PianoRollLayout.minRowHeight + 0.001
+            if atMinimum {
+                let centre = (c.pitches.min()! + c.pitches.max()!) / 2
+                tk.expect(range.contains(centre),
+                          "\(c.name): an unfittable span still centres on the music")
+            } else {
+                for pitch in c.pitches {
+                    tk.expect(range.contains(pitch),
+                              "\(c.name): pitch \(pitch) is inside the fitted range \(range)")
+                }
+            }
+            tk.expect(fit.rowHeight >= PianoRollLayout.minRowHeight
+                        && fit.rowHeight <= PianoRollLayout.maxRowHeight,
+                      "\(c.name): fitted row height stays within the zoom limits")
+        }
+
+        tk.expect(PianoRollLayout.fitPitch(notes: [], paneHeight: 300) == nil,
+                  "an empty clip has nothing to fit")
+        tk.expect(PianoRollLayout.fitPitch(notes: [note(60)], paneHeight: 0) == nil,
+                  "an unmeasured pane has nothing to fit")
+    }
+
     tk.suite("Piano roll: the pitch window does not move while the user edits notes") {
         // Live defect: the window centre was the mean pitch of the open clip, recomputed every
         // render, so each added note shifted the grid out from under the pointer (observed as
@@ -1300,7 +1387,9 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         tk.expect(!store.isPlaying, "still stopped after rewind")
     }
 
-    tk.suite("AppStore S1: scrub while playing stops and sets playhead") {
+    tk.suite("AppStore S1: scrub while playing keeps playing from the new position") {
+        // Seeking mid-playback used to stop the transport, so repositioning while listening
+        // always cost a second click to start again. Playback now follows the playhead.
         let (store, dir) = makeTestStore()
         defer { try? FileManager.default.removeItem(at: dir) }
 
@@ -1311,9 +1400,36 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         store.startPlayback()
         tk.expect(store.isPlaying, "playing before scrub")
         store.scrubPlayhead(to: 7.25)
-        tk.expect(!store.isPlaying, "scrub stops playback")
+        tk.expect(store.isPlaying, "scrub keeps playing")
         tk.expectEqual(store.playheadBeat, 7.25, "scrubbed position held")
-        tk.expectEqual(store.playbackBeat, 7.25, "draw position matches scrub")
+        // Playback resumes from the scrubbed beat and can only have advanced from there.
+        // No upper bound: that would measure machine load, not behaviour.
+        tk.expect((store.playbackBeat ?? -1) >= 7.25 - 0.001,
+                  "draw position resumes at or after the scrubbed beat")
+        store.pausePlayback()
+
+        // Scrubbing while stopped stays stopped.
+        store.scrubPlayhead(to: 3)
+        tk.expect(!store.isPlaying, "scrub while stopped does not start playback")
+        tk.expectEqual(store.playheadBeat, 3, "scrubbed position held while stopped")
+    }
+
+    tk.suite("AppStore S1: scrub while recording ends the take rather than splicing it") {
+        // A take is a continuous performance. Seeking mid-record stops, so a recording is
+        // never silently stitched together across a jump.
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.startEngineIfNeeded()
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 32,
+                        midiNotes: [Note(startBeat: 0, lengthBeats: 16, pitch: 60, velocity: 100)])
+        store.project.tracks[0].clips = [clip]
+        store.startPlayback()
+        store.isRecording = true
+        store.scrubPlayhead(to: 5)
+        tk.expect(!store.isPlaying, "scrub while recording stops playback")
+        tk.expectEqual(store.playheadBeat, 5, "scrubbed position still held")
+        store.isRecording = false
     }
 
     tk.suite("AppStore S1: transport actions never record undo") {

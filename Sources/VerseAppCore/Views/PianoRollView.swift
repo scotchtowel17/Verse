@@ -462,6 +462,14 @@ struct PianoRollEmbeddedView: View {
             .disabled(store.pianoRollRowHeight <= PianoRollLayout.minRowHeight + 0.01)
             .help("Show more pitches (shorter rows)")
             Button {
+                fitPitchToNotes()
+            } label: {
+                Image(systemName: "arrow.down.right.and.arrow.up.left")
+            }
+            .controlSize(.small)
+            .disabled(notes.isEmpty)
+            .help("Fit pitch window to the notes in this clip")
+            Button {
                 store.zoomPianoRollPitchIn()
             } label: {
                 Image(systemName: "plus")
@@ -1182,6 +1190,15 @@ struct PianoRollEmbeddedView: View {
             return
         }
         let start = max(0, PianoRollLayout.snap(localRaw, to: snapBeats))
+        // Right edge, mirroring the clip-start guard above. Transport drops any note starting
+        // at or past the clip end, so a note placed out there is visible on the grid and then
+        // silent on playback with nothing to explain why. Skipped when there is no clip yet:
+        // that is the create-a-clip-under-the-pointer path.
+        if let openClip = clip,
+           !PianoRollLayout.noteFitsInClip(startBeat: start, clipLengthBeats: openClip.lengthBeats) {
+            store.statusMessage = "Notes must sit inside the clip’s time range."
+            return
+        }
         let length = PianoRollLayout.newNoteLengthBeats(snapBeats: snapBeats,
                                                         lastGridBeats: lastGridSnapBeats)
         if let id = store.pianoRollAddNote(pitch: pitch, startBeat: start, lengthBeats: length) {
@@ -1199,6 +1216,16 @@ struct PianoRollEmbeddedView: View {
         let ids = Array(store.selectedNoteIDs)
         store.pianoRollDeleteNotes(ids: ids)
         store.selectedNoteIDs = []
+    }
+
+    /// Frame every note of the open clip: re-centre the latched window and set row height.
+    /// Clears pitch navigation so the fitted centre is what the window actually shows.
+    private func fitPitchToNotes() {
+        guard let fit = PianoRollLayout.fitPitch(notes: notes, paneHeight: pitchPaneHeight)
+        else { return }
+        latchedFocusPitch = fit.focusPitch
+        pitchNavOffset = 0
+        store.setPianoRollRowHeight(fit.rowHeight)
     }
 
     private func copySelection() {
@@ -1456,6 +1483,36 @@ public enum PianoRollLayout {
     public static func snap(_ beats: Double, to snapBeats: Double) -> Double {
         guard snapBeats > 0 else { return beats }
         return (beats / snapBeats).rounded() * snapBeats
+    }
+
+    /// Whether a note starting at `startBeat` is inside a clip of `clipLengthBeats`.
+    ///
+    /// This is deliberately the same boundary `Transport.planMIDINotes` uses to decide what
+    /// sounds. Anything the editor accepts must be something the transport will play; a note
+    /// the grid shows but playback drops is a silent failure with nothing to explain it.
+    public static func noteFitsInClip(startBeat: Double, clipLengthBeats: Double) -> Bool {
+        startBeat >= 0 && startBeat < clipLengthBeats
+    }
+
+    /// Extra rows of headroom left above and below the music when fitting the pitch window.
+    public static let fitPitchPadding = 1
+
+    /// Centre pitch and row height that frame every note of `notes` in a pane of `paneHeight`.
+    ///
+    /// The pitch axis mirrors the timeline's "Fit timeline to content": zoom alone is anchored
+    /// on the window centre, so music that sits off-centre walks out of view as you zoom in,
+    /// and octave stepping is the only way back. Returns nil when there is nothing to frame.
+    public static func fitPitch(
+        notes: [Note],
+        paneHeight: CGFloat
+    ) -> (focusPitch: Int, rowHeight: CGFloat)? {
+        guard !notes.isEmpty, paneHeight > 0 else { return nil }
+        let pitches = notes.map(\.pitch)
+        guard let lowest = pitches.min(), let highest = pitches.max() else { return nil }
+        let span = highest - lowest + 1 + 2 * fitPitchPadding
+        let focus = (lowest + highest) / 2
+        let rowHeight = clampedRowHeight(paneHeight / CGFloat(span))
+        return (focus, rowHeight)
     }
 
     /// Whether a change of open clip should re-centre the pitch window on the new clip's music.
