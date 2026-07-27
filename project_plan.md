@@ -641,10 +641,10 @@ worker (grok), verify against git diff + VerseCheck + the screen, then commit.
 | AC2 | Velocity drag mode (V toggle) | PENDING |
 | AC3 | Loop region create / move / resize (option-drag ruler) | PENDING |
 | AC4 | Loop playback wrap-around | PENDING |
-| AC5 | Clip drag between tracks in the arrangement | PENDING |
-| AC6 | Clip resize in the arrangement | PENDING |
-| AC7 | Clip split at playhead (scissors) | PENDING |
-| AC8 | Clip duplicate | PENDING |
+| AC5 | Clip drag between tracks in the arrangement | DONE (headless: move preserves notes, kind mismatch rejected) |
+| AC6 | Clip resize in the arrangement | DONE (headless: resize; non-destructive trim contract pinned) |
+| AC7 | Clip split at playhead (scissors) | DONE (headless: split accounts for every note, fresh ids) |
+| AC8 | Clip duplicate | DONE (headless: fresh clip AND note ids) |
 | AC9 | Track menu: rename / delete | PENDING |
 | AC10 | Undo/redo deep stack, redo invalidation after a new edit | DONE (headless: deep stack + redo invalidation) |
 | AC11 | Save / Open .verse package round trip | DONE (headless: save/open round trip) |

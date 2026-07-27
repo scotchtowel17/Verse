@@ -470,4 +470,694 @@ private func runACProbeChecksOnMain(_ tk: TestKit) {
         tk.expectEqual(backAudClip?.startBeat, 0, "audio clip startBeat")
         tk.expectEqual(backAudClip?.lengthBeats, 16, "audio clip lengthBeats")
     }
+
+    // MARK: - AC5 moveClipToTrack
+
+    tk.suite("AC5: moveClipToTrack preserves notes; rejects kind mismatch and unknown track") {
+        // Model path: MIDI clip with several notes, two instrument tracks + one audio track.
+        var project = Project.newUntitled()
+        project.tracks.append(Track(kind: .instrument, name: "Lead", instrument: .grandPiano))
+        project.tracks.append(Track(kind: .audio, name: "Vox"))
+        let n1 = Note(startBeat: 0.0, lengthBeats: 1.0, pitch: 60, velocity: 100)
+        let n2 = Note(startBeat: 1.5, lengthBeats: 0.5, pitch: 64, velocity: 90)
+        let n3 = Note(startBeat: 2.25, lengthBeats: 1.75, pitch: 67, velocity: 80)
+        let midi = Clip(kind: .midi, name: "Phrase", startBeat: 4, lengthBeats: 8,
+                        midiNotes: [n1, n2, n3])
+        let audio = Clip(kind: .audio, name: "Take", startBeat: 0, lengthBeats: 4,
+                         mediaFile: "take-ac5.caf")
+        project.tracks[0].clips = [midi]
+        project.tracks[2].clips = [audio]
+        let midiID = midi.id
+        let audioID = audio.id
+        let beforeNotes = [n1, n2, n3]
+
+        // Happy path: MIDI → other instrument track; notes and clip id fully preserved.
+        try project.moveClip(id: midiID, toTrackIndex: 1, startBeat: 12)
+        tk.expectEqual(project.tracks[0].clips.count, 0, "MIDI left source instrument track")
+        tk.expectEqual(project.tracks[1].clips.count, 1, "MIDI on dest instrument track")
+        let moved = project.tracks[1].clips[0]
+        tk.expectEqual(moved.id, midiID, "clip id preserved on move")
+        tk.expectEqual(moved.startBeat, 12, "startBeat updated on cross-track move")
+        tk.expectEqual(moved.lengthBeats, 8, "lengthBeats unchanged on move")
+        let afterNotes = moved.midiNotes ?? []
+        tk.expectEqual(afterNotes.count, beforeNotes.count, "note count preserved")
+        for i in beforeNotes.indices {
+            tk.expectEqual(afterNotes[i].id, beforeNotes[i].id, "note \(i) id preserved")
+            tk.expectEqual(afterNotes[i].pitch, beforeNotes[i].pitch, "note \(i) pitch preserved")
+            tk.expectEqual(afterNotes[i].startBeat, beforeNotes[i].startBeat,
+                           "note \(i) startBeat preserved")
+            tk.expectEqual(afterNotes[i].lengthBeats, beforeNotes[i].lengthBeats,
+                           "note \(i) lengthBeats preserved")
+            tk.expectEqual(afterNotes[i].velocity, beforeNotes[i].velocity,
+                           "note \(i) velocity preserved")
+        }
+
+        // Incompatible: MIDI onto audio track — throw, no partial mutation.
+        let fingerprintBeforeReject = projectFingerprint(project)
+        tk.expectThrows("MIDI onto audio track rejected") {
+            try project.moveClip(id: midiID, toTrackIndex: 2, startBeat: 0)
+        }
+        tk.expectEqual(projectFingerprint(project), fingerprintBeforeReject,
+                       "MIDI→audio reject leaves project unchanged")
+        tk.expectEqual(project.tracks[1].clips.count, 1, "MIDI still on instrument after reject")
+        tk.expectEqual(project.tracks[2].clips.count, 1, "audio track still only has audio clip")
+
+        // Incompatible: audio onto instrument track.
+        let beforeAudioReject = projectFingerprint(project)
+        tk.expectThrows("audio onto instrument track rejected") {
+            try project.moveClip(id: audioID, toTrackIndex: 0, startBeat: 0)
+        }
+        tk.expectEqual(projectFingerprint(project), beforeAudioReject,
+                       "audio→instrument reject leaves project unchanged")
+        tk.expectEqual(project.tracks[2].clips[0].id, audioID, "audio clip id stable after reject")
+
+        // Unknown track index (out of bounds) — trackNotFound, no mutation.
+        let beforeUnknown = projectFingerprint(project)
+        tk.expectThrows("unknown track index rejected") {
+            try project.moveClip(id: midiID, toTrackIndex: 99, startBeat: 0)
+        }
+        tk.expectEqual(projectFingerprint(project), beforeUnknown,
+                       "unknown track reject leaves project unchanged")
+        tk.expectEqual(project.tracks[1].clips[0].id, midiID, "clip still on dest after unknown track")
+
+        // AppStore path: arrangementMoveClips moves MIDI to the other instrument track
+        // without losing notes; kind mismatch is a whole-update no-op.
+        let (store, dir) = makeACStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        store.addInstrumentTrack()
+        store.addAudioTrack()
+        let sn1 = Note(startBeat: 0.25, lengthBeats: 1.0, pitch: 62, velocity: 110)
+        let sn2 = Note(startBeat: 2.0, lengthBeats: 0.75, pitch: 69, velocity: 95)
+        let sClip = Clip(kind: .midi, name: "StorePhrase", startBeat: 2, lengthBeats: 6,
+                         midiNotes: [sn1, sn2])
+        store.project.tracks[0].clips = [sClip]
+        let sID = sClip.id
+        let destInst = 1
+        store.beginArrangementGesture(name: "Move Clip")
+        store.arrangementMoveClips([(id: sID, startBeat: 8, trackIndex: destInst)])
+        store.endArrangementGesture()
+        tk.expectEqual(store.project.tracks[0].clips.count, 0, "AppStore: left source track")
+        tk.expectEqual(store.project.tracks[destInst].clips.count, 1, "AppStore: on dest track")
+        let storeMoved = store.project.tracks[destInst].clips[0]
+        tk.expectEqual(storeMoved.id, sID, "AppStore: clip id preserved")
+        tk.expectEqual(storeMoved.midiNotes?.count, 2, "AppStore: both notes present")
+        tk.expectEqual(storeMoved.midiNotes?[0].pitch, 62, "AppStore: note 0 pitch")
+        tk.expectEqual(storeMoved.midiNotes?[0].startBeat, 0.25, "AppStore: note 0 start")
+        tk.expectEqual(storeMoved.midiNotes?[0].lengthBeats, 1.0, "AppStore: note 0 length")
+        tk.expectEqual(storeMoved.midiNotes?[0].velocity, 110, "AppStore: note 0 velocity")
+        tk.expectEqual(storeMoved.midiNotes?[1].id, sn2.id, "AppStore: note 1 id preserved")
+
+        // Kind mismatch via AppStore: whole update rejected (project fingerprint stable).
+        let fpBeforeKind = projectFingerprint(store.project)
+        store.beginArrangementGesture(name: "Move Clip")
+        store.arrangementMoveClips([(id: sID, startBeat: 0, trackIndex: 2)]) // audio track
+        store.endArrangementGesture()
+        tk.expectEqual(projectFingerprint(store.project), fpBeforeKind,
+                       "AppStore: kind mismatch leaves project unchanged")
+        tk.expectEqual(store.project.tracks[destInst].clips[0].id, sID,
+                       "AppStore: clip stayed on instrument after kind reject")
+    }
+
+    // MARK: - AC6 resizeClip
+
+    tk.suite("AC6: resizeClip preserves interior notes; rejects 0/negative; never moves start") {
+        var project = Project.newUntitled()
+        let nInside = Note(startBeat: 0.5, lengthBeats: 1.0, pitch: 60, velocity: 100)
+        let nAlsoInside = Note(startBeat: 2.0, lengthBeats: 0.5, pitch: 64, velocity: 90)
+        let nOutsideAfterShorten = Note(startBeat: 5.0, lengthBeats: 1.0, pitch: 67, velocity: 80)
+        let clip = Clip(kind: .midi, name: "ResizeMe", startBeat: 4.0, lengthBeats: 8.0,
+                        midiNotes: [nInside, nAlsoInside, nOutsideAfterShorten])
+        project.tracks[0].clips = [clip]
+        let clipID = clip.id
+        let originalStart = clip.startBeat
+
+        // Lengthen: startBeat fixed; notes that were inside remain identical.
+        try project.resizeClip(id: clipID, toLengthBeats: 12)
+        let longer = project.tracks[0].clips[0]
+        tk.expectEqual(longer.startBeat, originalStart, "lengthen does not move startBeat")
+        tk.expectEqual(longer.lengthBeats, 12, "lengthen sets lengthBeats")
+        tk.expectEqual(longer.midiNotes?.count, 3, "lengthen keeps all notes")
+        for (i, expected) in [nInside, nAlsoInside, nOutsideAfterShorten].enumerated() {
+            let got = longer.midiNotes![i]
+            tk.expectEqual(got.id, expected.id, "lengthen note \(i) id")
+            tk.expectEqual(got.pitch, expected.pitch, "lengthen note \(i) pitch")
+            tk.expectEqual(got.startBeat, expected.startBeat, "lengthen note \(i) start")
+            tk.expectEqual(got.lengthBeats, expected.lengthBeats, "lengthen note \(i) length")
+            tk.expectEqual(got.velocity, expected.velocity, "lengthen note \(i) velocity")
+        }
+
+        // Shorten so nOutsideAfterShorten is past the new end: notes still inside the new
+        // length (startBeat < newLen) keep their payload.
+        try project.resizeClip(id: clipID, toLengthBeats: 4)
+        let shorter = project.tracks[0].clips[0]
+        tk.expectEqual(shorter.startBeat, originalStart, "shorten does not move startBeat")
+        tk.expectEqual(shorter.lengthBeats, 4, "shorten sets lengthBeats")
+        let notesAfterShorten = shorter.midiNotes ?? []
+        let interior = notesAfterShorten.filter { $0.startBeat < 4 }
+        tk.expect(interior.contains(where: { $0.id == nInside.id }),
+                  "note inside new length (nInside) still present")
+        tk.expect(interior.contains(where: { $0.id == nAlsoInside.id }),
+                  "note inside new length (nAlsoInside) still present")
+        if let kept = notesAfterShorten.first(where: { $0.id == nInside.id }) {
+            tk.expectEqual(kept.pitch, 60, "interior note pitch after shorten")
+            tk.expectEqual(kept.startBeat, 0.5, "interior note start after shorten")
+            tk.expectEqual(kept.lengthBeats, 1.0, "interior note length after shorten")
+            tk.expectEqual(kept.velocity, 100, "interior note velocity after shorten")
+        }
+
+        // Zero / negative rejected; start and length unchanged by the reject.
+        let lenBeforeReject = project.tracks[0].clips[0].lengthBeats
+        let startBeforeReject = project.tracks[0].clips[0].startBeat
+        tk.expectThrows("resize length 0 rejected") {
+            try project.resizeClip(id: clipID, toLengthBeats: 0)
+        }
+        tk.expectThrows("resize negative length rejected") {
+            try project.resizeClip(id: clipID, toLengthBeats: -1)
+        }
+        tk.expectEqual(project.tracks[0].clips[0].lengthBeats, lenBeforeReject,
+                       "failed resize leaves lengthBeats")
+        tk.expectEqual(project.tracks[0].clips[0].startBeat, startBeforeReject,
+                       "failed resize leaves startBeat")
+
+        // AppStore continuous resize: begin gesture, resize, end; startBeat fixed.
+        let (store, dir) = makeACStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let aNote = Note(startBeat: 0, lengthBeats: 1, pitch: 72, velocity: 100)
+        let aClip = Clip(kind: .midi, name: "AS", startBeat: 2, lengthBeats: 4,
+                         midiNotes: [aNote])
+        store.project.tracks[0].clips = [aClip]
+        store.beginArrangementGesture(name: "Resize Clip")
+        store.arrangementResizeClip(id: aClip.id, toLengthBeats: 7)
+        store.endArrangementGesture()
+        tk.expectEqual(store.project.tracks[0].clips[0].lengthBeats, 7,
+                       "AppStore resize sets length")
+        tk.expectEqual(store.project.tracks[0].clips[0].startBeat, 2,
+                       "AppStore resize never moves startBeat")
+        tk.expectEqual(store.project.tracks[0].clips[0].midiNotes?[0].pitch, 72,
+                       "AppStore resize preserves note")
+
+        // AppStore: zero length mid-drag does not mutate (model reject swallowed).
+        store.beginArrangementGesture(name: "Resize Clip")
+        store.arrangementResizeClip(id: aClip.id, toLengthBeats: 0)
+        store.endArrangementGesture()
+        tk.expectEqual(store.project.tracks[0].clips[0].lengthBeats, 7,
+                       "AppStore zero resize leaves prior length")
+        tk.expectEqual(store.project.tracks[0].clips[0].startBeat, 2,
+                       "AppStore zero resize leaves startBeat")
+    }
+
+    // MARK: - Non-destructive clip trim (load-bearing contract)
+
+    /// Clip.lengthBeats is a playback WINDOW over note data, not a container that owns
+    /// or bounds the stored notes. Shortening a clip hides notes past the new end;
+    /// Transport.planMIDINotes drops them at playback. Lengthening restores them without
+    /// re-authoring. Pruning notes inside resizeClip would silently destroy the user's
+    /// music and is exactly the wrong fix. This suite pins that contract so nobody
+    /// "fixes" resize later by deleting the hidden tail.
+    tk.suite("Non-destructive clip trim: shorten hides tail, re-lengthen restores playback") {
+        var project = Project.newUntitled()
+        let head = Note(startBeat: 0.0, lengthBeats: 1.0, pitch: 60, velocity: 100)
+        let mid = Note(startBeat: 2.0, lengthBeats: 1.0, pitch: 64, velocity: 90)
+        let tail = Note(startBeat: 6.0, lengthBeats: 1.0, pitch: 67, velocity: 80)
+        let originalNotes = [head, mid, tail]
+        let clip = Clip(kind: .midi, name: "TrimMe", startBeat: 0, lengthBeats: 8.0,
+                        midiNotes: originalNotes)
+        project.tracks[0].clips = [clip]
+        let clipID = clip.id
+        let originalNoteIDs = originalNotes.map(\.id)
+
+        // Shorten so only head and mid fall inside the window; tail is past the end.
+        try project.resizeClip(id: clipID, toLengthBeats: 4)
+        let shortClip = project.tracks[0].clips[0]
+        tk.expectEqual(shortClip.lengthBeats, 4, "shortened length is 4")
+        let notesWhileShort = shortClip.midiNotes ?? []
+        tk.expectEqual(notesWhileShort.count, originalNotes.count,
+                       "shorten keeps every original note in midiNotes")
+        tk.expectEqual(notesWhileShort.map(\.id), originalNoteIDs,
+                       "shorten preserves note ids and order")
+        for (i, expected) in originalNotes.enumerated() {
+            let got = notesWhileShort[i]
+            tk.expectEqual(got.pitch, expected.pitch, "note \(i) pitch intact while short")
+            tk.expectEqual(got.startBeat, expected.startBeat, "note \(i) start intact while short")
+            tk.expectEqual(got.lengthBeats, expected.lengthBeats,
+                           "note \(i) length intact while short")
+            tk.expectEqual(got.velocity, expected.velocity,
+                           "note \(i) velocity intact while short")
+        }
+
+        // Transport drops the tail while the clip is short; head and mid still plan.
+        let spb = 0.5 // 120 BPM
+        let planShort = Transport.planMIDINotes(
+            notes: notesWhileShort,
+            clipStartBeat: shortClip.startBeat,
+            clipLengthBeats: shortClip.lengthBeats,
+            playFromBeat: 0,
+            secondsPerBeat: spb
+        )
+        tk.expect(!planShort.contains(where: { $0.pitch == tail.pitch }),
+                  "plan while short has no event for tail pitch \(tail.pitch)")
+        tk.expect(planShort.contains(where: { $0.pitch == head.pitch }),
+                  "plan while short still has head note")
+        tk.expect(planShort.contains(where: { $0.pitch == mid.pitch }),
+                  "plan while short still has mid note")
+
+        // Re-lengthen: stored notes still present; tail becomes playable again.
+        try project.resizeClip(id: clipID, toLengthBeats: 8)
+        let longClip = project.tracks[0].clips[0]
+        tk.expectEqual(longClip.lengthBeats, 8, "re-lengthened length is 8")
+        let notesRestored = longClip.midiNotes ?? []
+        tk.expectEqual(notesRestored.count, originalNotes.count,
+                       "re-lengthen still has every original note")
+        tk.expect(notesRestored.contains(where: { $0.id == tail.id }),
+                  "tail note still present after re-lengthen")
+
+        let planLong = Transport.planMIDINotes(
+            notes: notesRestored,
+            clipStartBeat: longClip.startBeat,
+            clipLengthBeats: longClip.lengthBeats,
+            playFromBeat: 0,
+            secondsPerBeat: spb
+        )
+        let plannedTail = planLong.first {
+            $0.pitch == tail.pitch && $0.velocity == tail.velocity
+        }
+        tk.expect(plannedTail != nil, "plan after re-lengthen includes the tail note")
+        if let plannedTail {
+            let expectedOn = (longClip.startBeat + tail.startBeat) * spb
+            tk.expectEqual(plannedTail.onSeconds, expectedOn,
+                           "tail onset matches restored playback window")
+        }
+    }
+
+    // MARK: - AC7 splitClip
+
+    tk.suite("AC7: splitClip partitions notes; rejects edges; fresh clip ids") {
+        var project = Project.newUntitled()
+        // Clip 4…12. Split at arrangement 8 (local 4).
+        // before 0…2, crossing 3…6, after 5…6.5
+        let before = Note(startBeat: 0, lengthBeats: 2, pitch: 60, velocity: 100)
+        let crossing = Note(startBeat: 3, lengthBeats: 3, pitch: 64, velocity: 90)
+        let after = Note(startBeat: 5, lengthBeats: 1.5, pitch: 67, velocity: 80)
+        let origTotal = before.lengthBeats + crossing.lengthBeats + after.lengthBeats
+        let clip = Clip(kind: .midi, name: "SplitMe", startBeat: 4, lengthBeats: 8,
+                        midiNotes: [before, crossing, after])
+        project.tracks[0].clips = [clip]
+        let origID = clip.id
+        let origLen = clip.lengthBeats
+        let origNoteIDs = Set([before.id, crossing.id, after.id])
+
+        let pair = try project.splitClip(id: clip.id, atArrangementBeat: 8)
+        tk.expectEqual(project.tracks[0].clips.count, 2, "two clips after split")
+        let left = project.tracks[0].clips[0]
+        let right = project.tracks[0].clips[1]
+        tk.expectEqual(left.lengthBeats + right.lengthBeats, origLen,
+                       "half lengths sum to original")
+        tk.expectEqual(left.startBeat + left.lengthBeats, right.startBeat,
+                       "halves abut with no gap")
+        tk.expect(left.id != origID, "left half has a fresh clip id")
+        tk.expect(right.id != origID, "right half has a fresh clip id")
+        tk.expect(left.id != right.id, "halves have distinct clip ids")
+        tk.expectEqual(left.id, pair.left.id, "return left matches placement")
+        tk.expectEqual(right.id, pair.right.id, "return right matches placement")
+
+        let leftNotes = left.midiNotes ?? []
+        let rightNotes = right.midiNotes ?? []
+        // Crossing becomes two notes → 4 total; every original pitch/duration accounted for.
+        tk.expectEqual(leftNotes.count + rightNotes.count, 4,
+                       "combined note count accounts for split crossing")
+        let newTotal = (leftNotes + rightNotes).map(\.lengthBeats).reduce(0, +)
+        tk.expectEqual(newTotal, origTotal, "combined note duration equals original (no loss)")
+        let newIDs = Set((leftNotes + rightNotes).map(\.id))
+        tk.expectEqual(newIDs.count, 4, "no duplicated note ids after split")
+        tk.expect(origNoteIDs.isDisjoint(with: newIDs), "split notes are not the original note ids")
+        // Pitch multiset: 60, 64, 64, 67 (crossing appears on both sides).
+        let pitches = (leftNotes + rightNotes).map(\.pitch).sorted()
+        tk.expectEqual(pitches, [60, 64, 64, 67], "every original note pitch accounted for")
+        let crossLeft = leftNotes.first { $0.pitch == 64 }
+        let crossRight = rightNotes.first { $0.pitch == 64 }
+        tk.expect(crossLeft != nil && crossRight != nil, "crossing note present on both halves")
+        if let cl = crossLeft, let cr = crossRight {
+            tk.expectEqual(cl.lengthBeats + cr.lengthBeats, crossing.lengthBeats,
+                           "crossing halves sum to original note length (no loss/dupe duration)")
+        }
+
+        // Reject split exactly at start or end; project unchanged for those attempts.
+        var edgeProject = Project.newUntitled()
+        let edgeClip = Clip(kind: .midi, name: "Edge", startBeat: 2, lengthBeats: 4,
+                            midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
+        edgeProject.tracks[0].clips = [edgeClip]
+        let edgeFP = projectFingerprint(edgeProject)
+        tk.expectThrows("split at exact start rejected") {
+            try edgeProject.splitClip(id: edgeClip.id, atArrangementBeat: 2)
+        }
+        tk.expectThrows("split at exact end rejected") {
+            try edgeProject.splitClip(id: edgeClip.id, atArrangementBeat: 6)
+        }
+        tk.expectEqual(projectFingerprint(edgeProject), edgeFP,
+                       "edge split rejects leave project unchanged")
+        tk.expectEqual(edgeProject.tracks[0].clips.count, 1, "still one clip after edge rejects")
+        tk.expectEqual(edgeProject.tracks[0].clips[0].id, edgeClip.id, "original clip id intact")
+
+        // AppStore: arrangementSplitClip returns fresh ids and same length sum.
+        let (store, dir) = makeACStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let asClip = Clip(kind: .midi, name: "ASSplit", startBeat: 0, lengthBeats: 8,
+                          midiNotes: [
+                            Note(startBeat: 1, lengthBeats: 1, pitch: 60, velocity: 100),
+                            Note(startBeat: 5, lengthBeats: 1, pitch: 62, velocity: 100),
+                          ])
+        store.project.tracks[0].clips = [asClip]
+        let result = store.arrangementSplitClip(id: asClip.id, atArrangementBeat: 4)
+        tk.expect(result != nil, "AppStore split succeeds inside clip")
+        if let r = result {
+            tk.expect(r.left != asClip.id && r.right != asClip.id,
+                      "AppStore both halves get fresh clip ids")
+            tk.expect(r.left != r.right, "AppStore half ids distinct")
+            tk.expectEqual(store.project.tracks[0].clips.count, 2, "AppStore two clips after split")
+            let l = store.project.tracks[0].clips[0]
+            let rr = store.project.tracks[0].clips[1]
+            tk.expectEqual(l.lengthBeats + rr.lengthBeats, 8, "AppStore lengths sum to original")
+            tk.expectEqual(l.id, r.left, "AppStore left id matches return")
+            tk.expectEqual(rr.id, r.right, "AppStore right id matches return")
+        }
+        // Edge rejects via AppStore: nil return, project unchanged.
+        let (store2, dir2) = makeACStore()
+        defer { try? FileManager.default.removeItem(at: dir2) }
+        let edge2 = Clip(kind: .midi, name: "E2", startBeat: 0, lengthBeats: 4,
+                         midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
+        store2.project.tracks[0].clips = [edge2]
+        let fp2 = projectFingerprint(store2.project)
+        tk.expect(store2.arrangementSplitClip(id: edge2.id, atArrangementBeat: 0) == nil,
+                  "AppStore rejects split at start")
+        tk.expect(store2.arrangementSplitClip(id: edge2.id, atArrangementBeat: 4) == nil,
+                  "AppStore rejects split at end")
+        tk.expectEqual(projectFingerprint(store2.project), fp2,
+                       "AppStore edge rejects leave project unchanged")
+    }
+
+    // MARK: - AC8 duplicateClip
+
+    tk.suite("AC8: duplicateClip fresh ids for clip and notes; identical musical content") {
+        var project = Project.newUntitled()
+        let n1 = Note(startBeat: 0.0, lengthBeats: 1.0, pitch: 60, velocity: 100)
+        let n2 = Note(startBeat: 1.5, lengthBeats: 0.5, pitch: 64, velocity: 88)
+        let n3 = Note(startBeat: 3.0, lengthBeats: 0.25, pitch: 72, velocity: 120)
+        let clip = Clip(kind: .midi, name: "DupMe", startBeat: 2, lengthBeats: 4,
+                        midiNotes: [n1, n2, n3])
+        project.tracks[0].clips = [clip]
+        let origNoteIDs = Set([n1.id, n2.id, n3.id])
+
+        let copy = try project.duplicateClip(id: clip.id)
+        tk.expectEqual(project.tracks[0].clips.count, 2, "two clips after duplicate")
+        tk.expect(copy.id != clip.id, "duplicate has a fresh clip id")
+        tk.expectEqual(copy.startBeat, clip.startBeat + clip.lengthBeats,
+                       "duplicate placed at start + length")
+        tk.expectEqual(copy.lengthBeats, clip.lengthBeats, "duplicate length matches")
+        tk.expectEqual(copy.name, clip.name, "duplicate name matches")
+        tk.expectEqual(copy.kind, clip.kind, "duplicate kind matches")
+        let copyNotes = copy.midiNotes ?? []
+        let origNotes = project.tracks[0].clips[0].midiNotes ?? []
+        tk.expectEqual(copyNotes.count, origNotes.count, "duplicate note count matches")
+        let copyNoteIDs = Set(copyNotes.map(\.id))
+        tk.expect(origNoteIDs.isDisjoint(with: copyNoteIDs),
+                  "no note id shared with original")
+        tk.expectEqual(copyNoteIDs.count, copyNotes.count, "duplicate note ids unique within clip")
+        for i in origNotes.indices {
+            tk.expectEqual(copyNotes[i].pitch, origNotes[i].pitch, "dup note \(i) pitch")
+            tk.expectEqual(copyNotes[i].startBeat, origNotes[i].startBeat, "dup note \(i) start")
+            tk.expectEqual(copyNotes[i].lengthBeats, origNotes[i].lengthBeats, "dup note \(i) length")
+            tk.expectEqual(copyNotes[i].velocity, origNotes[i].velocity, "dup note \(i) velocity")
+            tk.expect(copyNotes[i].id != origNotes[i].id, "dup note \(i) has fresh id")
+        }
+        // Original ids untouched.
+        tk.expectEqual(project.tracks[0].clips[0].id, clip.id, "original clip id stable")
+        tk.expectEqual(Set(origNotes.map(\.id)), origNoteIDs, "original note ids stable")
+
+        // AppStore path.
+        let (store, dir) = makeACStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let a1 = Note(startBeat: 0.5, lengthBeats: 1, pitch: 55, velocity: 70)
+        let a2 = Note(startBeat: 2, lengthBeats: 2, pitch: 57, velocity: 75)
+        let aClip = Clip(kind: .midi, name: "ASDup", startBeat: 0, lengthBeats: 8,
+                         midiNotes: [a1, a2])
+        store.project.tracks[0].clips = [aClip]
+        let newIDs = store.arrangementDuplicateClips(ids: [aClip.id])
+        tk.expectEqual(newIDs.count, 1, "AppStore returns one new id")
+        if let newID = newIDs.first {
+            tk.expect(newID != aClip.id, "AppStore duplicate has fresh clip id")
+            let orig = store.project.tracks[0].clips.first { $0.id == aClip.id }!
+            let dup = store.project.tracks[0].clips.first { $0.id == newID }!
+            let oNotes = orig.midiNotes ?? []
+            let dNotes = dup.midiNotes ?? []
+            tk.expectEqual(dNotes.count, oNotes.count, "AppStore note count matches")
+            let oIDs = Set(oNotes.map(\.id))
+            let dIDs = Set(dNotes.map(\.id))
+            tk.expect(oIDs.isDisjoint(with: dIDs), "AppStore no shared note ids")
+            for i in oNotes.indices {
+                tk.expectEqual(dNotes[i].pitch, oNotes[i].pitch, "AppStore note \(i) pitch")
+                tk.expectEqual(dNotes[i].startBeat, oNotes[i].startBeat, "AppStore note \(i) start")
+                tk.expectEqual(dNotes[i].lengthBeats, oNotes[i].lengthBeats,
+                               "AppStore note \(i) length")
+                tk.expectEqual(dNotes[i].velocity, oNotes[i].velocity, "AppStore note \(i) velocity")
+            }
+        }
+    }
+
+    // MARK: - AC5–AC8 seeded fuzz: random clip ops + invariants
+
+    runACClipOpsFuzz(tk)
+}
+
+// MARK: - AC5–AC8 seeded fuzz helpers
+
+/// At least 200 trials: random project, random sequence of move/resize/split/duplicate,
+/// assert structural invariants after every step. Seeded for reproducibility.
+private func runACClipOpsFuzz(_ tk: TestKit) {
+    let seed: UInt64 = 0xAC58_F022
+    let trials = 200
+    let stepsPerTrial = 12
+
+    tk.suite("AC5–AC8 clip-ops fuzz (seed 0xAC58F022, \(trials) trials)") {
+        var rng = SeededRNG(seed: seed)
+        var failures = 0
+        var first: String?
+
+        for trial in 0..<trials {
+            var project = acFuzzRandomProject(rng: &rng)
+            // Seeded projects must already satisfy invariants.
+            if let msg = acClipOpsInvariantFailure(project) {
+                failures += 1
+                first = first ?? "trial \(trial) seed project: \(msg)"
+                continue
+            }
+            if let msg = acJSONRoundTripFailure(project) {
+                failures += 1
+                first = first ?? "trial \(trial) seed round-trip: \(msg)"
+                continue
+            }
+
+            for step in 0..<stepsPerTrial {
+                acFuzzApplyRandomOp(to: &project, rng: &rng)
+                if let msg = acClipOpsInvariantFailure(project) {
+                    failures += 1
+                    first = first ?? "trial \(trial) step \(step): \(msg)"
+                    break
+                }
+                if let msg = acJSONRoundTripFailure(project) {
+                    failures += 1
+                    first = first ?? "trial \(trial) step \(step) round-trip: \(msg)"
+                    break
+                }
+            }
+        }
+
+        tk.expect(failures == 0, "clip-ops fuzz invariants hold",
+                  first ?? "all \(trials) trials ok")
+        tk.expectEqual(failures, 0, "clip-ops fuzz failure count is zero")
+    }
+}
+
+/// Random project with positive clip lengths, non-negative starts, and notes that start
+/// at non-negative beats. Notes need not fit inside clip lengthBeats (that is a playback
+/// window, not a storage bound); seeds still place them inside for variety.
+private func acFuzzRandomProject(rng: inout SeededRNG) -> Project {
+    let trackCount = rng.nextInt(in: 2...4)
+    var tracks: [Track] = []
+    // Guarantee at least one instrument and one audio track so kind-mismatch moves exist.
+    for t in 0..<trackCount {
+        let kind: TrackKind
+        if t == 0 { kind = .instrument }
+        else if t == 1 { kind = .audio }
+        else { kind = rng.nextBool() ? .instrument : .audio }
+        var track = Track(
+            id: rng.nextUUID(),
+            kind: kind,
+            name: "ACFuzz T\(t)",
+            volume: rng.nextDouble(in: 0...1),
+            pan: rng.nextDouble(in: -1...1),
+            mute: false,
+            solo: false,
+            colorIndex: rng.nextInt(in: 0...7),
+            instrument: kind == .instrument ? .grandPiano : nil,
+            clips: []
+        )
+        let clipCount = rng.nextInt(in: 0...3)
+        for c in 0..<clipCount {
+            let start = rng.nextDouble(in: 0...24)
+            // Keep length clearly above the model floor so splits have room.
+            let length = rng.nextDouble(in: 1.0...12.0)
+            if kind == .instrument {
+                let noteCount = rng.nextInt(in: 0...5)
+                var notes: [Note] = []
+                for _ in 0..<noteCount {
+                    // Strictly inside [0, length): leave a tiny margin so start < length.
+                    let maxStart = max(length - 0.05, 0.01)
+                    let nStart = rng.nextDouble(in: 0...maxStart)
+                    let nLen = rng.nextDouble(in: 0.0625...2.0)
+                    notes.append(Note(
+                        id: rng.nextUUID(),
+                        startBeat: nStart,
+                        lengthBeats: nLen,
+                        pitch: rng.nextInt(in: 0...127),
+                        velocity: rng.nextInt(in: 1...127)
+                    ))
+                }
+                track.clips.append(Clip(
+                    id: rng.nextUUID(),
+                    kind: .midi,
+                    name: "M\(c)",
+                    startBeat: start,
+                    lengthBeats: length,
+                    midiNotes: notes
+                ))
+            } else {
+                track.clips.append(Clip(
+                    id: rng.nextUUID(),
+                    kind: .audio,
+                    name: "A\(c)",
+                    startBeat: start,
+                    lengthBeats: length,
+                    mediaFile: "fuzz-\(t)-\(c).caf"
+                ))
+            }
+        }
+        tracks.append(track)
+    }
+    return Project(
+        id: rng.nextUUID(),
+        title: "ACFuzz",
+        tempoBPM: Double(rng.nextInt(in: 60...180)),
+        key: nil,
+        timeSignature: .common,
+        tracks: tracks,
+        masterVolume: 0.85,
+        createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+        modifiedAt: Date(timeIntervalSince1970: 1_700_000_000)
+    )
+}
+
+private enum ACFuzzOp: Int {
+    case moveClipToTrack = 0
+    case resizeClip = 1
+    case splitClip = 2
+    case duplicateClip = 3
+}
+
+/// Apply one random clip op. Invalid targets / rejects are allowed; they leave the project
+/// unchanged. Successful ops may expose invariant defects (those stay failing).
+private func acFuzzApplyRandomOp(to project: inout Project, rng: inout SeededRNG) {
+    let op = ACFuzzOp(rawValue: rng.nextInt(in: 0...3))!
+    let allClips: [(trackIndex: Int, clip: Clip)] = project.tracks.enumerated().flatMap { ti, t in
+        t.clips.map { (ti, $0) }
+    }
+    guard !allClips.isEmpty else { return }
+
+    switch op {
+    case .moveClipToTrack:
+        let pick = rng.pick(allClips)
+        let dest = rng.nextInt(in: 0...(max(project.tracks.count, 1) + 1)) // sometimes OOB
+        let start = rng.nextBool() ? rng.nextDouble(in: 0...32) : Double(rng.nextInt(in: -2...4))
+        _ = try? project.moveClip(id: pick.clip.id, toTrackIndex: dest, startBeat: start)
+
+    case .resizeClip:
+        let pick = rng.pick(allClips)
+        // Mix legal lengths, sub-minimum (floored), zero, and negative.
+        let length: Double
+        switch rng.nextInt(in: 0...5) {
+        case 0: length = 0
+        case 1: length = -rng.nextDouble(in: 0.01...2)
+        case 2: length = rng.nextDouble(in: 0.01...(Project.minimumClipLengthBeats))
+        default: length = rng.nextDouble(in: Project.minimumClipLengthBeats...16)
+        }
+        _ = try? project.resizeClip(id: pick.clip.id, toLengthBeats: length)
+
+    case .splitClip:
+        let midi = allClips.filter { $0.clip.kind == .midi && $0.clip.lengthBeats > 0.25 }
+        guard let pick = midi.isEmpty ? nil : rng.pick(midi) else { return }
+        let edge = rng.nextInt(in: 0...5)
+        let playhead: Double
+        switch edge {
+        case 0: playhead = pick.clip.startBeat // exact start (reject)
+        case 1: playhead = pick.clip.startBeat + pick.clip.lengthBeats // exact end (reject)
+        default:
+            let frac = rng.nextDouble(in: 0.05...0.95)
+            playhead = pick.clip.startBeat + frac * pick.clip.lengthBeats
+        }
+        _ = try? project.splitClip(id: pick.clip.id, atArrangementBeat: playhead)
+
+    case .duplicateClip:
+        let pick = rng.pick(allClips)
+        _ = try? project.duplicateClip(id: pick.clip.id)
+    }
+}
+
+/// Returns a human-readable failure reason, or nil when all invariants hold.
+///
+/// A note with startBeat at or past clip.lengthBeats is a legitimate hidden tail:
+/// lengthBeats is a playback window, not a container. Transport.planMIDINotes drops
+/// those notes at playback. Pruning them on resize would destroy user music, so that
+/// is deliberately not an invariant here.
+private func acClipOpsInvariantFailure(_ project: Project) -> String? {
+    var clipIDs = Set<UUID>()
+    for (ti, track) in project.tracks.enumerated() {
+        for (ci, clip) in track.clips.enumerated() {
+            if clip.startBeat < 0 {
+                return "track \(ti) clip \(ci): startBeat \(clip.startBeat) < 0"
+            }
+            if clip.lengthBeats <= 0 {
+                return "track \(ti) clip \(ci): lengthBeats \(clip.lengthBeats) <= 0"
+            }
+            if clipIDs.contains(clip.id) {
+                return "duplicate clip id \(clip.id.uuidString) at track \(ti) clip \(ci)"
+            }
+            clipIDs.insert(clip.id)
+
+            var noteIDs = Set<UUID>()
+            for (ni, note) in (clip.midiNotes ?? []).enumerated() {
+                if note.startBeat < 0 {
+                    return "track \(ti) clip \(ci) note \(ni): startBeat \(note.startBeat) < 0"
+                }
+                if noteIDs.contains(note.id) {
+                    return "track \(ti) clip \(ci): duplicate note id \(note.id.uuidString)"
+                }
+                noteIDs.insert(note.id)
+            }
+        }
+    }
+    return nil
+}
+
+/// Encode → decode → re-encode must be byte-identical (equal project after JSON round trip).
+private func acJSONRoundTripFailure(_ project: Project) -> String? {
+    do {
+        let data = try project.jsonData()
+        let back = try Project.fromJSON(data)
+        let data2 = try back.jsonData()
+        if data != data2 {
+            return "JSON round-trip re-encode mismatch (len \(data.count) vs \(data2.count))"
+        }
+        return nil
+    } catch {
+        return "JSON round-trip error: \(error)"
+    }
 }
