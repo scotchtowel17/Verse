@@ -195,16 +195,24 @@ extension AppStore {
         playheadBeat = 0
     }
 
-    /// Move the playhead to `beat` (clamped to ≥ 0). Stops playback if running so the
-    /// next play starts from the scrubbed position. No undo.
+    /// Move the playhead (clamped to >= 0). Playback follows it rather than stopping. No undo.
+    ///
+    /// Seeking mid-playback used to stop the transport, so repositioning while listening
+    /// always cost a second click to start again. Recording is the exception: a take is a
+    /// continuous performance, so a seek ends it rather than silently splicing.
     public func scrubPlayhead(to beat: Double) {
         let clamped = max(0, beat)
+        let wasPlaying = isPlaying
+        let wasRecording = isRecording
         if isPlaying {
             endOpenMIDICaptureNotesAtPlayhead()
             transport.stop()
             isPlaying = false
         }
         playheadBeat = clamped
+        if wasPlaying, !wasRecording {
+            startPlayback()
+        }
     }
 
     public var arrangementBeats: Double {

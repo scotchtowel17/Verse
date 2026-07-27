@@ -1387,7 +1387,9 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         tk.expect(!store.isPlaying, "still stopped after rewind")
     }
 
-    tk.suite("AppStore S1: scrub while playing stops and sets playhead") {
+    tk.suite("AppStore S1: scrub while playing keeps playing from the new position") {
+        // Seeking mid-playback used to stop the transport, so repositioning while listening
+        // always cost a second click to start again. Playback now follows the playhead.
         let (store, dir) = makeTestStore()
         defer { try? FileManager.default.removeItem(at: dir) }
 
@@ -1398,9 +1400,36 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
         store.startPlayback()
         tk.expect(store.isPlaying, "playing before scrub")
         store.scrubPlayhead(to: 7.25)
-        tk.expect(!store.isPlaying, "scrub stops playback")
+        tk.expect(store.isPlaying, "scrub keeps playing")
         tk.expectEqual(store.playheadBeat, 7.25, "scrubbed position held")
-        tk.expectEqual(store.playbackBeat, 7.25, "draw position matches scrub")
+        // Playback resumes from the scrubbed beat and can only have advanced from there.
+        // No upper bound: that would measure machine load, not behaviour.
+        tk.expect((store.playbackBeat ?? -1) >= 7.25 - 0.001,
+                  "draw position resumes at or after the scrubbed beat")
+        store.pausePlayback()
+
+        // Scrubbing while stopped stays stopped.
+        store.scrubPlayhead(to: 3)
+        tk.expect(!store.isPlaying, "scrub while stopped does not start playback")
+        tk.expectEqual(store.playheadBeat, 3, "scrubbed position held while stopped")
+    }
+
+    tk.suite("AppStore S1: scrub while recording ends the take rather than splicing it") {
+        // A take is a continuous performance. Seeking mid-record stops, so a recording is
+        // never silently stitched together across a jump.
+        let (store, dir) = makeTestStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.startEngineIfNeeded()
+        let clip = Clip(kind: .midi, name: "phrase", startBeat: 0, lengthBeats: 32,
+                        midiNotes: [Note(startBeat: 0, lengthBeats: 16, pitch: 60, velocity: 100)])
+        store.project.tracks[0].clips = [clip]
+        store.startPlayback()
+        store.isRecording = true
+        store.scrubPlayhead(to: 5)
+        tk.expect(!store.isPlaying, "scrub while recording stops playback")
+        tk.expectEqual(store.playheadBeat, 5, "scrubbed position still held")
+        store.isRecording = false
     }
 
     tk.suite("AppStore S1: transport actions never record undo") {
