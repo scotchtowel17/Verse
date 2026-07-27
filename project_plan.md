@@ -628,3 +628,32 @@ Recorded so the reasoning is not re-litigated:
 - **`RecoveryManager` has 22 `try?` calls.** All but the journal decode above are best-effort
   cleanup where fire-and-forget is the intended behavior (removing a lock file that may not
   exist, creating a directory that may already exist). Count is not a defect.
+
+## Phase AC — 20 screen-driven probe iterations (architect loop)
+
+Each probe: drive the running app, look for a real defect, delegate any fix to the
+worker (grok), verify against git diff + VerseCheck + the screen, then commit.
+"No defect found" is a valid outcome and is recorded as such.
+
+| # | Probe area | Status |
+|---|---|---|
+| AC1 | Note resize by dragging its right edge | PENDING |
+| AC2 | Velocity drag mode (V toggle) | PENDING |
+| AC3 | Loop region create / move / resize (option-drag ruler) | PENDING |
+| AC4 | Loop playback wrap-around | PENDING |
+| AC5 | Clip drag between tracks in the arrangement | PENDING |
+| AC6 | Clip resize in the arrangement | PENDING |
+| AC7 | Clip split at playhead (scissors) | PENDING |
+| AC8 | Clip duplicate | PENDING |
+| AC9 | Track menu: rename / delete | PENDING |
+| AC10 | Undo/redo deep stack, redo invalidation after a new edit | PENDING |
+| AC11 | Save / Open .verse package round trip | PENDING |
+| AC12 | Crash recovery after a force quit mid-edit | PENDING |
+| AC13 | Tempo change, including while playing | PENDING |
+| AC14 | Time signature change | PENDING |
+| AC15 | Metronome toggle | PENDING |
+| AC16 | Instrument change (sound picker) | PENDING |
+| AC17 | Track effects / inserts | PENDING |
+| AC18 | Volume and pan extremes, master volume | PENDING |
+| AC19 | Narrow-window layout and toolbar overflow | PENDING |
+| AC20 | Multi-clip selection and bulk operations | PENDING |
