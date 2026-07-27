@@ -577,6 +577,59 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
                   "default band is at least ~2 octaves plus the pinned toolbar")
     }
 
+    tk.suite("Piano roll: fit pitch frames every note in the clip") {
+        // Zoom alone is anchored on the window centre, so music sitting off-centre walks out
+        // of view as you zoom in. Observed live: notes at pitch 66 vanished when the window
+        // narrowed to G#3-F4 around a centre of 60. The assertion that matters is the
+        // observable one: after a fit, every note is inside the range that gets drawn.
+        func note(_ pitch: Int) -> Note {
+            Note(startBeat: 0, lengthBeats: 1, pitch: pitch, velocity: 96)
+        }
+
+        let cases: [(name: String, pitches: [Int], pane: CGFloat)] = [
+            ("single note", [64], 300),
+            ("narrow cluster", [64, 66], 300),
+            ("one octave", [60, 72], 300),
+            ("wide spread", [24, 100], 300),
+            ("full range", [0, 127], 300),
+            ("short pane", [60, 67], 90),
+            ("tall pane", [55, 59], 900),
+            ("unsorted input", [80, 40, 61], 300),
+        ]
+
+        for c in cases {
+            let notes = c.pitches.map(note)
+            guard let fit = PianoRollLayout.fitPitch(notes: notes, paneHeight: c.pane) else {
+                tk.expect(false, "\(c.name): fit returned nil for a non-empty clip")
+                continue
+            }
+            let range = PianoRollLayout.visiblePitchRange(
+                focusPitch: fit.focusPitch, paneHeight: c.pane, rowHeight: fit.rowHeight)
+            // A span wider than paneHeight / minRowHeight physically cannot be shown at a
+            // readable row height. The contract is: frame everything when that is possible,
+            // and otherwise bottom out at the minimum row height still centred on the music.
+            let atMinimum = fit.rowHeight <= PianoRollLayout.minRowHeight + 0.001
+            if atMinimum {
+                let centre = (c.pitches.min()! + c.pitches.max()!) / 2
+                tk.expect(range.contains(centre),
+                          "\(c.name): an unfittable span still centres on the music")
+            } else {
+                for pitch in c.pitches {
+                    tk.expect(range.contains(pitch),
+                              "\(c.name): pitch \(pitch) is inside the fitted range \(range)")
+                }
+            }
+            tk.expect(fit.rowHeight >= PianoRollLayout.minRowHeight
+                        && fit.rowHeight <= PianoRollLayout.maxRowHeight,
+                      "\(c.name): fitted row height stays within the zoom limits")
+        }
+
+        tk.expect(PianoRollLayout.fitPitch(notes: [], paneHeight: 300) == nil,
+                  "an empty clip has nothing to fit")
+        tk.expect(PianoRollLayout.fitPitch(notes: [note(60)], paneHeight: 0) == nil,
+                  "an unmeasured pane has nothing to fit")
+    }
+
     tk.suite("Piano roll: the pitch window does not move while the user edits notes") {
         // Live defect: the window centre was the mean pitch of the open clip, recomputed every
         // render, so each added note shifted the grid out from under the pointer (observed as

@@ -462,6 +462,14 @@ struct PianoRollEmbeddedView: View {
             .disabled(store.pianoRollRowHeight <= PianoRollLayout.minRowHeight + 0.01)
             .help("Show more pitches (shorter rows)")
             Button {
+                fitPitchToNotes()
+            } label: {
+                Image(systemName: "arrow.down.right.and.arrow.up.left")
+            }
+            .controlSize(.small)
+            .disabled(notes.isEmpty)
+            .help("Fit pitch window to the notes in this clip")
+            Button {
                 store.zoomPianoRollPitchIn()
             } label: {
                 Image(systemName: "plus")
@@ -1201,6 +1209,16 @@ struct PianoRollEmbeddedView: View {
         store.selectedNoteIDs = []
     }
 
+    /// Frame every note of the open clip: re-centre the latched window and set row height.
+    /// Clears pitch navigation so the fitted centre is what the window actually shows.
+    private func fitPitchToNotes() {
+        guard let fit = PianoRollLayout.fitPitch(notes: notes, paneHeight: pitchPaneHeight)
+        else { return }
+        latchedFocusPitch = fit.focusPitch
+        pitchNavOffset = 0
+        store.setPianoRollRowHeight(fit.rowHeight)
+    }
+
     private func copySelection() {
         let selected = notes.filter { store.selectedNoteIDs.contains($0.id) }
         guard !selected.isEmpty else { return }
@@ -1456,6 +1474,27 @@ public enum PianoRollLayout {
     public static func snap(_ beats: Double, to snapBeats: Double) -> Double {
         guard snapBeats > 0 else { return beats }
         return (beats / snapBeats).rounded() * snapBeats
+    }
+
+    /// Extra rows of headroom left above and below the music when fitting the pitch window.
+    public static let fitPitchPadding = 1
+
+    /// Centre pitch and row height that frame every note of `notes` in a pane of `paneHeight`.
+    ///
+    /// The pitch axis mirrors the timeline's "Fit timeline to content": zoom alone is anchored
+    /// on the window centre, so music that sits off-centre walks out of view as you zoom in,
+    /// and octave stepping is the only way back. Returns nil when there is nothing to frame.
+    public static func fitPitch(
+        notes: [Note],
+        paneHeight: CGFloat
+    ) -> (focusPitch: Int, rowHeight: CGFloat)? {
+        guard !notes.isEmpty, paneHeight > 0 else { return nil }
+        let pitches = notes.map(\.pitch)
+        guard let lowest = pitches.min(), let highest = pitches.max() else { return nil }
+        let span = highest - lowest + 1 + 2 * fitPitchPadding
+        let focus = (lowest + highest) / 2
+        let rowHeight = clampedRowHeight(paneHeight / CGFloat(span))
+        return (focus, rowHeight)
     }
 
     /// Whether a change of open clip should re-centre the pitch window on the new clip's music.
