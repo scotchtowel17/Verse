@@ -28,5 +28,6 @@ runFuzzChecks(tk)
 runUndoRoundTripChecks(tk)
 runLayoutSelectionPropertyChecks(tk)
 runPianoKeyboardLayoutChecks(tk)
+runACProbeChecks(tk)
 
 tk.finish()

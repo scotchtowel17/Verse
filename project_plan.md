@@ -646,14 +646,14 @@ worker (grok), verify against git diff + VerseCheck + the screen, then commit.
 | AC7 | Clip split at playhead (scissors) | PENDING |
 | AC8 | Clip duplicate | PENDING |
 | AC9 | Track menu: rename / delete | PENDING |
-| AC10 | Undo/redo deep stack, redo invalidation after a new edit | PENDING |
-| AC11 | Save / Open .verse package round trip | PENDING |
+| AC10 | Undo/redo deep stack, redo invalidation after a new edit | DONE (headless: deep stack + redo invalidation) |
+| AC11 | Save / Open .verse package round trip | DONE (headless: save/open round trip) |
 | AC12 | Crash recovery after a force quit mid-edit | PENDING |
-| AC13 | Tempo change, including while playing | PENDING |
-| AC14 | Time signature change | PENDING |
+| AC13 | Tempo change, including while playing | DONE (headless: clamp + one undo entry) |
+| AC14 | Time signature change | DONE (headless: beats unchanged) |
 | AC15 | Metronome toggle | PENDING |
 | AC16 | Instrument change (sound picker) | PENDING |
 | AC17 | Track effects / inserts | PENDING |
-| AC18 | Volume and pan extremes, master volume | PENDING |
+| AC18 | Volume and pan extremes, master volume | DONE (headless: DEFECT FOUND + FIXED, model clamp) |
 | AC19 | Narrow-window layout and toolbar overflow | PENDING |
-| AC20 | Multi-clip selection and bulk operations | PENDING |
+| AC20 | Multi-clip selection and bulk operations | DONE (headless: one undo restores all) |

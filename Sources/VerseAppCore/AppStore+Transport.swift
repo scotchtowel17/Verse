@@ -322,8 +322,18 @@ extension AppStore {
 
     // Continuous slider drags must NOT record undo: each drag fires ~100 calls and would
     // flush the 100-entry stack, destroying the AI-patch undo point.
-    public func setVolume(_ v: Double, _ id: UUID) { mutate(id) { $0.volume = v }; applyEffectiveMix() }
-    public func setPan(_ p: Double, _ id: UUID) { mutate(id) { $0.pan = p }; applyEffectiveMix() }
+    // Clamp at the setter so the stored value cannot leave its documented range (volume 0...1,
+    // pan -1...1). The engine mixer and the AI patch validator already clamp; these two were
+    // the one path that did not, so an out-of-range call was inaudible but still persisted an
+    // invalid value into the saved project.
+    public func setVolume(_ v: Double, _ id: UUID) {
+        mutate(id) { $0.volume = max(0, min(1, v)) }
+        applyEffectiveMix()
+    }
+    public func setPan(_ p: Double, _ id: UUID) {
+        mutate(id) { $0.pan = max(-1, min(1, p)) }
+        applyEffectiveMix()
+    }
     func toggleMute(_ id: UUID) { mutate(id) { $0.mute.toggle() }; applyEffectiveMix() }
     func toggleSolo(_ id: UUID) { mutate(id) { $0.solo.toggle() }; applyEffectiveMix() }
 
