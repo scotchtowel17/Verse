@@ -577,6 +577,40 @@ private func runAppStoreChecksOnMain(_ tk: TestKit) {
                   "default band is at least ~2 octaves plus the pinned toolbar")
     }
 
+    tk.suite("Piano roll: the editor accepts exactly the notes the transport will play") {
+        // Live defect: double-clicking past the clip's right edge added a note anyway. The
+        // clip-start guard existed, the clip-end guard did not, so the note was drawn on the
+        // grid and then dropped by Transport.planMIDINotes at playback: visible, silent, and
+        // nothing on screen to explain it. The two boundaries must agree, so this asserts
+        // them against each other rather than restating one of them.
+        let clipLength = 16.0
+        let candidates: [Double] = [-1, -0.001, 0, 0.5, 8, 15.5, 15.999, 16, 16.001, 20, 100]
+
+        for start in candidates {
+            let editorAccepts = PianoRollLayout.noteFitsInClip(
+                startBeat: start, clipLengthBeats: clipLength)
+            let note = Note(startBeat: max(0, start), lengthBeats: 1, pitch: 60, velocity: 96)
+            let planned = Transport.planMIDINotes(
+                notes: [note],
+                clipStartBeat: 0,
+                clipLengthBeats: clipLength,
+                playFromBeat: 0,
+                secondsPerBeat: 0.5
+            )
+            // Negative starts are rejected by the editor before they can reach the model, so
+            // only compare on the range the model can actually hold.
+            if start >= 0 {
+                tk.expectEqual(editorAccepts, !planned.isEmpty,
+                               "start \(start): editor and transport agree on the clip end")
+            } else {
+                tk.expect(!editorAccepts, "start \(start): a negative start is rejected")
+            }
+        }
+
+        tk.expect(!PianoRollLayout.noteFitsInClip(startBeat: 0, clipLengthBeats: 0),
+                  "a zero-length clip holds no notes")
+    }
+
     tk.suite("Piano roll: fit pitch frames every note in the clip") {
         // Zoom alone is anchored on the window centre, so music sitting off-centre walks out
         // of view as you zoom in. Observed live: notes at pitch 66 vanished when the window

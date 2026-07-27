@@ -1190,6 +1190,15 @@ struct PianoRollEmbeddedView: View {
             return
         }
         let start = max(0, PianoRollLayout.snap(localRaw, to: snapBeats))
+        // Right edge, mirroring the clip-start guard above. Transport drops any note starting
+        // at or past the clip end, so a note placed out there is visible on the grid and then
+        // silent on playback with nothing to explain why. Skipped when there is no clip yet:
+        // that is the create-a-clip-under-the-pointer path.
+        if let openClip = clip,
+           !PianoRollLayout.noteFitsInClip(startBeat: start, clipLengthBeats: openClip.lengthBeats) {
+            store.statusMessage = "Notes must sit inside the clip’s time range."
+            return
+        }
         let length = PianoRollLayout.newNoteLengthBeats(snapBeats: snapBeats,
                                                         lastGridBeats: lastGridSnapBeats)
         if let id = store.pianoRollAddNote(pitch: pitch, startBeat: start, lengthBeats: length) {
@@ -1474,6 +1483,15 @@ public enum PianoRollLayout {
     public static func snap(_ beats: Double, to snapBeats: Double) -> Double {
         guard snapBeats > 0 else { return beats }
         return (beats / snapBeats).rounded() * snapBeats
+    }
+
+    /// Whether a note starting at `startBeat` is inside a clip of `clipLengthBeats`.
+    ///
+    /// This is deliberately the same boundary `Transport.planMIDINotes` uses to decide what
+    /// sounds. Anything the editor accepts must be something the transport will play; a note
+    /// the grid shows but playback drops is a silent failure with nothing to explain it.
+    public static func noteFitsInClip(startBeat: Double, clipLengthBeats: Double) -> Bool {
+        startBeat >= 0 && startBeat < clipLengthBeats
     }
 
     /// Extra rows of headroom left above and below the music when fitting the pitch window.
