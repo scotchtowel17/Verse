@@ -450,19 +450,77 @@ struct TimelineWorkspaceView: View {
         store.scrubPlayhead(to: beatClamped(atX: x))
     }
 
+    /// Width of the invisible grab strip centred on the playhead line.
+    ///
+    /// The line itself is 1.5pt, which is not a pointer target. This widens the grab area
+    /// without widening the drawn line. It is deliberately confined to the ruler band: a
+    /// full-height strip would sit on top of clips and notes and swallow clicks on anything
+    /// the playhead happens to be parked over.
+    private static let playheadGrabWidth: CGFloat = 15
+    /// Size of the draggable head drawn in the ruler.
+    private static let playheadHandleWidth: CGFloat = 13
+
     @ViewBuilder
     private func sharedPlayhead(beatWidth: CGFloat, gutter: CGFloat, totalHeight: CGFloat) -> some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !store.isPlaying)) { _ in
             if let beat = store.playbackBeat, beat >= 0, beat <= contentBeats {
                 let x = gutter + CGFloat(beat) * beatWidth
-                Rectangle()
-                    .fill(Color.red.opacity(0.85))
-                    .frame(width: 1.5, height: totalHeight)
-                    .offset(x: x)
-                    .allowsHitTesting(false)
+                ZStack(alignment: .topLeading) {
+                    Rectangle()
+                        .fill(Color.red.opacity(0.85))
+                        .frame(width: 1.5, height: totalHeight)
+                        .offset(x: x)
+                        .allowsHitTesting(false)
+
+                    // Grabbable head. Gives the playhead a real pointer target and makes it
+                    // look draggable, instead of a hairline you can only move by clicking the
+                    // ruler behind it.
+                    playheadHandle
+                        .offset(x: x - Self.playheadHandleWidth / 2)
+                        .contentShape(Rectangle().size(
+                            width: Self.playheadGrabWidth, height: BeatTimeline.rulerHeight))
+                        .gesture(playheadDragGesture(originBeat: beat, beatWidth: beatWidth))
+                        .help("Drag to move the playhead")
+                }
             }
         }
-        .allowsHitTesting(false)
+    }
+
+    private var playheadHandle: some View {
+        // Flag shape: square shoulders with a point underneath, so the tip marks the exact beat.
+        Path { p in
+            let w = Self.playheadHandleWidth
+            let h = BeatTimeline.rulerHeight
+            p.move(to: CGPoint(x: 0, y: 0))
+            p.addLine(to: CGPoint(x: w, y: 0))
+            p.addLine(to: CGPoint(x: w, y: h * 0.55))
+            p.addLine(to: CGPoint(x: w / 2, y: h))
+            p.addLine(to: CGPoint(x: 0, y: h * 0.55))
+            p.closeSubpath()
+        }
+        .fill(Color.red.opacity(0.9))
+        .frame(width: Self.playheadHandleWidth, height: BeatTimeline.rulerHeight)
+    }
+
+    /// Dragging the head scrubs. Works in beats from the head's own starting beat plus the
+    /// drag translation, rather than from the event location, so grabbing the head does not
+    /// make the playhead jump to the pointer on mouse-down.
+    private func playheadDragGesture(originBeat: Double, beatWidth: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                scrubToDraggedBeat(originBeat: originBeat, beatWidth: beatWidth, value: value)
+            }
+            .onEnded { value in
+                scrubToDraggedBeat(originBeat: originBeat, beatWidth: beatWidth, value: value)
+            }
+    }
+
+    private func scrubToDraggedBeat(
+        originBeat: Double, beatWidth: CGFloat, value: DragGesture.Value
+    ) {
+        guard beatWidth > 0 else { return }
+        let delta = Double(value.translation.width / beatWidth)
+        store.scrubPlayhead(to: max(0, min(contentBeats, originBeat + delta)))
     }
 
     /// Per-track controls as the lane left gutter (AA1): one row per track, no separate list.

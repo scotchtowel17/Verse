@@ -378,6 +378,7 @@ struct PianoRollEmbeddedView: View {
             toolbarDivider
             pitchNavGroup
             toolbarDivider
+            timeZoomGroup
             pitchZoomGroup
             ghostsToggle
             velocityModeToggle
@@ -444,6 +445,41 @@ struct PianoRollEmbeddedView: View {
         }
         .fixedSize(horizontal: true, vertical: true)
         .layoutPriority(1)
+    }
+
+    /// Horizontal (time) zoom, in the roll itself: notes get wider, none become unreachable.
+    ///
+    /// Zoom in the roll used to mean pitch zoom only, which makes rows taller and therefore
+    /// shows *fewer* pitches, so reaching for "make this easier to edit" took notes away.
+    /// Widening is the zoom that helps editing: the timeline scrolls horizontally, so nothing
+    /// leaves reach. Same shared `timelineZoom` as the action bar, so the arrangement and the
+    /// roll never drift apart (X2).
+    private var timeZoomGroup: some View {
+        HStack(spacing: 2) {
+            Image(systemName: "arrow.left.and.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .help("Time zoom (note width)")
+            Button {
+                store.zoomTimelineOut()
+            } label: {
+                Image(systemName: "minus")
+            }
+            .controlSize(.small)
+            .disabled(store.timelineZoom <= BeatTimeline.minZoom + 0.001)
+            .help("Narrower notes (more bars in view)")
+            Button {
+                store.zoomTimelineIn()
+            } label: {
+                Image(systemName: "plus")
+            }
+            .controlSize(.small)
+            .disabled(store.timelineZoom >= BeatTimeline.maxZoom - 0.001)
+            .help("Wider notes (easier to grab and edit)")
+        }
+        .fixedSize(horizontal: true, vertical: true)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Time zoom")
     }
 
     /// Vertical (pitch) zoom: row height only. Time zoom is on the action bar only (AA2).
