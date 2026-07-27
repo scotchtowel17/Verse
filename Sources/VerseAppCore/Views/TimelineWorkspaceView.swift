@@ -623,6 +623,18 @@ struct ArrangementLanesView: View {
             .frame(width: totalWidth, height: Self.laneHeight)
             .allowsHitTesting(false)
 
+            // Empty lane background selects its track. Without this, an empty region of a lane
+            // was inert, so "copy a clip, click the other track, paste" silently pasted back
+            // onto the source track: paste targets the active track, and only a clip or the
+            // track header could change it. Sits under the clips so clip taps still win.
+            Color.clear
+                .frame(width: totalWidth, height: Self.laneHeight)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    store.selectTrack(track.id)
+                    store.selectedClipIDs = []
+                }
+
             ForEach(track.clips) { clip in
                 clipBlock(clip, trackIndex: trackIndex)
             }
