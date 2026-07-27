@@ -637,23 +637,23 @@ worker (grok), verify against git diff + VerseCheck + the screen, then commit.
 
 | # | Probe area | Status |
 |---|---|---|
-| AC1 | Note resize by dragging its right edge | PENDING |
-| AC2 | Velocity drag mode (V toggle) | PENDING |
-| AC3 | Loop region create / move / resize (option-drag ruler) | PENDING |
+| AC1 | Note resize by dragging its right edge | DONE (headless logic; gesture wiring screen-pending) |
+| AC2 | Velocity drag mode (V toggle) | DONE (headless: velocity clamp 1-127, one undo) |
+| AC3 | Loop region create / move / resize (option-drag ruler) | DONE (headless: LoopRegionLogic normalize/move/resize) |
 | AC4 | Loop playback wrap-around | PENDING |
 | AC5 | Clip drag between tracks in the arrangement | DONE (headless: move preserves notes, kind mismatch rejected) |
 | AC6 | Clip resize in the arrangement | DONE (headless: resize; non-destructive trim contract pinned) |
 | AC7 | Clip split at playhead (scissors) | DONE (headless: split accounts for every note, fresh ids) |
 | AC8 | Clip duplicate | DONE (headless: fresh clip AND note ids) |
-| AC9 | Track menu: rename / delete | PENDING |
+| AC9 | Track menu: rename / delete | DONE (headless: last track refused with a message) |
 | AC10 | Undo/redo deep stack, redo invalidation after a new edit | DONE (headless: deep stack + redo invalidation) |
 | AC11 | Save / Open .verse package round trip | DONE (headless: save/open round trip) |
 | AC12 | Crash recovery after a force quit mid-edit | PENDING |
 | AC13 | Tempo change, including while playing | DONE (headless: clamp + one undo entry) |
 | AC14 | Time signature change | DONE (headless: beats unchanged) |
-| AC15 | Metronome toggle | PENDING |
-| AC16 | Instrument change (sound picker) | PENDING |
-| AC17 | Track effects / inserts | PENDING |
+| AC15 | Metronome toggle | PARTIAL (transport flag only; setMetronome is internal) |
+| AC16 | Instrument change (sound picker) | DONE (headless: instrument survives save/open) |
+| AC17 | Track effects / inserts | DONE (headless: inserts survive save/open) |
 | AC18 | Volume and pan extremes, master volume | DONE (headless: DEFECT FOUND + FIXED, model clamp) |
 | AC19 | Narrow-window layout and toolbar overflow | PENDING |
 | AC20 | Multi-clip selection and bulk operations | DONE (headless: one undo restores all) |

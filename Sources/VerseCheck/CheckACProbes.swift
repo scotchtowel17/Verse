@@ -44,6 +44,597 @@ private func projectFingerprint(_ project: Project) -> String {
 @MainActor
 private func runACProbeChecksOnMain(_ tk: TestKit) {
 
+    // MARK: - AC1 note resize logic
+
+    tk.suite("AC1: note resize never non-positive; snap lands on grid; handle width safe") {
+        // Model path: resizeNote rejects length <= 0; positive sub-minimum floors to 1/32.
+        var project = Project.newUntitled()
+        let note = Note(startBeat: 1.0, lengthBeats: 2.0, pitch: 60, velocity: 100)
+        let sibling = Note(startBeat: 4.0, lengthBeats: 1.0, pitch: 64, velocity: 90)
+        let clip = Clip(kind: .midi, name: "AC1", startBeat: 0, lengthBeats: 16,
+                        midiNotes: [note, sibling])
+        project.tracks[0].clips = [clip]
+        let noteID = note.id
+        let clipID = clip.id
+
+        // Positive lengths: never produce length <= 0.
+        for raw in [0.01, 0.05, Project.minimumNoteLengthBeats, 0.25, 1.0, 3.5, 8.0] {
+            try project.resizeNote(id: noteID, inClip: clipID, toLengthBeats: raw)
+            let len = project.tracks[0].clips[0].midiNotes![0].lengthBeats
+            tk.expect(len > 0, "resize raw \(raw) produces length > 0 (got \(len))")
+            if raw > 0 && raw < Project.minimumNoteLengthBeats {
+                tk.expectEqual(len, Project.minimumNoteLengthBeats,
+                               "sub-minimum \(raw) floors to minimumNoteLengthBeats")
+            } else if raw >= Project.minimumNoteLengthBeats {
+                tk.expectEqual(len, raw, "in-range resize stores exact length \(raw)")
+            }
+        }
+        // Sibling and other fields untouched by last resize.
+        let afterPos = project.tracks[0].clips[0].midiNotes!
+        tk.expectEqual(afterPos[0].startBeat, 1.0, "resize leaves startBeat")
+        tk.expectEqual(afterPos[0].pitch, 60, "resize leaves pitch")
+        tk.expectEqual(afterPos[0].velocity, 100, "resize leaves velocity")
+        tk.expectEqual(afterPos[1].lengthBeats, 1.0, "sibling length untouched")
+        tk.expectEqual(afterPos[1].id, sibling.id, "sibling id untouched")
+
+        // Length <= 0 would place the note end at or before its start: rejected.
+        let lenBeforeReject = project.tracks[0].clips[0].midiNotes![0].lengthBeats
+        tk.expectThrows("resize length 0 (end at start) rejected") {
+            try project.resizeNote(id: noteID, inClip: clipID, toLengthBeats: 0)
+        }
+        tk.expectThrows("resize negative length (end before start) rejected") {
+            try project.resizeNote(id: noteID, inClip: clipID, toLengthBeats: -1.5)
+        }
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes![0].lengthBeats, lenBeforeReject,
+                       "rejected resize leaves prior length")
+        tk.expectEqual(project.tracks[0].clips[0].midiNotes![0].startBeat, 1.0,
+                       "rejected resize leaves startBeat")
+
+        // Snap each picker grid: UI floors at minimumNoteLengthBeats then resizes.
+        // For grid > 0, snapped values at or above the grid land on an exact multiple.
+        for opt in SnapGrid.pickerOptions {
+            let grid = opt.beats
+            let label = opt.label
+            if grid <= 0 {
+                // Off: snap is identity; a free length still stays positive via the floor.
+                let free = 1.37
+                let snappedOff = max(Project.minimumNoteLengthBeats,
+                                     PianoRollLayout.snap(free, to: grid))
+                tk.expectEqual(snappedOff, free, "snap Off is identity for \(free)")
+                try project.resizeNote(id: noteID, inClip: clipID, toLengthBeats: snappedOff)
+                let got = project.tracks[0].clips[0].midiNotes![0].lengthBeats
+                tk.expect(got > 0, "Off-grid resize length > 0")
+                continue
+            }
+            // Snap alone lands on a grid multiple. UI then floors at minimumNoteLengthBeats
+            // so the note stays visible; that floor can leave a non-multiple when the snap
+            // would otherwise sit below the minimum (e.g. 1/16T grid vs 1/32 floor).
+            let raws = [grid * 0.4, grid * 1.0, grid * 1.5, grid * 2.0, grid * 3.7, grid * 8.0]
+            for raw in raws {
+                let pureSnap = PianoRollLayout.snap(raw, to: grid)
+                let q = (pureSnap / grid).rounded()
+                let err = abs(pureSnap - q * grid)
+                tk.expect(err < 1e-9,
+                          "\(label) pure snap of \(raw) is grid multiple (got \(pureSnap), err \(err))")
+                let applied = max(Project.minimumNoteLengthBeats, pureSnap)
+                tk.expect(applied > 0, "\(label) applied length of \(raw) is positive")
+                if pureSnap >= Project.minimumNoteLengthBeats - 1e-12 {
+                    let q2 = (applied / grid).rounded()
+                    tk.expect(abs(applied - q2 * grid) < 1e-9,
+                              "\(label) applied \(applied) stays grid multiple when above floor")
+                }
+                try project.resizeNote(id: noteID, inClip: clipID, toLengthBeats: applied)
+                let stored = project.tracks[0].clips[0].midiNotes![0].lengthBeats
+                tk.expect(stored > 0, "\(label) stored length > 0 after resize to \(applied)")
+                tk.expectEqual(stored, applied, "\(label) stores applied length \(applied)")
+            }
+        }
+
+        // Resize handle: never larger than the note, never negative, for widths 0...400.
+        for wInt in 0...400 {
+            let w = CGFloat(wInt)
+            let handle = PianoRollLayout.resizeHandleWidth(noteWidth: w)
+            tk.expect(handle >= 0, "handle width non-negative at noteWidth \(wInt) (got \(handle))")
+            if w <= 0 {
+                tk.expectEqual(handle, 0, "handle is 0 when noteWidth is \(wInt)")
+            } else {
+                tk.expect(handle <= w + 1e-9,
+                          "handle never wider than note at \(wInt) (handle \(handle), note \(w))")
+                tk.expect(handle <= PianoRollLayout.resizeHandleMaxWidth + 1e-9,
+                          "handle capped at max at \(wInt)")
+            }
+        }
+        // Spot-check the 30% rule on a short note and the max on a wide note.
+        tk.expectEqual(PianoRollLayout.resizeHandleWidth(noteWidth: 10),
+                       10 * PianoRollLayout.resizeHandleFraction,
+                       "short note uses fraction of width")
+        tk.expectEqual(PianoRollLayout.resizeHandleWidth(noteWidth: 100),
+                       PianoRollLayout.resizeHandleMaxWidth,
+                       "wide note uses max handle width")
+
+        // AppStore continuous path: same no-non-positive guarantee via gesture API.
+        let (store, dir) = makeACStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let aNote = Note(startBeat: 0, lengthBeats: 2, pitch: 72, velocity: 100)
+        let aClip = Clip(kind: .midi, name: "AS-AC1", startBeat: 0, lengthBeats: 8,
+                         midiNotes: [aNote])
+        store.project.tracks[0].clips = [aClip]
+        store.openPianoRoll(clipID: aClip.id)
+        store.beginPianoRollGesture(name: "Resize Note")
+        store.pianoRollResizeNote(id: aNote.id, toLengthBeats: 0.01)
+        store.pianoRollResizeNote(id: aNote.id, toLengthBeats: 0) // must not leave length <= 0
+        store.pianoRollResizeNote(id: aNote.id, toLengthBeats: -2)
+        store.endPianoRollGesture()
+        let asLen = store.project.tracks[0].clips[0].midiNotes![0].lengthBeats
+        tk.expect(asLen > 0, "AppStore resize path never leaves length <= 0 (got \(asLen))")
+        tk.expectEqual(asLen, Project.minimumNoteLengthBeats,
+                       "AppStore last accepted sub-minimum floors to minimum")
+    }
+
+    // MARK: - AC2 velocity
+
+    tk.suite("AC2: velocity clamp 1...127 never 0; multi-note set is one undo; other fields intact") {
+        // Pure clamp: inputs -100...300 land in 1...127 and never 0.
+        for v in -100...300 {
+            let c = PianoRollSelection.clampedVelocity(v)
+            tk.expect(c >= 1 && c <= 127,
+                      "clampedVelocity(\(v)) in 1...127 (got \(c))")
+            tk.expect(c != 0, "clampedVelocity(\(v)) is never 0 (MIDI note-off)")
+        }
+        tk.expectEqual(PianoRollSelection.clampedVelocity(0), 1, "0 clamps to 1")
+        tk.expectEqual(PianoRollSelection.clampedVelocity(1), 1, "1 stays 1")
+        tk.expectEqual(PianoRollSelection.clampedVelocity(64), 64, "64 stays 64")
+        tk.expectEqual(PianoRollSelection.clampedVelocity(127), 127, "127 stays 127")
+        tk.expectEqual(PianoRollSelection.clampedVelocity(128), 127, "128 clamps to 127")
+        tk.expectEqual(PianoRollSelection.clampedVelocity(-1), 1, "-1 clamps to 1")
+
+        // Multi-note selection: one undo entry; pitch/start/length/id untouched.
+        let (store, dir) = makeACStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let n1 = Note(startBeat: 0.0, lengthBeats: 1.0, pitch: 60, velocity: 40)
+        let n2 = Note(startBeat: 1.5, lengthBeats: 0.5, pitch: 64, velocity: 80)
+        let n3 = Note(startBeat: 3.0, lengthBeats: 2.0, pitch: 67, velocity: 110)
+        let clip = Clip(kind: .midi, name: "AC2", startBeat: 0, lengthBeats: 16,
+                        midiNotes: [n1, n2, n3])
+        store.project.tracks[0].clips = [clip]
+        store.openPianoRoll(clipID: clip.id)
+        tk.expect(!store.canUndo, "no undo before velocity gesture")
+
+        let origins = [n1, n2, n3]
+        store.beginPianoRollGesture(name: "Set Velocity")
+        // Several continuous updates (as a drag would fire); final targets via group delta.
+        for step in 1...20 {
+            let proposed = PianoRollSelection.applyGroupVelocityDelta(
+                origins: origins.map(\.velocity), delta: step)
+            store.pianoRollSetNoteVelocities([
+                (id: n1.id, velocity: proposed[0]),
+                (id: n2.id, velocity: proposed[1]),
+                (id: n3.id, velocity: proposed[2]),
+            ])
+        }
+        store.endPianoRollGesture()
+
+        let after = store.project.tracks[0].clips[0].midiNotes!
+        tk.expectEqual(after.count, 3, "still three notes after velocity set")
+        for i in origins.indices {
+            tk.expectEqual(after[i].id, origins[i].id, "note \(i) id untouched")
+            tk.expectEqual(after[i].pitch, origins[i].pitch, "note \(i) pitch untouched")
+            tk.expectEqual(after[i].startBeat, origins[i].startBeat, "note \(i) start untouched")
+            tk.expectEqual(after[i].lengthBeats, origins[i].lengthBeats,
+                           "note \(i) length untouched")
+            tk.expect(after[i].velocity >= 1 && after[i].velocity <= 127,
+                      "note \(i) velocity in 1...127")
+        }
+        // Explicit final values for +20: 60, 100, 127 (hard clamps).
+        tk.expectEqual(after[0].velocity, 60, "n1 velocity +20")
+        tk.expectEqual(after[1].velocity, 100, "n2 velocity +20")
+        tk.expectEqual(after[2].velocity, 127, "n3 velocity clamps at 127")
+        tk.expectEqual(store.undoName, "Set Velocity", "velocity gesture undo label")
+        tk.expect(store.canUndo, "undo available after multi-note velocity")
+
+        // Exactly one undo entry: undo once empties the stack and restores every field.
+        store.undo()
+        tk.expect(!store.canUndo, "single undo empties stack (one entry for multi-note)")
+        let restored = store.project.tracks[0].clips[0].midiNotes!
+        for i in origins.indices {
+            tk.expectEqual(restored[i].velocity, origins[i].velocity,
+                           "undo restores note \(i) velocity")
+            tk.expectEqual(restored[i].pitch, origins[i].pitch, "undo keeps note \(i) pitch")
+            tk.expectEqual(restored[i].startBeat, origins[i].startBeat,
+                           "undo keeps note \(i) start")
+            tk.expectEqual(restored[i].lengthBeats, origins[i].lengthBeats,
+                           "undo keeps note \(i) length")
+            tk.expectEqual(restored[i].id, origins[i].id, "undo keeps note \(i) id")
+        }
+        tk.expect(store.canRedo, "can redo multi-note velocity")
+        store.redo()
+        tk.expectEqual(store.project.tracks[0].clips[0].midiNotes![0].velocity, 60,
+                       "redo restores multi-note velocities")
+    }
+
+    // MARK: - AC3 loop region
+
+    tk.suite("AC3: LoopRegionLogic normalize/move/resize; playbackLoop and playbackStart cases") {
+        // normalized(): inverted input and too-short regions.
+        let inverted = LoopRegionLogic.normalized(start: 8, end: 2)
+        tk.expectEqual(inverted?.lowerBound, 2, "inverted start>end → lower is min")
+        tk.expectEqual(inverted?.upperBound, 8, "inverted start>end → upper is max")
+        tk.expect(LoopRegionLogic.normalized(start: 4, end: 4) == nil,
+                  "zero-length region rejected")
+        tk.expect(LoopRegionLogic.normalized(start: 1, end: 1 + LoopRegionLogic.minimumLengthBeats - 0.01) == nil,
+                  "sub-minimum length rejected")
+        let justEnough = LoopRegionLogic.normalized(
+            start: 0, end: LoopRegionLogic.minimumLengthBeats)
+        tk.expect(justEnough != nil, "exactly minimumLengthBeats accepted")
+        let neg = LoopRegionLogic.normalized(start: -5, end: -1)
+        // Both clamped to 0 → zero length → nil
+        tk.expect(neg == nil || (neg!.lowerBound >= 0 && neg!.upperBound >= neg!.lowerBound),
+                  "negative inputs never produce negative bounds")
+        let mixed = LoopRegionLogic.normalized(start: -2, end: 2)
+        tk.expectEqual(mixed?.lowerBound, 0, "negative start clamps to 0")
+        tk.expectEqual(mixed?.upperBound, 2, "positive end kept")
+
+        // moved(): never produces a negative start; length preserved.
+        let base = 4.0...10.0
+        let left = LoopRegionLogic.moved(base, by: -100)
+        tk.expect(left.lowerBound >= 0, "moved far left has non-negative start")
+        tk.expectEqual(left.lowerBound, 0, "moved far left clamps start to 0")
+        tk.expectEqual(left.upperBound - left.lowerBound, base.upperBound - base.lowerBound,
+                       "moved preserves length when clamped")
+        let right = LoopRegionLogic.moved(base, by: 3)
+        tk.expectEqual(right.lowerBound, 7, "moved right start")
+        tk.expectEqual(right.upperBound, 13, "moved right end")
+        tk.expect(right.lowerBound >= 0, "moved right start non-negative")
+
+        // resized() on each edge: keeps start < end or refuses.
+        let rStart = LoopRegionLogic.resized(base, edge: .start, to: 6)
+        tk.expectEqual(rStart?.lowerBound, 6, "resize start edge")
+        tk.expectEqual(rStart?.upperBound, 10, "resize start keeps end")
+        tk.expect(rStart!.lowerBound < rStart!.upperBound, "resized start still start < end")
+        let rEnd = LoopRegionLogic.resized(base, edge: .end, to: 12)
+        tk.expectEqual(rEnd?.lowerBound, 4, "resize end keeps start")
+        tk.expectEqual(rEnd?.upperBound, 12, "resize end edge")
+        tk.expect(rEnd!.lowerBound < rEnd!.upperBound, "resized end still start < end")
+        // Collapse / invert to equal: refuse.
+        // Collapse to zero length: refuse.
+        tk.expect(LoopRegionLogic.resized(base, edge: .start, to: 10) == nil,
+                  "resize start to end refused")
+        tk.expect(LoopRegionLogic.resized(base, edge: .end, to: 4) == nil,
+                  "resize end to start refused")
+        // Start dragged past end with remaining span: normalized reorders so start < end.
+        let invertShort = LoopRegionLogic.resized(base, edge: .start, to: 11)
+        tk.expectEqual(invertShort?.lowerBound, 10, "start past end reorders lower to old end")
+        tk.expectEqual(invertShort?.upperBound, 11, "start past end reorders upper to drag")
+        tk.expect(invertShort!.lowerBound < invertShort!.upperBound,
+                  "reordered resize keeps start < end")
+        let invertResize = LoopRegionLogic.resized(base, edge: .start, to: 14)
+        // start=14 end=10 → lo=10 hi=14 length=4 ≥ minimum → accepted reordered
+        tk.expectEqual(invertResize?.lowerBound, 10, "inverted resize lower")
+        tk.expectEqual(invertResize?.upperBound, 14, "inverted resize upper")
+        tk.expect(invertResize!.lowerBound < invertResize!.upperBound,
+                  "long inverted resize keeps start < end")
+
+        // playbackLoop: off, nil region, with region.
+        tk.expect(LoopRegionLogic.playbackLoop(loopOn: false, region: 0...4, arrangementEnd: 16) == nil,
+                  "loop off → nil playback loop")
+        tk.expect(LoopRegionLogic.playbackLoop(loopOn: false, region: nil, arrangementEnd: 16) == nil,
+                  "loop off + nil region → nil")
+        let fallback = LoopRegionLogic.playbackLoop(loopOn: true, region: nil, arrangementEnd: 16)
+        tk.expectEqual(fallback?.lowerBound, 0, "nil region fallback starts at 0")
+        tk.expectEqual(fallback?.upperBound, 16, "nil region fallback uses arrangementEnd")
+        let shortArr = LoopRegionLogic.playbackLoop(loopOn: true, region: nil, arrangementEnd: 1)
+        tk.expectEqual(shortArr?.upperBound, 4, "fallback floors at 4 beats")
+        let withRegion = LoopRegionLogic.playbackLoop(loopOn: true, region: 2...6, arrangementEnd: 32)
+        tk.expectEqual(withRegion, 2...6, "loop on with region uses the region")
+
+        // playbackStart: loop off/nil, playhead before / inside / after region.
+        tk.expectEqual(LoopRegionLogic.playbackStart(playhead: 5, loop: nil), 5,
+                       "no loop keeps playhead")
+        tk.expectEqual(LoopRegionLogic.playbackStart(playhead: -3, loop: nil), 0,
+                       "no loop clamps negative playhead to 0")
+        let loop = 4.0...12.0
+        tk.expectEqual(LoopRegionLogic.playbackStart(playhead: 2, loop: loop), 4,
+                       "playhead before region → loop start")
+        tk.expectEqual(LoopRegionLogic.playbackStart(playhead: 4, loop: loop), 4,
+                       "playhead at region start kept")
+        tk.expectEqual(LoopRegionLogic.playbackStart(playhead: 8, loop: loop), 8,
+                       "playhead inside region kept")
+        tk.expectEqual(LoopRegionLogic.playbackStart(playhead: 12, loop: loop), 4,
+                       "playhead at region end (half-open) → loop start")
+        tk.expectEqual(LoopRegionLogic.playbackStart(playhead: 20, loop: loop), 4,
+                       "playhead after region → loop start")
+    }
+
+    // MARK: - AC9 track rename / delete
+
+    tk.suite("AC9: rename keeps id/clips/colour; delete one track + undo; last track refused") {
+        let (store, dir) = makeACStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Seed track with clips and a non-default colour.
+        let n1 = Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)
+        let n2 = Note(startBeat: 2, lengthBeats: 1, pitch: 64, velocity: 90)
+        let clip = Clip(kind: .midi, name: "Phrase", startBeat: 0, lengthBeats: 8,
+                        midiNotes: [n1, n2])
+        let seedID = store.project.tracks[0].id
+        store.project.tracks[0].clips = [clip]
+        store.setTrackColorIndex(5, seedID)
+        let colorBefore = store.project.track(id: seedID)!.colorIndex
+        let clipIDsBefore = store.project.tracks[0].clips.map(\.id)
+        let noteIDsBefore = (store.project.tracks[0].clips[0].midiNotes ?? []).map(\.id)
+
+        store.renameTrack(seedID, to: "Lead Synth")
+        let renamed = store.project.track(id: seedID)
+        tk.expect(renamed != nil, "renamed track still addressable by same id")
+        tk.expectEqual(renamed?.id, seedID, "rename keeps track id")
+        tk.expectEqual(renamed?.name, "Lead Synth", "rename sets name")
+        tk.expectEqual(renamed?.colorIndex, colorBefore, "rename leaves colorIndex")
+        tk.expectEqual(renamed?.clips.map(\.id), clipIDsBefore, "rename leaves clip ids")
+        tk.expectEqual((renamed?.clips[0].midiNotes ?? []).map(\.id), noteIDsBefore,
+                       "rename leaves note ids")
+        tk.expectEqual(renamed?.clips[0].midiNotes?[0].pitch, 60, "rename leaves note pitch")
+        tk.expectEqual(store.undoName, "Rename Track", "rename undo label")
+
+        // Second track so delete of one is legal; first still has the clip.
+        store.addInstrumentTrack()
+        let otherID = store.project.tracks[1].id
+        let otherClip = Clip(kind: .midi, name: "Other", startBeat: 4, lengthBeats: 4,
+                             midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 72, velocity: 80)])
+        store.project.tracks[1].clips = [otherClip]
+        let otherClipID = otherClip.id
+        let trackCountBeforeDelete = store.project.tracks.count
+        tk.expectEqual(trackCountBeforeDelete, 2, "two tracks before delete")
+
+        // Snapshot seed track payload for full restore check.
+        let seedSnapshot = store.project.track(id: seedID)!
+        let seedName = seedSnapshot.name
+        let seedColor = seedSnapshot.colorIndex
+        let seedClipCount = seedSnapshot.clips.count
+        let seedNotePitch = seedSnapshot.clips[0].midiNotes?[0].pitch
+
+        store.deleteTrack(seedID)
+        tk.expectEqual(store.project.tracks.count, 1, "one track remains after delete")
+        tk.expect(store.project.track(id: seedID) == nil, "deleted track id gone")
+        tk.expect(store.project.track(id: otherID) != nil, "other track still present")
+        tk.expectEqual(store.project.tracks[0].id, otherID, "remaining track is the other one")
+        tk.expectEqual(store.project.tracks[0].clips.map(\.id), [otherClipID],
+                       "only deleted track’s clips removed; other clip intact")
+        tk.expectEqual(store.undoName, "Delete Track", "delete undo label")
+        tk.expect(store.canUndo, "delete recorded undo")
+
+        // One undo restores the whole deleted track (id, name, colour, clips, notes).
+        store.undo()
+        tk.expectEqual(store.project.tracks.count, 2, "undo restores track count")
+        let restored = store.project.track(id: seedID)
+        tk.expect(restored != nil, "undo restores track by original id")
+        tk.expectEqual(restored?.name, seedName, "undo restores name")
+        tk.expectEqual(restored?.colorIndex, seedColor, "undo restores colorIndex")
+        tk.expectEqual(restored?.clips.count, seedClipCount, "undo restores clip count")
+        tk.expectEqual(restored?.clips[0].id, clip.id, "undo restores clip id")
+        tk.expectEqual(restored?.clips[0].midiNotes?[0].pitch, seedNotePitch,
+                       "undo restores note content")
+        tk.expectEqual(store.project.track(id: otherID)?.clips.map(\.id), [otherClipID],
+                       "other track untouched by undo of delete")
+        // Single undo entry: stack empty after one undo of the delete (plus earlier ops exist).
+        // The delete itself is one entry: redo delete then undo once.
+        store.redo()
+        tk.expectEqual(store.project.tracks.count, 1, "redo re-deletes")
+        store.undo()
+        tk.expectEqual(store.project.tracks.count, 2, "second single-undo restores whole track again")
+        tk.expect(store.project.track(id: seedID) != nil, "id restored again")
+
+        // Last remaining track: assert current behaviour (refuse, leave project with one track).
+        // Reduce to a single track first.
+        while store.project.tracks.count > 1 {
+            let doomed = store.project.tracks.last!.id
+            store.deleteTrack(doomed)
+        }
+        tk.expectEqual(store.project.tracks.count, 1, "exactly one track before last-delete attempt")
+        let lastID = store.project.tracks[0].id
+        let lastName = store.project.tracks[0].name
+        let lastFP = projectFingerprint(store.project)
+        let statusBefore = store.statusMessage
+        store.deleteTrack(lastID)
+        tk.expectEqual(store.project.tracks.count, 1,
+                       "deleting the last track leaves exactly one track")
+        tk.expectEqual(store.project.tracks[0].id, lastID,
+                       "last track id unchanged after refuse")
+        tk.expectEqual(store.project.tracks[0].name, lastName,
+                       "last track name unchanged after refuse")
+        tk.expectEqual(projectFingerprint(store.project), lastFP,
+                       "refusing last-track delete leaves project unchanged")
+        tk.expectEqual(store.statusMessage, "A project needs at least one track.",
+                       "last-track delete sets readable status")
+        // status must have been set (or already equal); if statusBefore matched by chance, still ok.
+        tk.expect(store.statusMessage != nil || statusBefore != nil,
+                  "status path exercised for last-track refuse")
+    }
+
+    // MARK: - AC15 metronome
+
+    tk.suite("AC15: metronome flag reaches transport; survives play then stop") {
+        // AppStore.setMetronome / metronomeOn / transport are internal to VerseAppCore, so
+        // VerseCheck exercises the public Transport flag that setMetronome writes and that
+        // startPlayback re-applies from the AppStore toggle.
+        let mediaDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VerseCheck-AC15-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: mediaDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: mediaDir) }
+
+        let engine = VerseAudioEngine()
+        engine.configure(with: Project.newUntitled())
+        let transport = Transport(engine: engine)
+        var project = Project.newUntitled()
+        let clip = Clip(kind: .midi, name: "AC15", startBeat: 0, lengthBeats: 8,
+                        midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
+        project.tracks[0].clips = [clip]
+
+        // Toggle on: flag set on transport.
+        transport.metronomeEnabled = true
+        tk.expect(transport.metronomeEnabled, "toggling on sets transport.metronomeEnabled")
+
+        // Play then stop must not clear the flag (AppStore re-applies it on each start; the
+        // transport itself must not silently drop it on stop either).
+        transport.play(project: project, mediaDir: mediaDir, from: 0, loop: nil)
+        tk.expect(transport.metronomeEnabled, "metronome still on during play")
+        transport.stop()
+        tk.expect(transport.metronomeEnabled, "metronome still on after stop")
+
+        // Toggle off: same survival through play/stop.
+        transport.metronomeEnabled = false
+        tk.expect(!transport.metronomeEnabled, "toggling off clears transport.metronomeEnabled")
+        transport.play(project: project, mediaDir: mediaDir, from: 0, loop: nil)
+        tk.expect(!transport.metronomeEnabled, "metronome still off during play")
+        transport.stop()
+        tk.expect(!transport.metronomeEnabled, "metronome still off after stop")
+
+        // AppStore play path: default metronome is off; play/stop must leave isPlaying clean
+        // and not require the (internal) toggle to run.
+        let (store, dir) = makeACStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        store.startEngineIfNeeded()
+        store.project.tracks[0].clips = [clip]
+        store.scrubPlayhead(to: 0)
+        store.startPlayback()
+        tk.expect(store.isPlaying, "AppStore play starts with default metronome off")
+        store.stopPlayback()
+        tk.expect(!store.isPlaying, "AppStore stop after play with metronome default")
+    }
+
+    // MARK: - AC16 instrument change
+
+    tk.suite("AC16: instrument change persists save/open; notes untouched") {
+        let (store, dir) = makeACStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let n1 = Note(startBeat: 0.5, lengthBeats: 1.0, pitch: 60, velocity: 100)
+        let n2 = Note(startBeat: 2.0, lengthBeats: 0.75, pitch: 67, velocity: 88)
+        let clip = Clip(kind: .midi, name: "AC16", startBeat: 0, lengthBeats: 8,
+                        midiNotes: [n1, n2])
+        store.project.tracks[0].clips = [clip]
+        let tid = store.project.tracks[0].id
+        let beforeNotes = store.project.tracks[0].clips[0].midiNotes!
+
+        // Rename so selectPreset does not also rewrite the track name (default "Piano" would).
+        store.renameTrack(tid, to: "Keys")
+        let instBefore = store.project.track(id: tid)?.instrument
+        tk.expect(instBefore != nil, "seed track has an instrument")
+
+        guard let target = SoundBank.presets.first(where: {
+            $0.program != instBefore?.program || $0.bankMSB != instBefore?.bankMSB
+        }) ?? SoundBank.presets.last else {
+            tk.expect(false, "curated presets available for instrument change")
+            return
+        }
+        store.selectPreset(target, for: tid)
+        let instAfter = store.project.track(id: tid)?.instrument
+        tk.expectEqual(instAfter?.program, target.program, "instrument program set")
+        tk.expectEqual(instAfter?.bankMSB, target.bankMSB, "instrument bankMSB set")
+        tk.expectEqual(instAfter?.bankLSB, target.bankLSB, "instrument bankLSB set")
+
+        // Notes completely unchanged.
+        let notesAfter = store.project.tracks[0].clips[0].midiNotes!
+        tk.expectEqual(notesAfter.count, beforeNotes.count, "note count unchanged by instrument")
+        for i in beforeNotes.indices {
+            tk.expectEqual(notesAfter[i].id, beforeNotes[i].id, "note \(i) id unchanged")
+            tk.expectEqual(notesAfter[i].pitch, beforeNotes[i].pitch, "note \(i) pitch unchanged")
+            tk.expectEqual(notesAfter[i].startBeat, beforeNotes[i].startBeat,
+                           "note \(i) start unchanged")
+            tk.expectEqual(notesAfter[i].lengthBeats, beforeNotes[i].lengthBeats,
+                           "note \(i) length unchanged")
+            tk.expectEqual(notesAfter[i].velocity, beforeNotes[i].velocity,
+                           "note \(i) velocity unchanged")
+        }
+        tk.expectEqual(store.project.track(id: tid)?.name, "Keys",
+                       "user track name kept when changing instrument")
+
+        // Save / open round trip preserves instrument and notes.
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VerseCheck-AC16-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pkg = root.appendingPathComponent("AC16.verse")
+        try ProjectPackage.write(store.project, to: pkg, mediaSourceDir: nil)
+        let back = try ProjectPackage.read(pkg)
+        let backTrack = back.tracks.first(where: { $0.id == tid })
+        tk.expect(backTrack != nil, "track present after open")
+        tk.expectEqual(backTrack?.instrument?.program, target.program,
+                       "instrument program survives save/open")
+        tk.expectEqual(backTrack?.instrument?.bankMSB, target.bankMSB,
+                       "instrument bankMSB survives save/open")
+        tk.expectEqual(backTrack?.instrument?.bankLSB, target.bankLSB,
+                       "instrument bankLSB survives save/open")
+        let backNotes = backTrack?.clips.first?.midiNotes ?? []
+        tk.expectEqual(backNotes.count, 2, "notes survive save/open")
+        tk.expectEqual(backNotes[0].pitch, 60, "note 0 pitch after open")
+        tk.expectEqual(backNotes[1].pitch, 67, "note 1 pitch after open")
+        tk.expectEqual(backNotes[0].id, n1.id, "note 0 id after open")
+        tk.expectEqual(backNotes[1].id, n2.id, "note 1 id after open")
+    }
+
+    // MARK: - AC17 track effects / inserts
+
+    tk.suite("AC17: built-in effect into Track.inserts under verse.builtin; clear removes only that") {
+        let (store, dir) = makeACStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        store.startEngineIfNeeded()
+        let tid = store.project.tracks[0].id
+        // Hosted / foreign insert must survive clearing the built-in.
+        let foreign = AudioUnitRef(
+            type: "aufx", subtype: "host", manufacturer: "com.example.thirdparty",
+            name: "Hosted FX", stateBlob: Data([0xAA]))
+        if let i = store.project.trackIndex(id: tid) {
+            store.project.tracks[i].inserts = [foreign]
+        }
+        tk.expectEqual(store.project.track(id: tid)?.inserts.count, 1,
+                       "foreign insert present before built-in")
+
+        store.setEffect(.reverb, tid)
+        tk.expectEqual(store.effect(for: tid), .reverb, "effect(for:) reports reverb")
+        let insertsAfter = store.project.track(id: tid)?.inserts ?? []
+        let builtinTag = AppStore.builtInEffectManufacturer
+        let builtins = insertsAfter.filter { $0.manufacturer == builtinTag }
+        tk.expectEqual(builtins.count, 1, "exactly one verse.builtin insert after set")
+        tk.expectEqual(builtins.first?.subtype, VerseAudioEngine.BuiltInEffect.reverb.rawValue,
+                       "builtin subtype is reverb")
+        tk.expectEqual(builtins.first?.manufacturer, builtinTag,
+                       "builtin manufacturer tag is verse.builtin")
+        tk.expect(insertsAfter.contains(where: {
+            $0.manufacturer == foreign.manufacturer && $0.subtype == foreign.subtype
+        }), "foreign insert still present after setEffect")
+        tk.expectEqual(AppStore.builtInEffect(fromInserts: insertsAfter), .reverb,
+                       "builtInEffect(fromInserts:) reads reverb")
+
+        // Save / open round trip.
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VerseCheck-AC17-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pkg = root.appendingPathComponent("AC17.verse")
+        try ProjectPackage.write(store.project, to: pkg, mediaSourceDir: nil)
+        let back = try ProjectPackage.read(pkg)
+        let backInserts = back.tracks.first(where: { $0.id == tid })?.inserts ?? []
+        tk.expectEqual(AppStore.builtInEffect(fromInserts: backInserts), .reverb,
+                       "built-in effect survives save/open")
+        tk.expect(backInserts.contains(where: { $0.manufacturer == builtinTag }),
+                  "verse.builtin entry present after open")
+        tk.expect(backInserts.contains(where: { $0.manufacturer == foreign.manufacturer }),
+                  "foreign insert survives save/open alongside builtin")
+
+        // Clear: removes only the built-in entry.
+        store.setEffect(.none, tid)
+        tk.expectEqual(store.effect(for: tid), .none, "effect(for:) reports none after clear")
+        let afterClear = store.project.track(id: tid)?.inserts ?? []
+        tk.expect(!afterClear.contains(where: { $0.manufacturer == builtinTag }),
+                  "clear removes verse.builtin entry")
+        tk.expectEqual(afterClear.count, 1, "only foreign insert remains after clear")
+        tk.expectEqual(afterClear.first?.manufacturer, foreign.manufacturer,
+                       "remaining insert is the foreign one")
+        tk.expectEqual(AppStore.builtInEffect(fromInserts: afterClear), .none,
+                       "builtInEffect reads none after clear")
+    }
+
     // MARK: - AC10 undo/redo deep stack + redo invalidation
 
     tk.suite("AC10: undo/redo deep stack and redo invalidation") {
