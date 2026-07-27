@@ -1514,6 +1514,10 @@ private func runACProbeChecksOnMain(_ tk: TestKit) {
         }
     }
 
+    // MARK: - AC4 / AC12 / AC19 adversarial (silent data loss / wrong playback)
+
+    runACAdversarialProbes(tk)
+
     // MARK: - AC5–AC8 seeded fuzz: random clip ops + invariants
 
     runACClipOpsFuzz(tk)
@@ -1566,6 +1570,787 @@ private func runACClipOpsFuzz(_ tk: TestKit) {
                   first ?? "all \(trials) trials ok")
         tk.expectEqual(failures, 0, "clip-ops fuzz failure count is zero")
     }
+
+}
+
+// MARK: - AC4 / AC12 / AC19 adversarial probes
+
+@MainActor
+private func runACAdversarialProbes(_ tk: TestKit) {
+    // MARK: - AC4 loop playback (plan clips to clip; loop wrap is stop+reschedule)
+
+    tk.suite("AC4: plan clips to clip; loop wrap is stop+reschedule, not plan clip") {
+        let spb = 0.5 // 120 BPM
+        // Long arrangement with notes inside the loop, straddling the end, and past it.
+        let inside = Note(startBeat: 4.5, lengthBeats: 0.5, pitch: 60, velocity: 100)
+        let straddle = Note(startBeat: 7.0, lengthBeats: 3.0, pitch: 64, velocity: 90)
+        let past = Note(startBeat: 10.0, lengthBeats: 1.0, pitch: 67, velocity: 80)
+        let early = Note(startBeat: 0.0, lengthBeats: 1.0, pitch: 48, velocity: 70)
+        // Clip-edge notes for the clipLengthBeats contract on this same loop setup.
+        let clipStraddle = Note(startBeat: 15.0, lengthBeats: 3.0, pitch: 77, velocity: 100)
+        let afterClip = Note(startBeat: 16.0, lengthBeats: 1.0, pitch: 78, velocity: 100)
+        let clip = Clip(kind: .midi, name: "AC4", startBeat: 0, lengthBeats: 16,
+                        midiNotes: [early, inside, straddle, past, clipStraddle, afterClip])
+        var project = Project.newUntitled()
+        project.tracks[0].clips = [clip]
+        project.tempoBPM = 120
+
+        let region = 4.0...8.0
+        let loop = LoopRegionLogic.playbackLoop(loopOn: true, region: region, arrangementEnd: 16)
+        tk.expectEqual(loop, 4.0...8.0, "playbackLoop with region uses the region")
+
+        // playbackStart: before / inside / at end / after.
+        tk.expectEqual(LoopRegionLogic.playbackStart(playhead: 0, loop: loop), 4,
+                       "playhead before loop → loop start")
+        tk.expectEqual(LoopRegionLogic.playbackStart(playhead: 6, loop: loop), 6,
+                       "playhead inside loop kept")
+        tk.expectEqual(LoopRegionLogic.playbackStart(playhead: 8, loop: loop), 4,
+                       "playhead at half-open end → loop start")
+        tk.expectEqual(LoopRegionLogic.playbackStart(playhead: 12, loop: loop), 4,
+                       "playhead after loop → loop start")
+
+        // planMIDINotes clips to clipLengthBeats only (loop is not a plan bound).
+        let fromBefore = LoopRegionLogic.playbackStart(playhead: 0, loop: region)
+        let planBefore = acPlanArrangementMIDI(
+            project: project, playFromBeat: fromBefore, secondsPerBeat: spb)
+        tk.expect(!planBefore.contains(where: { $0.pitch == afterClip.pitch }),
+                  "note at/after clip end (pitch \(afterClip.pitch)) not scheduled")
+        if let cs = planBefore.first(where: { $0.pitch == clipStraddle.pitch }) {
+            let offBeat = fromBefore + cs.offSeconds / spb
+            tk.expectEqual(offBeat, 16.0,
+                           "note straddling clip end truncates at clipLengthBeats")
+        } else {
+            tk.expect(false, "clip-straddle note with onset before clip end must be planned")
+        }
+
+        // A plan MAY contain events past the loop end. That is correct: Transport.play begins
+        // with stop() (cancel every pending MIDI work item and allNotesOff), and the loopTimer
+        // calls play(from: loop.lowerBound) at the wrap. Post-loop plan events are cancelled
+        // before they can sound; a straddling note is cut by allNotesOff at the wrap.
+        tk.expect(planBefore.contains(where: { $0.pitch == past.pitch }),
+                  "plan may include note past loop end (loop enforced by stop+reschedule)")
+        if let s = planBefore.first(where: { $0.pitch == straddle.pitch }) {
+            let offBeat = fromBefore + s.offSeconds / spb
+            tk.expect(offBeat > region.upperBound + 1e-9,
+                      "straddle note-off past loop end is expected in the plan (got \(offBeat))")
+        } else {
+            tk.expect(false, "straddle note with onset after playhead must be scheduled")
+        }
+
+        // Playhead filter (not loop filter): notes wholly before playFrom are dropped.
+        tk.expect(!planBefore.contains(where: { $0.pitch == early.pitch }),
+                  "note wholly before playhead (pitch \(early.pitch)) not scheduled")
+        tk.expect(planBefore.contains(where: { $0.pitch == inside.pitch }),
+                  "inside note still scheduled from loop start")
+
+        // playbackStart positions: plan is finite and well-formed (not loop-bounded).
+        for (label, ph) in [("before", 0.0), ("inside", 6.0), ("after", 12.0)] {
+            let from = LoopRegionLogic.playbackStart(playhead: ph, loop: region)
+            let planned = acPlanArrangementMIDI(
+                project: project, playFromBeat: from, secondsPerBeat: spb)
+            tk.expect(planned.count < 10_000,
+                      "playhead-\(label) plan finite (got \(planned.count))")
+            let issues = acPlanWellFormedIssues(planned)
+            tk.expect(issues.isEmpty, "playhead-\(label) plan well-formed",
+                      issues.first ?? "ok")
+        }
+
+        // Loop shorter than one beat: finite; not required to be confined to the region.
+        let shortRegion = LoopRegionLogic.normalized(start: 2.0, end: 2.25)
+        tk.expect(shortRegion != nil, "sub-beat loop (>= minimum) accepted")
+        if let short = shortRegion {
+            let from = LoopRegionLogic.playbackStart(playhead: 0, loop: short)
+            let planned = acPlanArrangementMIDI(
+                project: project, playFromBeat: from, secondsPerBeat: spb)
+            tk.expect(planned.count < 10_000, "short loop plan is finite (got \(planned.count))")
+            let shortIssues = acPlanWellFormedIssues(planned)
+            tk.expect(shortIssues.isEmpty, "short loop plan well-formed",
+                      shortIssues.first ?? "ok")
+        }
+
+        // Loop bounds sit mid-note: plan stays finite. Off may extend past loop end
+        // (wrap cancels it); clip length still bounds the plan.
+        let midNote = Note(startBeat: 3.5, lengthBeats: 4.0, pitch: 72, velocity: 100)
+        var midProject = Project.newUntitled()
+        midProject.tracks[0].clips = [
+            Clip(kind: .midi, name: "mid", startBeat: 0, lengthBeats: 16, midiNotes: [midNote])
+        ]
+        let midLoop = 3.0...5.0
+        let midFrom = LoopRegionLogic.playbackStart(playhead: 4, loop: midLoop)
+        tk.expectEqual(midFrom, 4, "playhead inside mid-note loop kept")
+        let midPlan = acPlanArrangementMIDI(
+            project: midProject, playFromBeat: midFrom, secondsPerBeat: spb)
+        tk.expect(midPlan.count < 10_000, "mid-note loop plan finite")
+        tk.expect(acPlanWellFormedIssues(midPlan).isEmpty, "mid-note loop plan well-formed")
+        if let m = midPlan.first(where: { $0.pitch == midNote.pitch }) {
+            let offBeat = midFrom + m.offSeconds / spb
+            tk.expect(offBeat > midLoop.upperBound + 1e-9,
+                      "mid-note plan off may pass loop end (got \(offBeat))")
+        }
+
+        // Zero-length loop: no hang / infinite events. Normalized rejects for UI path.
+        let zeroLoop: ClosedRange<Double> = 4.0...4.0
+        let zeroFrom = LoopRegionLogic.playbackStart(playhead: 0, loop: zeroLoop)
+        tk.expectEqual(zeroFrom, 4, "zero-length loop still yields a start beat")
+        let zeroPlan = acPlanArrangementMIDI(
+            project: project, playFromBeat: zeroFrom, secondsPerBeat: spb)
+        tk.expect(zeroPlan.count < 10_000, "zero-length loop plan is finite")
+        tk.expect(LoopRegionLogic.normalized(start: 4, end: 4) == nil,
+                  "normalized rejects zero-length")
+        if let inv = LoopRegionLogic.normalized(start: 9, end: 1) {
+            tk.expect(inv.lowerBound <= inv.upperBound, "normalized inverted keeps lower <= upper")
+            tk.expect(inv.upperBound - inv.lowerBound >= LoopRegionLogic.minimumLengthBeats - 1e-12,
+                      "normalized inverted meets minimum length")
+        }
+        tk.expect(LoopRegionLogic.normalized(start: 1.01, end: 1.0) == nil,
+                  "tiny inverted span rejected")
+
+        // loopLen floor: Transport uses max(0.1, regionBeats * spb). Pure formula, no wall clock.
+        let tinyRegion: ClosedRange<Double> = 0...0.1  // 0.05s at 120 BPM, under the floor
+        let loopLenSeconds = max(0.1, (tinyRegion.upperBound - tinyRegion.lowerBound) * spb)
+        tk.expectEqual(loopLenSeconds, 0.1, "loopLen floors at 0.1s (Transport loop timer)")
+        let longRegion: ClosedRange<Double> = 0...4    // 2.0s at 120 BPM
+        let longLoopLen = max(0.1, (longRegion.upperBound - longRegion.lowerBound) * spb)
+        tk.expectEqual(longLoopLen, 2.0, "loopLen uses region length when above floor")
+
+        // Seeded cloud: finite + well-formed plans; clip clipping holds; loop not a plan bound.
+        var rng = SeededRNG(seed: 0xAC04_1001)
+        var cloudFails = 0
+        var cloudFirst: String?
+        for trial in 0..<40 {
+            let lo = rng.nextDouble(in: 0...12)
+            let hi = lo + rng.nextDouble(in: LoopRegionLogic.minimumLengthBeats...6)
+            guard let reg = LoopRegionLogic.normalized(start: lo, end: hi) else { continue }
+            let nCount = rng.nextInt(in: 1...8)
+            var notes: [Note] = []
+            for _ in 0..<nCount {
+                notes.append(Note(
+                    startBeat: rng.nextDouble(in: 0...15),
+                    lengthBeats: rng.nextDouble(in: 0.05...4),
+                    pitch: rng.nextInt(in: 0...127),
+                    velocity: rng.nextInt(in: 1...127)
+                ))
+            }
+            let clipLen = 16.0
+            var p = Project.newUntitled()
+            p.tracks[0].clips = [Clip(kind: .midi, name: "fz", startBeat: 0, lengthBeats: clipLen,
+                                      midiNotes: notes)]
+            let pb = rng.nextDouble(in: -1...20)
+            let from = LoopRegionLogic.playbackStart(playhead: pb, loop: reg)
+            let planned = acPlanArrangementMIDI(project: p, playFromBeat: from, secondsPerBeat: spb)
+            if planned.count > 10_000 {
+                cloudFails += 1
+                cloudFirst = cloudFirst ?? "trial \(trial): plan count \(planned.count)"
+                continue
+            }
+            if let first = acPlanWellFormedIssues(planned).first {
+                cloudFails += 1
+                cloudFirst = cloudFirst ?? "trial \(trial): \(first)"
+                continue
+            }
+            // Clip contract: no note-off past clip end (relative to playFrom).
+            for (i, ev) in planned.enumerated() {
+                let offBeat = from + ev.offSeconds / spb
+                if offBeat > clipLen + 1e-9 {
+                    cloudFails += 1
+                    cloudFirst = cloudFirst ?? "trial \(trial): ev\(i) off \(offBeat) past clip \(clipLen)"
+                    break
+                }
+            }
+        }
+        tk.expect(cloudFails == 0, "AC4 seeded loop plan cloud clean",
+                  cloudFirst ?? "40 trials ok")
+    }
+
+    // MARK: - AC12 crash recovery (adversarial: silent data loss)
+
+    tk.suite("AC12: crash recovery restores content; corrupt/future refuse; discard/prune safe") {
+        let fm = FileManager.default
+
+        // --- Happy path: autosave, no clean shutdown, recover same content ---
+        let baseOK = fm.temporaryDirectory
+            .appendingPathComponent("VerseCheck-AC12-ok-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: baseOK) }
+        let recOK = RecoveryManager(baseDir: baseOK)
+        recOK.beginSession()
+        var edited = Project.newUntitled()
+        edited.title = "AC12 Unsaved"
+        edited.tempoBPM = 137
+        let n1 = Note(startBeat: 0.25, lengthBeats: 1.5, pitch: 61, velocity: 111)
+        let n2 = Note(startBeat: 2.0, lengthBeats: 0.5, pitch: 65, velocity: 99)
+        let c1 = Clip(kind: .midi, name: "Hook", startBeat: 4, lengthBeats: 8,
+                      midiNotes: [n1, n2])
+        edited.tracks[0].name = "Lead"
+        edited.tracks[0].colorIndex = 3
+        edited.tracks[0].clips = [c1]
+        edited.tracks.append(Track(
+            kind: .audio, name: "Vox", colorIndex: 1,
+            clips: [Clip(kind: .audio, name: "Take", startBeat: 0, lengthBeats: 8,
+                         mediaFile: "take-ac12.caf", mediaStartSeconds: 0.5)]))
+        let expectedFP = projectFingerprint(edited)
+        let expectedTitle = edited.title
+        let expectedTempo = edited.tempoBPM
+        let expectedTrackNames = edited.tracks.map(\.name)
+        let expectedNoteIDs = [n1.id, n2.id]
+        recOK.autosave(edited)
+        // Simulate crash: do NOT call endSessionCleanly / discardRecovery.
+        let relaunchOK = RecoveryManager(baseDir: baseOK)
+        let infoOK = relaunchOK.detectRecovery()
+        tk.expect(infoOK != nil, "detectRecovery reports recoverable work after unclean exit")
+        tk.expect(infoOK?.project != nil, "recovered project present")
+        tk.expectEqual(infoOK?.projectLoadFailureMessage, nil,
+                       "valid autosave has no projectLoadFailureMessage")
+        if let recovered = infoOK?.project {
+            tk.expectEqual(projectFingerprint(recovered), expectedFP,
+                           "recovered project fingerprint matches autosaved content")
+            tk.expectEqual(recovered.title, expectedTitle, "recovered title")
+            tk.expectEqual(recovered.tempoBPM, expectedTempo, "recovered tempo")
+            tk.expectEqual(recovered.tracks.map(\.name), expectedTrackNames, "recovered track names")
+            tk.expectEqual(recovered.tracks[0].colorIndex, 3, "recovered colour")
+            let notes = recovered.tracks[0].clips.first?.midiNotes ?? []
+            tk.expectEqual(notes.map(\.id), expectedNoteIDs, "recovered note ids")
+            tk.expectEqual(notes.first?.pitch, 61, "recovered note pitch")
+            tk.expectEqual(recovered.tracks[1].clips.first?.mediaFile, "take-ac12.caf",
+                           "recovered audio mediaFile")
+            tk.expectEqual(recovered.tracks[1].clips.first?.mediaStartSeconds, 0.5,
+                           "recovered mediaStartSeconds")
+        }
+
+        // --- Truncated autosave: load failure, never silent "no work" ---
+        let baseTrunc = fm.temporaryDirectory
+            .appendingPathComponent("VerseCheck-AC12-trunc-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: baseTrunc) }
+        let recTrunc = RecoveryManager(baseDir: baseTrunc)
+        recTrunc.beginSession()
+        var truncProject = Project.newUntitled()
+        truncProject.title = "Will Truncate"
+        truncProject.tempoBPM = 100
+        truncProject.tracks[0].clips = [
+            Clip(kind: .midi, name: "T", startBeat: 0, lengthBeats: 4,
+                 midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 60, velocity: 100)])
+        ]
+        recTrunc.autosave(truncProject)
+        let autosaveURL = recTrunc.workspaceDir.appendingPathComponent("autosave-project.json")
+        tk.expect(fm.fileExists(atPath: autosaveURL.path), "autosave written before chop")
+        let fullData = try Data(contentsOf: autosaveURL)
+        tk.expect(fullData.count > 40, "autosave large enough to chop (got \(fullData.count))")
+        for chop in [1, 17, fullData.count / 2, fullData.count - 5, fullData.count] {
+            let keep = max(0, fullData.count - chop)
+            let chopped = fullData.prefix(keep)
+            try Data(chopped).write(to: autosaveURL, options: [.atomic])
+            let info = RecoveryManager(baseDir: baseTrunc).detectRecovery()
+            tk.expect(info != nil,
+                      "truncated autosave (chop \(chop)) still surfaces recovery, not silent nil")
+            tk.expect(info?.project == nil,
+                      "truncated autosave (chop \(chop)) does not yield a partial project")
+            let fail = info?.projectLoadFailureMessage ?? ""
+            tk.expect(!fail.isEmpty,
+                      "truncated autosave (chop \(chop)) sets projectLoadFailureMessage")
+            // File retained for the user (not deleted as garbage).
+            tk.expect(fm.fileExists(atPath: autosaveURL.path),
+                      "truncated autosave retained on disk after detect (chop \(chop))")
+        }
+
+        // --- Future schemaVersion: refuse, never silent drop of unknown fields ---
+        let baseFuture = fm.temporaryDirectory
+            .appendingPathComponent("VerseCheck-AC12-future-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: baseFuture) }
+        let recFuture = RecoveryManager(baseDir: baseFuture)
+        recFuture.beginSession()
+        let futureV = Schema.current + 50
+        let futureJSON = """
+        {
+          "schemaVersion": \(futureV),
+          "id": "00000000-0000-4000-8000-0000000000AC",
+          "title": "Future AC12",
+          "tempoBPM": 88,
+          "timeSignature": { "num": 4, "den": 4 },
+          "tracks": [],
+          "masterVolume": 0.8,
+          "createdAt": "1970-01-01T00:00:00Z",
+          "modifiedAt": "1970-01-01T00:00:00Z",
+          "futureOnlyField": { "mustNotSilentlyDrop": true }
+        }
+        """
+        let futureData = Data(futureJSON.utf8)
+        let futureAutosave = recFuture.workspaceDir.appendingPathComponent("autosave-project.json")
+        try futureData.write(to: futureAutosave, options: [.atomic])
+        let infoFuture = RecoveryManager(baseDir: baseFuture).detectRecovery()
+        tk.expect(infoFuture != nil, "future-schema autosave surfaces recovery")
+        tk.expect(infoFuture?.project == nil,
+                  "future schema is not partially decoded as a project")
+        let futureFail = infoFuture?.projectLoadFailureMessage ?? ""
+        tk.expect(!futureFail.isEmpty, "future schema sets projectLoadFailureMessage")
+        tk.expect(futureFail.localizedCaseInsensitiveContains("newer")
+                  || futureFail.localizedCaseInsensitiveContains("schema")
+                  || futureFail.localizedCaseInsensitiveContains("version"),
+                  "future schema failure mentions schema/version/newer")
+        // Direct open path also refuses (no silent field drop on re-save).
+        var openedFuture = false
+        do {
+            _ = try Project.fromJSON(futureData)
+            openedFuture = true
+        } catch { /* expected */ }
+        tk.expect(!openedFuture, "Project.fromJSON refuses future schemaVersion")
+        tk.expect(fm.fileExists(atPath: futureAutosave.path),
+                  "future autosave retained after detectRecovery")
+
+        // --- discardRecovery: on-disk .verse package intact; recovery state only removed ---
+        let baseDiscard = fm.temporaryDirectory
+            .appendingPathComponent("VerseCheck-AC12-discard-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: baseDiscard) }
+        let pkgRoot = baseDiscard.appendingPathComponent("packages", isDirectory: true)
+        try fm.createDirectory(at: pkgRoot, withIntermediateDirectories: true)
+        var diskProject = Project.newUntitled()
+        diskProject.title = "Saved On Disk"
+        diskProject.tempoBPM = 120
+        diskProject.tracks[0].clips = [
+            Clip(kind: .midi, name: "Keep", startBeat: 0, lengthBeats: 4,
+                 midiNotes: [Note(startBeat: 0, lengthBeats: 1, pitch: 72, velocity: 100)])
+        ]
+        let pkg = pkgRoot.appendingPathComponent("Saved.verse")
+        try ProjectPackage.write(diskProject, to: pkg, mediaSourceDir: nil)
+        let diskFP = projectFingerprint(try ProjectPackage.read(pkg))
+
+        let recDiscard = RecoveryManager(baseDir: baseDiscard)
+        recDiscard.beginSession()
+        var dirty = Project.newUntitled()
+        dirty.title = "Dirty Recovery Only"
+        dirty.tempoBPM = 50
+        recDiscard.autosave(dirty)
+        let orphan = recDiscard.newTakeURL()
+        try Data([0x01, 0x02, 0x03]).write(to: orphan)
+        recDiscard.noteRecordingStarted(takeFilename: orphan.lastPathComponent)
+        // Unrelated media that belongs to other work must survive discard.
+        let keepMedia = recDiscard.mediaDir.appendingPathComponent("other-project.caf")
+        try Data([0xAA]).write(to: keepMedia)
+
+        recDiscard.discardRecovery()
+        tk.expect(RecoveryManager(baseDir: baseDiscard).detectRecovery() == nil,
+                  "discardRecovery clears recovery offer")
+        tk.expect(!fm.fileExists(
+            atPath: recDiscard.workspaceDir.appendingPathComponent("autosave-project.json").path),
+                  "discard removes autosave")
+        tk.expect(!fm.fileExists(
+            atPath: recDiscard.workspaceDir.appendingPathComponent("session.lock").path),
+                  "discard removes session lock")
+        tk.expect(!fm.fileExists(atPath: orphan.path),
+                  "discard removes journaled in-progress take only")
+        tk.expect(fm.fileExists(atPath: keepMedia.path),
+                  "discard leaves unrelated media intact")
+        let afterDiscard = try ProjectPackage.read(pkg)
+        tk.expectEqual(projectFingerprint(afterDiscard), diskFP,
+                       "discardRecovery leaves on-disk .verse package content unchanged")
+        tk.expectEqual(afterDiscard.title, "Saved On Disk", "package title intact after discard")
+        tk.expectEqual(afterDiscard.tracks[0].clips.first?.midiNotes?.first?.pitch, 72,
+                       "package notes intact after discard")
+
+        // --- pruneMedia: never delete media still referenced by a clip ---
+        let basePrune = fm.temporaryDirectory
+            .appendingPathComponent("VerseCheck-AC12-prune-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: basePrune) }
+        let recPrune = RecoveryManager(baseDir: basePrune)
+        let refA = "clip-ref-a.caf"
+        let refB = "clip-ref-b.caf"
+        let orphanName = "orphan-unreferenced.caf"
+        try Data([1]).write(to: recPrune.mediaDir.appendingPathComponent(refA))
+        try Data([2]).write(to: recPrune.mediaDir.appendingPathComponent(refB))
+        try Data([3]).write(to: recPrune.mediaDir.appendingPathComponent(orphanName))
+        // Project that still references both A and B (as real clips would).
+        var mediaProject = Project.newUntitled()
+        mediaProject.tracks = [
+            Track(kind: .audio, name: "A", clips: [
+                Clip(kind: .audio, name: "A", startBeat: 0, lengthBeats: 4, mediaFile: refA)
+            ]),
+            Track(kind: .audio, name: "B", clips: [
+                Clip(kind: .audio, name: "B", startBeat: 4, lengthBeats: 4, mediaFile: refB)
+            ])
+        ]
+        let referenced = Set(mediaProject.tracks.flatMap { $0.clips.compactMap(\.mediaFile) })
+        tk.expectEqual(referenced, [refA, refB], "referenced set from clips")
+        recPrune.pruneMedia(keeping: referenced)
+        tk.expect(fm.fileExists(atPath: recPrune.mediaDir.appendingPathComponent(refA).path),
+                  "pruneMedia keeps clip-referenced \(refA)")
+        tk.expect(fm.fileExists(atPath: recPrune.mediaDir.appendingPathComponent(refB).path),
+                  "pruneMedia keeps clip-referenced \(refB)")
+        tk.expect(!fm.fileExists(atPath: recPrune.mediaDir.appendingPathComponent(orphanName).path),
+                  "pruneMedia removes unreferenced orphan")
+        // Second prune with the same set must not delete the keepers.
+        recPrune.pruneMedia(keeping: referenced)
+        tk.expect(fm.fileExists(atPath: recPrune.mediaDir.appendingPathComponent(refA).path),
+                  "second prune still keeps \(refA)")
+        tk.expect(fm.fileExists(atPath: recPrune.mediaDir.appendingPathComponent(refB).path),
+                  "second prune still keeps \(refB)")
+        // Empty keep set may clear files, but must not throw or remove the Media directory.
+        recPrune.pruneMedia(keeping: [])
+        tk.expect(fm.fileExists(atPath: recPrune.mediaDir.path),
+                  "Media directory survives empty keep-set prune")
+    }
+
+    // MARK: - AC19 layout logic (valid domain: no NaN / negative / row disagreement)
+
+    tk.suite("AC19: ActionBarLogic + PianoRollLayout valid-domain sizes never NaN/negative") {
+        // ActionBarLogic: extreme zoom / empty selection / nonsense content beats.
+        let zooms: [Double] = [
+            0, -1, -1e9, 1e-20, 1e9, Double.nan,
+            Double.infinity, -Double.infinity,
+            BeatTimeline.minZoom, BeatTimeline.maxZoom,
+            BeatTimeline.minZoom / 2, BeatTimeline.maxZoom * 2
+        ]
+        for z in zooms {
+            let zin = ActionBarLogic.zoomInHelp(zoom: z)
+            let zout = ActionBarLogic.zoomOutHelp(zoom: z)
+            tk.expect(!zin.help.isEmpty, "zoomInHelp non-empty help at zoom \(z)")
+            tk.expect(!zout.help.isEmpty, "zoomOutHelp non-empty help at zoom \(z)")
+            // enabled is a Bool; just force evaluation (no trap on NaN compares).
+            _ = zin.enabled
+            _ = zout.enabled
+        }
+        for beats in [-100.0, -1.0, 0.0, 0.0001, 1.0, 1e12, Double.nan, Double.infinity] {
+            let fit = ActionBarLogic.zoomFitHelp(contentBeats: beats)
+            tk.expect(!fit.help.isEmpty, "zoomFitHelp non-empty at contentBeats \(beats)")
+        }
+        // Selection extremes for enablement helpers (must not trap; help non-empty).
+        var emptyProject = Project.newUntitled()
+        emptyProject.tracks[0].clips = []
+        let hugeSelect = Set((0..<500).map { _ in UUID() })
+        let splitEmpty = ActionBarLogic.splitHelp(
+            selectedClipIDs: [], project: emptyProject, playheadBeat: 0)
+        tk.expect(!splitEmpty.enabled && !splitEmpty.help.isEmpty, "split empty selection disabled")
+        let splitHuge = ActionBarLogic.splitHelp(
+            selectedClipIDs: hugeSelect, project: emptyProject, playheadBeat: -5)
+        tk.expect(!splitHuge.enabled && !splitHuge.help.isEmpty, "split multi-select disabled")
+        let dupHuge = ActionBarLogic.duplicateHelp(selectedClipIDs: hugeSelect)
+        tk.expect(dupHuge.enabled && !dupHuge.help.isEmpty, "duplicate multi enabled with help")
+        let delNotes = ActionBarLogic.deleteHelp(
+            surface: .pianoRoll, selectedClipIDs: [], selectedNoteIDs: hugeSelect)
+        tk.expect(delNotes.enabled && !delNotes.help.isEmpty, "delete many notes enabled")
+        let delNone = ActionBarLogic.deleteHelp(
+            surface: .arrangement, selectedClipIDs: [], selectedNoteIDs: [])
+        tk.expect(!delNone.enabled && !delNone.help.isEmpty, "delete none disabled with help")
+        let loopMany = ActionBarLogic.loopFromClipHelp(selectedClipIDs: hugeSelect)
+        tk.expect(!loopMany.enabled && !loopMany.help.isEmpty, "loop multi-select disabled")
+        let clear = ActionBarLogic.clearLoopHelp(hasRegion: false)
+        tk.expect(!clear.enabled && !clear.help.isEmpty, "clear loop empty disabled")
+
+        // fitBandHeights: only inputs call sites can produce (TimelineWorkspaceView).
+        // Call site mins: arrangementMinHeight = laneHeight*2, rollMinHeight = 140 (positive).
+        // Workspace carries minHeight so availableHeight is never a zero/negative garbage budget.
+        let callSiteMinArr = ArrangementLayout.laneHeight * 2
+        let callSiteMinRoll: CGFloat = 140
+        let rulerH = BeatTimeline.rulerHeight
+        let dividerH: CGFloat = 8
+        let workspaceMinCollapsed: CGFloat = 180
+        let workspaceMinExpanded = callSiteMinArr + callSiteMinRoll + rulerH + 8
+
+        // Collapsed roll at the workspace minimum: finite, non-negative, roll == 0, stack fits.
+        let collapsedWS = PianoRollLayout.fitBandHeights(
+            availableHeight: workspaceMinCollapsed,
+            rulerHeight: rulerH,
+            dividerHeight: dividerH,
+            rollExpanded: false,
+            preferredArrangement: ArrangementLayout.defaultBandHeight,
+            preferredRoll: PianoRollLayout.defaultBandHeight,
+            minArrangement: callSiteMinArr,
+            minRoll: callSiteMinRoll
+        )
+        tk.expect(collapsedWS.arrangement.isFinite && !collapsedWS.arrangement.isNaN
+                    && collapsedWS.roll.isFinite && !collapsedWS.roll.isNaN,
+                  "collapsed workspace-min fit is finite")
+        tk.expect(collapsedWS.arrangement >= 0 && collapsedWS.roll >= 0,
+                  "collapsed workspace-min non-negative (arr \(collapsedWS.arrangement), roll \(collapsedWS.roll))")
+        tk.expectEqual(collapsedWS.roll, 0, "collapsed roll is 0")
+        let collapsedBudget = max(0, workspaceMinCollapsed - rulerH)
+        tk.expect(collapsedWS.arrangement + collapsedWS.roll <= collapsedBudget + 1e-6,
+                  "collapsed stack fits budget \(collapsedBudget) (got arr \(collapsedWS.arrangement))")
+
+        // Expanded at workspace minimum with positive call-site mins.
+        let expandedWS = PianoRollLayout.fitBandHeights(
+            availableHeight: workspaceMinExpanded,
+            rulerHeight: rulerH,
+            dividerHeight: dividerH,
+            rollExpanded: true,
+            preferredArrangement: ArrangementLayout.defaultBandHeight,
+            preferredRoll: PianoRollLayout.defaultBandHeight,
+            minArrangement: callSiteMinArr,
+            minRoll: callSiteMinRoll
+        )
+        tk.expect(expandedWS.arrangement.isFinite && !expandedWS.arrangement.isNaN
+                    && expandedWS.roll.isFinite && !expandedWS.roll.isNaN,
+                  "expanded workspace-min fit is finite")
+        tk.expect(expandedWS.arrangement >= 0 && expandedWS.roll >= 0,
+                  "expanded workspace-min non-negative (arr \(expandedWS.arrangement), roll \(expandedWS.roll))")
+        let expandedBudget = max(0, workspaceMinExpanded - rulerH - dividerH)
+        tk.expect(expandedWS.arrangement + expandedWS.roll <= expandedBudget + 1e-6,
+                  "expanded stack fits budget \(expandedBudget)")
+
+        // Valid-domain available heights: workspace floor for each mode, up through large viewports.
+        let validAvails: [CGFloat] = [
+            workspaceMinCollapsed, workspaceMinExpanded,
+            320, 480, 640, 900, 1_200, 2_000
+        ]
+        for expanded in [false, true] {
+            let floor = expanded ? workspaceMinExpanded : workspaceMinCollapsed
+            for avail in validAvails where avail + 1e-9 >= floor {
+                let r = PianoRollLayout.fitBandHeights(
+                    availableHeight: avail,
+                    rulerHeight: rulerH,
+                    dividerHeight: dividerH,
+                    rollExpanded: expanded,
+                    preferredArrangement: ArrangementLayout.defaultBandHeight,
+                    preferredRoll: PianoRollLayout.defaultBandHeight,
+                    minArrangement: callSiteMinArr,
+                    minRoll: callSiteMinRoll
+                )
+                tk.expect(r.arrangement.isFinite && !r.arrangement.isNaN && r.arrangement >= 0
+                            && r.roll.isFinite && !r.roll.isNaN && r.roll >= 0,
+                          "fitBand safe at avail \(avail) exp=\(expanded) (arr \(r.arrangement), roll \(r.roll))")
+                if !expanded {
+                    tk.expectEqual(r.roll, 0, "collapsed roll is 0 at avail \(avail)")
+                }
+            }
+        }
+
+        // Combinatorial sweep over the VALID call-site domain only.
+        // Call sites always pass positive mins (laneHeight*2, 140) and geo.height that is
+        // at least the workspace minHeight for the current expanded state.
+        var fitFails = 0
+        var fitFirst: String?
+        let validHeights: [CGFloat] = [
+            workspaceMinCollapsed, workspaceMinExpanded, 300, 400, 640, 900, 1_600
+        ]
+        let prefsArr: [CGFloat] = [
+            callSiteMinArr, ArrangementLayout.defaultBandHeight, ArrangementLayout.laneHeight * 6
+        ]
+        let prefsRoll: [CGFloat] = [
+            callSiteMinRoll, PianoRollLayout.defaultBandHeight, 400
+        ]
+        for expanded in [false, true] {
+            let floor = expanded ? workspaceMinExpanded : workspaceMinCollapsed
+            for avail in validHeights where avail + 1e-9 >= floor {
+                for prefA in prefsArr {
+                    for prefR in prefsRoll {
+                        let result = PianoRollLayout.fitBandHeights(
+                            availableHeight: avail,
+                            rulerHeight: rulerH,
+                            dividerHeight: dividerH,
+                            rollExpanded: expanded,
+                            preferredArrangement: prefA,
+                            preferredRoll: prefR,
+                            minArrangement: callSiteMinArr,
+                            minRoll: callSiteMinRoll
+                        )
+                        if !result.arrangement.isFinite || result.arrangement.isNaN
+                            || !result.roll.isFinite || result.roll.isNaN {
+                            fitFails += 1
+                            fitFirst = fitFirst ?? "NaN/inf avail=\(avail) exp=\(expanded) \(result)"
+                            continue
+                        }
+                        if result.arrangement < 0 || result.roll < 0 {
+                            fitFails += 1
+                            fitFirst = fitFirst ?? "negative size avail=\(avail) exp=\(expanded) \(result)"
+                            continue
+                        }
+                        if !expanded && result.roll != 0 {
+                            fitFails += 1
+                            fitFirst = fitFirst ?? "collapsed roll != 0 (\(result.roll))"
+                            continue
+                        }
+                        let chrome = expanded ? rulerH + dividerH : rulerH
+                        let budget = max(0, avail - chrome)
+                        let stack = result.arrangement + result.roll
+                        if stack > budget + 1e-6 {
+                            fitFails += 1
+                            fitFirst = fitFirst ?? "stack \(stack) > budget \(budget) avail=\(avail) exp=\(expanded)"
+                            continue
+                        }
+                        // Row count agrees with fitted roll height (expanded only).
+                        if expanded && result.roll > 0 {
+                            let pane = max(0, result.roll - PianoRollLayout.snapToolbarHeight)
+                            let drawn = PianoRollLayout.drawnRowCount(
+                                paneHeight: pane, rowHeight: PianoRollLayout.rowHeight)
+                            let range = PianoRollLayout.visiblePitchRange(
+                                focusPitch: 60, paneHeight: pane, rowHeight: PianoRollLayout.rowHeight)
+                            let count = range.upperBound - range.lowerBound + 1
+                            if drawn < 1 || count != min(drawn, 128) {
+                                fitFails += 1
+                                fitFirst = fitFirst ?? "row count \(count) != drawn \(drawn) avail=\(avail) roll=\(result.roll)"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        tk.expect(fitFails == 0, "fitBandHeights valid-domain sweep clean",
+                  fitFirst ?? "ok")
+
+        // drawnRowCount + visiblePitchRange: first-failure sweep over degenerates.
+        var pitchFails = 0
+        var pitchFirst: String?
+        let panes: [CGFloat] = [
+            0, 1, -1, -50, 0.25, 0.5,
+            PianoRollLayout.rowHeight,
+            PianoRollLayout.rowHeight * 0.5,
+            PianoRollLayout.rowHeight * 24,
+            PianoRollLayout.rowHeight * 200,
+            1e6, -1e6
+        ]
+        let rowHs: [CGFloat] = [
+            0, 1, -1, -10, 0.01,
+            PianoRollLayout.minRowHeight, PianoRollLayout.rowHeight,
+            PianoRollLayout.maxRowHeight, 100, 1e6
+        ]
+        let focuses = [-100, -1, 0, 1, 60, 127, 200, Int.min / 4, Int.max / 4]
+        for pane in panes {
+            for rh in rowHs {
+                let drawn = PianoRollLayout.drawnRowCount(paneHeight: pane, rowHeight: rh)
+                if drawn < 1 {
+                    pitchFails += 1
+                    pitchFirst = pitchFirst ?? "drawnRowCount \(drawn) < 1 pane=\(pane) rh=\(rh)"
+                    continue
+                }
+                for focus in focuses {
+                    let range = PianoRollLayout.visiblePitchRange(
+                        focusPitch: focus, paneHeight: pane, rowHeight: rh)
+                    if range.lowerBound < 0 || range.upperBound > 127 || range.lowerBound > range.upperBound {
+                        pitchFails += 1
+                        pitchFirst = pitchFirst ?? "bad range \(range) focus=\(focus) pane=\(pane) rh=\(rh)"
+                        continue
+                    }
+                    let count = range.upperBound - range.lowerBound + 1
+                    let expected = min(drawn, 128)
+                    if count != expected {
+                        pitchFails += 1
+                        pitchFirst = pitchFirst ?? "row count \(count) != \(expected) (drawn \(drawn)) focus=\(focus) pane=\(pane) rh=\(rh)"
+                    }
+                }
+            }
+        }
+        tk.expect(pitchFails == 0, "visiblePitchRange/drawnRowCount degenerate sweep clean",
+                  pitchFirst ?? "ok")
+
+        // resizeHandleWidth + snap: degenerate note widths / grids.
+        var handleFails = 0
+        var handleFirst: String?
+        for w in [CGFloat(-100), -1, 0, 0.5, 1, 10, 1e6, CGFloat.greatestFiniteMagnitude / 8] {
+            let h = PianoRollLayout.resizeHandleWidth(noteWidth: w)
+            if !h.isFinite || h.isNaN || h < 0 {
+                handleFails += 1
+                handleFirst = handleFirst ?? "handle bad at \(w): \(h)"
+            } else if w > 0 && h > w + 1e-9 {
+                handleFails += 1
+                handleFirst = handleFirst ?? "handle \(h) > note \(w)"
+            } else if w <= 0 && h != 0 {
+                handleFails += 1
+                handleFirst = handleFirst ?? "handle \(h) for non-positive \(w)"
+            }
+        }
+        for grid in [-1.0, 0.0, 0.0625, 1.0, 1e6] {
+            for raw in [-5.0, 0.0, 0.3, 1.37, 1e5] {
+                let s = PianoRollLayout.snap(raw, to: grid)
+                if !s.isFinite || s.isNaN {
+                    handleFails += 1
+                    handleFirst = handleFirst ?? "snap NaN raw \(raw) grid \(grid)"
+                }
+            }
+        }
+        tk.expect(handleFails == 0, "handle/snap degenerate sweep clean",
+                  handleFirst ?? "ok")
+
+        // Seeded cloud over fitBandHeights (valid call-site domain) + visiblePitchRange.
+        var rng = SeededRNG(seed: 0xAC19_BEEF)
+        var layoutFails = 0
+        var layoutFirst: String?
+        for trial in 0..<80 {
+            let expanded = rng.nextBool()
+            let floor = expanded ? workspaceMinExpanded : workspaceMinCollapsed
+            let avail = CGFloat(rng.nextDouble(in: Double(floor)...2_000))
+            let minA = CGFloat(rng.nextDouble(in: Double(callSiteMinArr)...Double(callSiteMinArr + 80)))
+            let minR = CGFloat(rng.nextDouble(in: Double(callSiteMinRoll)...Double(callSiteMinRoll + 80)))
+            let prefA = CGFloat(rng.nextDouble(in: Double(minA)...800))
+            let prefR = CGFloat(rng.nextDouble(in: Double(minR)...800))
+            let fit = PianoRollLayout.fitBandHeights(
+                availableHeight: avail,
+                rulerHeight: rulerH,
+                dividerHeight: dividerH,
+                rollExpanded: expanded,
+                preferredArrangement: prefA,
+                preferredRoll: prefR,
+                minArrangement: minA,
+                minRoll: minR
+            )
+            if !fit.arrangement.isFinite || fit.arrangement.isNaN || fit.arrangement < 0
+                || !fit.roll.isFinite || fit.roll.isNaN || fit.roll < 0 {
+                layoutFails += 1
+                layoutFirst = layoutFirst ?? "trial \(trial): bad fit \(fit)"
+                continue
+            }
+            let chrome = expanded ? rulerH + dividerH : rulerH
+            let budget = max(0, avail - chrome)
+            if fit.arrangement + fit.roll > budget + 1e-4 {
+                layoutFails += 1
+                layoutFirst = layoutFirst ?? "trial \(trial): stack \(fit.arrangement + fit.roll) > budget \(budget)"
+                continue
+            }
+            // Row count vs height on the fitted roll pane (and positive panes).
+            let pane = expanded
+                ? max(0, fit.roll - PianoRollLayout.snapToolbarHeight)
+                : CGFloat(rng.nextDouble(in: Double(PianoRollLayout.rowHeight)...4_000))
+            let rh = PianoRollLayout.rowHeight
+            let focus = rng.nextInt(in: 0...127)
+            let drawn = PianoRollLayout.drawnRowCount(paneHeight: pane, rowHeight: rh)
+            let range = PianoRollLayout.visiblePitchRange(
+                focusPitch: focus, paneHeight: pane, rowHeight: rh)
+            let count = range.upperBound - range.lowerBound + 1
+            if drawn < 1 || count != min(drawn, 128)
+                || range.lowerBound < 0 || range.upperBound > 127
+                || range.lowerBound > range.upperBound {
+                layoutFails += 1
+                layoutFirst = layoutFirst ?? "trial \(trial): drawn \(drawn) range \(range) count \(count)"
+            }
+        }
+        tk.expect(layoutFails == 0, "AC19 layout seeded cloud clean",
+                  layoutFirst ?? "80 trials ok")
+    }
+
+}
+
+/// Plan every MIDI clip the way `Transport.play` does for one shot from `playFromBeat`.
+@MainActor
+private func acPlanArrangementMIDI(
+    project: Project,
+    playFromBeat: Double,
+    secondsPerBeat: Double
+) -> [PlannedMIDINote] {
+    var out: [PlannedMIDINote] = []
+    for track in project.tracks {
+        for clip in track.clips where clip.kind == .midi {
+            out += Transport.planMIDINotes(
+                notes: clip.midiNotes ?? [],
+                clipStartBeat: clip.startBeat,
+                clipLengthBeats: clip.lengthBeats,
+                playFromBeat: playFromBeat,
+                secondsPerBeat: secondsPerBeat
+            )
+        }
+    }
+    return out
+}
+
+/// Issues if planned MIDI events have non-finite times or off before on.
+/// Loop bounds are not checked: the plan may extend past a loop end; wrap is stop+reschedule.
+private func acPlanWellFormedIssues(_ planned: [PlannedMIDINote]) -> [String] {
+    var issues: [String] = []
+    for (i, ev) in planned.enumerated() {
+        if !ev.onSeconds.isFinite || !ev.offSeconds.isFinite {
+            issues.append("ev\(i) non-finite times")
+            continue
+        }
+        if ev.offSeconds + 1e-12 < ev.onSeconds {
+            issues.append("ev\(i) off < on")
+        }
+    }
+    return issues
 }
 
 /// Random project with positive clip lengths, non-negative starts, and notes that start

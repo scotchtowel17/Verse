@@ -74,6 +74,11 @@ public final class Transport {
     /// - A note starting at or after `clipLengthBeats` is dropped.
     /// - A note that crosses the clip end is truncated so note-off fires at the clip end.
     /// - A note whose onset is before the playhead (`onSeconds < 0`) is dropped (existing rule).
+    ///
+    /// Loop regions are not applied here. The plan may contain events past a loop end; that is
+    /// expected. The loop boundary is enforced by `play` calling `stop()` (cancel every pending
+    /// MIDI work item and `allNotesOff`) then rescheduling from `loop.lowerBound` when the wrap
+    /// timer fires. Do not "fix" this by clipping the plan to the loop.
     public static func planMIDINotes(
         notes: [Note],
         clipStartBeat: Double,
@@ -235,6 +240,12 @@ public final class Transport {
         if metronomeEnabled { metronome.start(bpm: bpm, lead: lead) }
 
         if let loop {
+            // Loop boundary is stop + reschedule, not plan clipping. planMIDINotes clips to the
+            // clip only; events past loop.upperBound may already be scheduled. At wrap this
+            // timer calls play(from: loop.lowerBound), which begins with stop() (cancel MIDI work
+            // and allNotesOff), so those post-loop events never sound. A plan that contains
+            // events past the loop end is therefore expected and must not be "fixed" by
+            // clipping the plan to the loop.
             let loopLen = max(0.1, (loop.upperBound - loop.lowerBound) * spb)
             loopTimer = Timer.scheduledTimer(withTimeInterval: lead + loopLen, repeats: false) { [weak self] _ in
                 MainActor.assumeIsolated { self?.play(project: project, mediaDir: mediaDir,
